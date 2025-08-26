@@ -64,11 +64,19 @@ function ensureSchema(PDO $pdo): void {
             jam_pulang VARCHAR(20) NULL,
             jam_pulang_iso DATETIME NULL,
             ekspresi_pulang VARCHAR(50) NULL,
+            status ENUM('ontime','terlambat') DEFAULT 'ontime',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             INDEX(user_id),
             CONSTRAINT fk_att_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
     );
+    
+    // Add status column if it doesn't exist (for existing databases)
+    try {
+        $pdo->exec("ALTER TABLE attendance ADD COLUMN status ENUM('ontime','terlambat') DEFAULT 'ontime' AFTER ekspresi_pulang");
+    } catch (PDOException $e) {
+        // Column already exists, ignore error
+    }
 }
 
 function seedAdmin(PDO $pdo, string $email, string $password): void {
@@ -246,22 +254,23 @@ if (isset($_GET['ajax'])) {
         $stmt->execute([':nim' => $nim]);
         $u = $stmt->fetch();
         if (!$u) jsonResponse(['ok' => false, 'message' => 'NIM tidak ditemukan'], 404);
-
+    
         $now = new DateTime('now', new DateTimeZone('Asia/Jakarta'));
         $jamSekarang = $now->format('H:i:s');
         $iso = $now->format('Y-m-d H:i:s');
         $today = $now->format('Y-m-d');
         $currentHour = (int)$now->format('H');
+        $currentMinute = (int)$now->format('i');
         $todayStart = $today . ' 00:00:00';
         $todayEnd   = $today . ' 23:59:59';
-
+    
         if ($mode === 'masuk') {
-            // Check if within check-in time window (6-9 AM)
-            if ($currentHour < 6 || $currentHour >= 11) {
-                $statusText = "Presensi masuk hanya tersedia dari jam 06:00 sampai 11:00 pagi.";
+            // Check if within check-in time window (6 AM - 4 PM)
+            if ($currentHour < 6 || $currentHour >= 16) {
+                $statusText = "Presensi masuk hanya tersedia dari jam 06:00 sampai 16:00.";
                 jsonResponse(['ok' => false, 'message' => $statusText, 'statusClass' => 'bg-red-100 text-red-700'], 400);
             }
-
+    
             // Check if already checked in today (any record for today, regardless of check-out status)
             $todayCheck = $pdo->prepare("
                 SELECT * FROM attendance 
@@ -278,10 +287,41 @@ if (isset($_GET['ajax'])) {
             $todayRow = $todayCheck->fetch();
             
             if (!$todayRow) {
-                $ins = $pdo->prepare("INSERT INTO attendance (user_id, jam_masuk, jam_masuk_iso, ekspresi_masuk) VALUES (:uid, :jam, :iso, :exp)");
-                $ins->execute([':uid' => $u['id'], ':jam' => $jamSekarang, ':iso' => $iso, ':exp' => $ekspresi]);
-                $statusText = "Selamat datang, {$u['nama']}! Anda terlihat {$ekspresi}. Jam masuk tercatat pukul {$jamSekarang}.";
-                jsonResponse(['ok' => true, 'message' => $statusText, 'nama' => $u['nama'], 'jam' => $jamSekarang, 'statusClass' => 'bg-green-100 text-green-700']);
+                // Calculate if late (after 8 AM)
+                $isLate = false;
+                $lateMessage = '';
+                $status = 'ontime';
+                
+                if ($currentHour > 8 || ($currentHour === 8 && $currentMinute > 0)) {
+                    $isLate = true;
+                    $status = 'terlambat';
+                    
+                    // Calculate delay time
+                    $deadline = new DateTime($today . ' 08:00:00', new DateTimeZone('Asia/Jakarta'));
+                    $delay = $now->getTimestamp() - $deadline->getTimestamp();
+                    
+                    if ($delay >= 3600) { // More than 1 hour
+                        $hours = floor($delay / 3600);
+                        $minutes = floor(($delay % 3600) / 60);
+                        $lateMessage = " (Telat {$hours} jam {$minutes} menit)";
+                    } elseif ($delay >= 60) { // More than 1 minute
+                        $minutes = floor($delay / 60);
+                        $lateMessage = " (Telat {$minutes} menit)";
+                    } else {
+                        $lateMessage = " (Telat {$delay} detik)";
+                    }
+                }
+                
+                $ins = $pdo->prepare("INSERT INTO attendance (user_id, jam_masuk, jam_masuk_iso, ekspresi_masuk, status) VALUES (:uid, :jam, :iso, :exp, :status)");
+                $ins->execute([':uid' => $u['id'], ':jam' => $jamSekarang, ':iso' => $iso, ':exp' => $ekspresi, ':status' => $status]);
+                
+                if ($isLate) {
+                    $statusText = "Selamat datang, {$u['nama']}! Anda terlihat {$ekspresi}. Jam masuk tercatat pukul {$jamSekarang}. Anda telat masuk{$lateMessage}";
+                    jsonResponse(['ok' => true, 'message' => $statusText, 'nama' => $u['nama'], 'jam' => $jamSekarang, 'statusClass' => 'bg-yellow-100 text-yellow-700']);
+                } else {
+                    $statusText = "Selamat datang, {$u['nama']}! Anda terlihat {$ekspresi}. Jam masuk tercatat pukul {$jamSekarang}. On time!";
+                    jsonResponse(['ok' => true, 'message' => $statusText, 'nama' => $u['nama'], 'jam' => $jamSekarang, 'statusClass' => 'bg-green-100 text-green-700']);
+                }
             } else {
                 $masukTime = new DateTime($todayRow['jam_masuk_iso']);
                 $statusText = "Anda sudah presensi masuk pada " . $masukTime->format('d/m/Y H:i:s') . " dan belum pulang.";
@@ -293,7 +333,7 @@ if (isset($_GET['ajax'])) {
                 $statusText = "Hei Anda dilarang Kabur, ini masih jam Kerja.. Wardani Mengawasi Anda";
                 jsonResponse(['ok' => false, 'message' => $statusText, 'statusClass' => 'bg-red-100 text-red-700'], 400);
             }
-
+    
             // Check if checked in today and not yet checked out
             $todayCheck = $pdo->prepare("SELECT * FROM attendance WHERE user_id=:uid AND DATE(jam_masuk_iso)=:today AND jam_pulang_iso IS NULL ORDER BY jam_masuk_iso DESC LIMIT 1");
             $todayCheck->execute([':uid' => $u['id'], ':today' => $today]);
@@ -533,6 +573,7 @@ exit;
                                 <th class="py-2 px-4">Nama</th>
                                 <th class="py-2 px-4">Jam Masuk</th>
                                 <th class="py-2 px-4">Ekspresi Masuk</th>
+                                <th class="py-2 px-4">Status</th>
                                 <th class="py-2 px-4">Jam Pulang</th>
                                 <th class="py-2 px-4">Ekspresi Pulang</th>
                                 <th class="py-2 px-4">Aksi</th>
@@ -1197,10 +1238,12 @@ async function renderLaporan(){
         return (nameMatch||nimMatch) && dateMatch;
     }).sort((a,b)=> new Date(b.jam_masuk_iso||0) - new Date(a.jam_masuk_iso||0));
     const body = qs('#table-laporan-body'); if(!body) return; body.innerHTML='';
-    if(filtered.length===0){ body.innerHTML = `<tr><td colspan="8" class="text-center py-4">Tidak ada data kehadiran.</td></tr>`; return; }
+    if(filtered.length===0){ body.innerHTML = `<tr><td colspan="9" class="text-center py-4">Tidak ada data kehadiran.</td></tr>`; return; }
     filtered.forEach(att=>{
         const d = new Date(att.jam_masuk_iso);
         const tanggal = isNaN(d.getTime()) ? '-' : d.toLocaleDateString('id-ID', { year:'numeric', month:'long', day:'numeric'});
+        const statusClass = att.status === 'terlambat' ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700';
+        const statusText = att.status === 'terlambat' ? 'Terlambat' : 'On Time';
         const tr = document.createElement('tr'); tr.className='border-b hover:bg-gray-50';
         tr.innerHTML = `
             <td class="py-2 px-4">${tanggal}</td>
@@ -1208,6 +1251,7 @@ async function renderLaporan(){
             <td class="py-2 px-4">${att.nama||''}</td>
             <td class="py-2 px-4">${att.jam_masuk||''}</td>
             <td class="py-2 px-4">${att.ekspresi_masuk||'-'}</td>
+            <td class="py-2 px-4"><span class="px-2 py-1 rounded-full text-xs font-medium ${statusClass}">${statusText}</span></td>
             <td class="py-2 px-4">${att.jam_pulang||'Belum Pulang'}</td>
             <td class="py-2 px-4">${att.ekspresi_pulang||'-'}</td>
             <td class="py-2 px-4"><button class="btn-delete-laporan bg-red-500 hover:bg-red-600 text-white font-bold py-1 px-2 rounded" data-id="${att.id}">Hapus</button></td>`;
