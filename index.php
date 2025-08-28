@@ -65,6 +65,8 @@ function ensureSchema(PDO $pdo): void {
             jam_pulang_iso DATETIME NULL,
             ekspresi_pulang VARCHAR(50) NULL,
             status ENUM('ontime','terlambat') DEFAULT 'ontime',
+            ket ENUM('hadir','izin','sakit','alpha') DEFAULT 'hadir',
+            daily_report_id INT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             INDEX(user_id),
             CONSTRAINT fk_att_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -77,6 +79,46 @@ function ensureSchema(PDO $pdo): void {
     } catch (PDOException $e) {
         // Column already exists, ignore error
     }
+    // Add ket column
+    try { $pdo->exec("ALTER TABLE attendance ADD COLUMN ket ENUM('hadir','izin','sakit','alpha') DEFAULT 'hadir' AFTER status"); } catch (PDOException $e) {}
+    // Add daily_report_id column
+    try { $pdo->exec("ALTER TABLE attendance ADD COLUMN daily_report_id INT NULL AFTER ket"); } catch (PDOException $e) {}
+    // Add wfh to ket column enum
+    try { $pdo->exec("ALTER TABLE attendance MODIFY ket ENUM('hadir', 'izin', 'sakit', 'alpha', 'wfh') DEFAULT 'hadir'"); } catch (PDOException $e) {}
+
+    // Daily reports table
+    $pdo->exec(
+        "CREATE TABLE IF NOT EXISTS daily_reports (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id INT NOT NULL,
+            report_date DATE NOT NULL,
+            content TEXT NULL,
+            status ENUM('pending','approved','disapproved') DEFAULT 'pending',
+            evaluation TEXT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP NULL DEFAULT NULL,
+            UNIQUE KEY uniq_user_date (user_id, report_date),
+            CONSTRAINT fk_dr_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+    );
+
+    // Monthly reports table
+    $pdo->exec(
+        "CREATE TABLE IF NOT EXISTS monthly_reports (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id INT NOT NULL,
+            year INT NOT NULL,
+            month INT NOT NULL,
+            summary TEXT NULL,
+            achievements JSON NULL,
+            obstacles JSON NULL,
+            status ENUM('draft','submitted','approved','disapproved') DEFAULT 'draft',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP NULL DEFAULT NULL,
+            UNIQUE KEY uniq_user_month (user_id, year, month),
+            CONSTRAINT fk_mr_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+    );
 }
 
 function seedAdmin(PDO $pdo, string $email, string $password): void {
@@ -116,8 +158,8 @@ function isPegawai(): bool { return isset($_SESSION['user']) && $_SESSION['user'
 if (isset($_GET['ajax'])) {
     $action = $_GET['ajax'];
 
-    // Must be authenticated for all endpoints except auth-related
-    if (!in_array($action, ['login', 'register'], true)) {
+    // Must be authenticated for all endpoints except auth-related and public landing scan
+    if (!in_array($action, ['login', 'register', 'get_members', 'save_attendance'], true)) {
         if (!isset($_SESSION['user'])) jsonResponse(['error' => 'Unauthorized'], 401);
     }
 
@@ -236,10 +278,14 @@ if (isset($_GET['ajax'])) {
     if ($action === 'get_attendance') {
         // Admin: all; Pegawai: only their records
         if (isAdmin()) {
-            $stmt = $pdo->query("SELECT a.*, u.nim, u.nama FROM attendance a JOIN users u ON u.id=a.user_id ORDER BY a.jam_masuk_iso DESC");
+            $stmt = $pdo->query("SELECT a.*, u.nim, u.nama,
+                (SELECT dr.status FROM daily_reports dr WHERE dr.user_id=a.user_id AND dr.report_date=DATE(a.jam_masuk_iso) LIMIT 1) AS daily_report_status
+                FROM attendance a JOIN users u ON u.id=a.user_id ORDER BY a.jam_masuk_iso DESC");
         } else {
             $uid = (int)$_SESSION['user']['id'];
-            $stmt = $pdo->prepare("SELECT a.*, u.nim, u.nama FROM attendance a JOIN users u ON u.id=a.user_id WHERE a.user_id=:uid ORDER BY a.jam_masuk_iso DESC");
+            $stmt = $pdo->prepare("SELECT a.*, u.nim, u.nama,
+                (SELECT dr.status FROM daily_reports dr WHERE dr.user_id=a.user_id AND dr.report_date=DATE(a.jam_masuk_iso) LIMIT 1) AS daily_report_status
+                FROM attendance a JOIN users u ON u.id=a.user_id WHERE a.user_id=:uid ORDER BY a.jam_masuk_iso DESC");
             $stmt->execute([':uid' => $uid]);
         }
         jsonResponse(['ok' => true, 'data' => $stmt->fetchAll()]);
@@ -249,6 +295,10 @@ if (isset($_GET['ajax'])) {
         $nim = trim($_POST['nim'] ?? '');
         $mode = $_POST['mode'] ?? ''; // masuk/pulang
         $ekspresi = $_POST['ekspresi'] ?? null;
+        
+        // Debug logging
+        error_log("Attendance request: NIM=$nim, Mode=$mode, Expression=$ekspresi");
+        
         if (!$nim || !in_array($mode, ['masuk', 'pulang'], true)) jsonResponse(['ok' => false, 'message' => 'Bad request'], 400);
         $stmt = $pdo->prepare("SELECT * FROM users WHERE nim=:nim LIMIT 1");
         $stmt->execute([':nim' => $nim]);
@@ -328,9 +378,9 @@ if (isset($_GET['ajax'])) {
                 jsonResponse(['ok' => false, 'message' => $statusText, 'statusClass' => 'bg-yellow-100 text-yellow-700'], 400);
             }
         } else {
-            // Check if within check-out time window (after 5 PM)
+            // Check if within check-out time window (after 5 PM) - Allow pulang from 5 PM onwards
             if ($currentHour < 17) {
-                $statusText = "Hei Anda dilarang Kabur, ini masih jam Kerja.. Wardani Mengawasi Anda";
+                $statusText = "Hei Jangan kabur, ini masih jam kerja";
                 jsonResponse(['ok' => false, 'message' => $statusText, 'statusClass' => 'bg-red-100 text-red-700'], 400);
             }
     
@@ -347,8 +397,9 @@ if (isset($_GET['ajax'])) {
                 $masuk = new DateTime($todayRow['jam_masuk_iso']);
                 $diffHours = ($now->getTimestamp() - $masuk->getTimestamp()) / 3600;
                 
-                if ($diffHours < 8) {
-                    $statusText = "Hei Anda dilarang Kabur, ini masih jam Kerja.. Wardani Mengawasi Anda";
+                                // Allow pulang after minimum 4 hours of work (more flexible)
+                if ($diffHours < 4) {
+                    $statusText = "Minimal waktu kerja 4 jam untuk presensi pulang. Anda baru bekerja " . round($diffHours, 1) . " jam.";
                     jsonResponse(['ok' => false, 'message' => $statusText, 'statusClass' => 'bg-red-100 text-red-700'], 400);
                 } else {
                     $upd = $pdo->prepare("UPDATE attendance SET jam_pulang=:jam, jam_pulang_iso=:iso, ekspresi_pulang=:exp WHERE id=:id");
@@ -367,6 +418,247 @@ if (isset($_GET['ajax'])) {
         jsonResponse(['ok' => true]);
     }
 
+    // Admin: add izin/sakit record
+    if ($action === 'admin_add_absence' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        if (!isAdmin()) jsonResponse(['error' => 'Forbidden'], 403);
+        $user_id = (int)($_POST['user_id'] ?? 0);
+        $date = $_POST['date'] ?? date('Y-m-d');
+        $type = $_POST['type'] ?? 'izin'; // izin/sakit/wfh
+        $jam_masuk = $_POST['jam_masuk'] ?? null;
+        $jam_pulang = $_POST['jam_pulang'] ?? null;
+
+        if(!$user_id) jsonResponse(['ok'=>false,'message'=>'Pilih pegawai'],400);
+        if(!in_array($type, ['izin','sakit','wfh'], true)) jsonResponse(['ok'=>false,'message'=>'Tipe tidak valid'],400);
+
+        // Logic for setting time based on type
+        $jam_masuk_iso = null;
+        $jam_pulang_iso = null;
+        $status = 'ontime';
+
+        if ($type === 'wfh') {
+            if (!$jam_masuk || !$jam_pulang) {
+                jsonResponse(['ok' => false, 'message' => 'Jam masuk dan pulang wajib diisi untuk WFH'], 400);
+            }
+            $jam_masuk_iso = $date . ' ' . $jam_masuk . ':00';
+            $jam_pulang_iso = $date . ' ' . $jam_pulang . ':00';
+        } else {
+            // For Izin/Sakit, use a default timestamp
+            $jam_masuk_iso = $date . ' 08:00:00';
+        }
+
+        // Avoid duplicates for day
+        $check = $pdo->prepare("SELECT id FROM attendance WHERE user_id=:u AND DATE(jam_masuk_iso)=:d");
+        $check->execute([':u' => $user_id, ':d' => $date]);
+        if($check->fetch()) jsonResponse(['ok' => false, 'message' => 'Data hari tersebut sudah ada'], 400);
+
+        $sql = "INSERT INTO attendance (user_id, jam_masuk, jam_masuk_iso, jam_pulang, jam_pulang_iso, status, ket) VALUES (:u, :jm, :jmiso, :jp, :jpiso, :s, :ket)";
+        $ins = $pdo->prepare($sql);
+        $ins->execute([
+            ':u' => $user_id,
+            ':jm' => $jam_masuk,
+            ':jmiso' => $jam_masuk_iso,
+            ':jp' => $jam_pulang,
+            ':jpiso' => $jam_pulang_iso,
+            ':s' => $status,
+            ':ket' => $type
+        ]);
+        jsonResponse(['ok' => true]);
+    }
+
+    // Admin: update attendance row
+    if ($action === 'admin_update_attendance' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        if (!isAdmin()) jsonResponse(['error' => 'Forbidden'], 403);
+        $id = (int)($_POST['id'] ?? 0);
+        if(!$id) jsonResponse(['ok'=>false,'message'=>'ID tidak valid'],400);
+        $fields = ['jam_masuk','jam_pulang','ekspresi_masuk','ekspresi_pulang','status','ket'];
+        $set=[]; $params=[':id'=>$id];
+        foreach($fields as $f){ if(isset($_POST[$f])){ $set[] = "$f = :$f"; $params[":$f"] = $_POST[$f]!==''? $_POST[$f] : null; } }
+        if(isset($_POST['jam_masuk_iso'])){ $set[]='jam_masuk_iso=:jmiso'; $params[':jmiso']= $_POST['jam_masuk_iso'] ?: null; }
+        if(isset($_POST['jam_pulang_iso'])){ $set[]='jam_pulang_iso=:jpiso'; $params[':jpiso']= $_POST['jam_pulang_iso'] ?: null; }
+        if(!$set) jsonResponse(['ok'=>false,'message'=>'Tidak ada perubahan'],400);
+        $sql="UPDATE attendance SET ".implode(',', $set)." WHERE id=:id";
+        $pdo->prepare($sql)->execute($params);
+        jsonResponse(['ok'=>true]);
+    }
+
+    // Admin: daily report detail and approval
+    if ($action === 'get_daily_report_detail' && $_SERVER['REQUEST_METHOD']==='POST') {
+        if (!isAdmin()) jsonResponse(['error'=>'Forbidden'],403);
+        $uid=(int)($_POST['user_id']??0); $date=$_POST['date']??''; $id=(int)($_POST['id']??0);
+        if($id){ $stmt=$pdo->prepare("SELECT dr.*, u.nama FROM daily_reports dr JOIN users u ON u.id=dr.user_id WHERE dr.id=:id"); $stmt->execute([':id'=>$id]); jsonResponse(['ok'=>true,'data'=>$stmt->fetch()]); }
+        if(!$uid || !$date) jsonResponse(['ok'=>false,'message'=>'Param tidak lengkap'],400);
+        $stmt=$pdo->prepare("SELECT dr.*, u.nama FROM daily_reports dr JOIN users u ON u.id=dr.user_id WHERE dr.user_id=:u AND dr.report_date=:d");
+        $stmt->execute([':u'=>$uid, ':d'=>$date]);
+        jsonResponse(['ok'=>true,'data'=>$stmt->fetch()]);
+    }
+    if ($action === 'admin_set_daily_status' && $_SERVER['REQUEST_METHOD']==='POST') {
+        if (!isAdmin()) jsonResponse(['error'=>'Forbidden'],403);
+        $id=(int)($_POST['id']??0); $status=$_POST['status']??''; $evaluation=$_POST['evaluation']??null;
+        if(!$id || !in_array($status, ['approved','disapproved'], true)) jsonResponse(['ok'=>false,'message'=>'Param tidak valid'],400);
+        $upd=$pdo->prepare("UPDATE daily_reports SET status=:s, evaluation=:e, updated_at=NOW() WHERE id=:id");
+        $upd->execute([':s'=>$status, ':e'=>$evaluation, ':id'=>$id]);
+        jsonResponse(['ok'=>true]);
+    }
+
+    // Admin: monthly reports list and approval
+    if ($action === 'admin_get_monthly_reports') {
+        if (!isAdmin()) jsonResponse(['error'=>'Forbidden'],403);
+        $term = strtolower(trim($_POST['term'] ?? ''));
+        $year = (int)($_POST['year'] ?? 0);
+        $month = (int)($_POST['month'] ?? 0);
+        $sql = "SELECT mr.*, u.nim, u.nama FROM monthly_reports mr JOIN users u ON u.id=mr.user_id WHERE 1=1";
+        $params = [];
+        if($term){ $sql.=" AND (LOWER(u.nama) LIKE :t OR LOWER(u.nim) LIKE :t)"; $params[':t']='%'.$term.'%'; }
+        if($year){ $sql.=" AND mr.year=:y"; $params[':y']=$year; }
+        if($month){ $sql.=" AND mr.month=:m"; $params[':m']=$month; }
+        $sql .= " ORDER BY mr.year DESC, mr.month DESC";
+        $stmt=$pdo->prepare($sql); $stmt->execute($params);
+        jsonResponse(['ok'=>true,'data'=>$stmt->fetchAll()]);
+    }
+    
+    // Admin: get monthly report detail by ID
+    if ($action === 'get_monthly_report_detail' && $_SERVER['REQUEST_METHOD']==='POST') {
+        if (!isAdmin()) jsonResponse(['error'=>'Forbidden'],403);
+        $id = (int)($_POST['id'] ?? 0);
+        if(!$id) jsonResponse(['ok'=>false,'message'=>'ID tidak valid'],400);
+        $stmt = $pdo->prepare("SELECT mr.*, u.nim, u.nama FROM monthly_reports mr JOIN users u ON u.id=mr.user_id WHERE mr.id=:id");
+        $stmt->execute([':id'=>$id]);
+        $data = $stmt->fetch();
+        if(!$data) jsonResponse(['ok'=>false,'message'=>'Laporan tidak ditemukan'],404);
+        jsonResponse(['ok'=>true,'data'=>$data]);
+    }
+    if ($action === 'admin_set_monthly_status' && $_SERVER['REQUEST_METHOD']==='POST') {
+        if (!isAdmin()) jsonResponse(['error'=>'Forbidden'],403);
+        $id=(int)($_POST['id']??0); $status=$_POST['status']??'';
+        if(!$id || !in_array($status, ['approved','disapproved'], true)) jsonResponse(['ok'=>false,'message'=>'Param tidak valid'],400);
+        $pdo->prepare("UPDATE monthly_reports SET status=:s, updated_at=NOW() WHERE id=:id")->execute([':s'=>$status, ':id'=>$id]);
+        jsonResponse(['ok'=>true]);
+    }
+
+    // --- Pegawai Daily Reports API ---
+    if ($action === 'get_user_info') {
+        if (!isset($_SESSION['user'])) jsonResponse(['error'=>'Unauthorized'],401);
+        $uid = (int)$_SESSION['user']['id'];
+        $stmt = $pdo->prepare("SELECT id, nim, nama, prodi, startup FROM users WHERE id=:id");
+        $stmt->execute([':id'=>$uid]);
+        jsonResponse(['ok'=>true,'data'=>$stmt->fetch()]);
+    }
+
+    if ($action === 'get_rekap' && $_SERVER['REQUEST_METHOD']==='POST') {
+        if (!isset($_SESSION['user'])) jsonResponse(['error'=>'Unauthorized'],401);
+        $uid = (int)$_SESSION['user']['id'];
+        $year = (int)($_POST['year'] ?? date('Y'));
+        $month = (int)($_POST['month'] ?? date('n'));
+        $start = sprintf('%04d-%02d-01', $year, $month);
+        $end = date('Y-m-t', strtotime($start));
+
+        // Fetch attendance and reports for month
+        $attStmt = $pdo->prepare("SELECT * FROM attendance WHERE user_id=:uid AND jam_masuk_iso BETWEEN :s AND :e");
+        $attStmt->execute([':uid'=>$uid, ':s'=>$start.' 00:00:00', ':e'=>$end.' 23:59:59']);
+        $attRows = $attStmt->fetchAll();
+        $attByDate = [];
+        foreach($attRows as $r){ $d = substr($r['jam_masuk_iso']??$r['jam_pulang_iso'],0,10); $attByDate[$d] = $r; }
+
+        $drStmt = $pdo->prepare("SELECT * FROM daily_reports WHERE user_id=:uid AND report_date BETWEEN :s AND :e");
+        $drStmt->execute([':uid'=>$uid, ':s'=>$start, ':e'=>$end]);
+        $drByDate = [];
+        foreach($drStmt->fetchAll() as $r){ $drByDate[$r['report_date']]=$r; }
+
+        // Build working days Mon-Fri
+        $out = [];
+        $cur = new DateTime($start);
+        $endDt = new DateTime($end);
+        while($cur <= $endDt){
+            $dow = (int)$cur->format('N'); // 1 Mon .. 7 Sun
+            if($dow>=1 && $dow<=5){
+                $dstr = $cur->format('Y-m-d');
+                $att = $attByDate[$dstr] ?? null;
+                $dr = $drByDate[$dstr] ?? null;
+                $out[] = [
+                    'date'=>$dstr,
+                    'day'=>$cur->format('l'),
+                    'jam_masuk'=>$att['jam_masuk']??null,
+                    'jam_pulang'=>$att['jam_pulang']??null,
+                    'status_presensi'=>$att['status']??null,
+                    'ket'=>$att['ket']??'hadir',
+                    'daily_report'=> $dr ? [ 'id'=>$dr['id'], 'status'=>$dr['status'], 'has_content'=>!!$dr['content'], 'content'=>$dr['content'], 'evaluation'=>$dr['evaluation'] ] : null
+                ];
+            }
+            $cur->modify('+1 day');
+        }
+        jsonResponse(['ok'=>true,'data'=>$out]);
+    }
+
+    if ($action === 'save_daily_report' && $_SERVER['REQUEST_METHOD']==='POST') {
+        if (!isset($_SESSION['user'])) jsonResponse(['error'=>'Unauthorized'],401);
+        $uid = (int)$_SESSION['user']['id'];
+        $date = $_POST['date'] ?? '';
+        $content = $_POST['content'] ?? '';
+        if(!$date) jsonResponse(['ok'=>false,'message'=>'Tanggal diperlukan'],400);
+        // Upsert
+        $stmt = $pdo->prepare("SELECT id, status FROM daily_reports WHERE user_id=:u AND report_date=:d");
+        $stmt->execute([':u'=>$uid, ':d'=>$date]);
+        $row = $stmt->fetch();
+        if($row && $row['status']==='approved') jsonResponse(['ok'=>false,'message'=>'Sudah di-approve, tidak bisa diedit'],400);
+        if($row){
+            $upd=$pdo->prepare("UPDATE daily_reports SET content=:c, updated_at=NOW() WHERE id=:id");
+            $upd->execute([':c'=>$content, ':id'=>$row['id']]);
+            jsonResponse(['ok'=>true,'id'=>$row['id']]);
+        } else {
+            $ins=$pdo->prepare("INSERT INTO daily_reports (user_id, report_date, content) VALUES (:u,:d,:c)");
+            $ins->execute([':u'=>$uid, ':d'=>$date, ':c'=>$content]);
+            jsonResponse(['ok'=>true,'id'=>$pdo->lastInsertId()]);
+        }
+    }
+
+    // --- Pegawai Monthly Reports API ---
+    if ($action === 'get_monthly_reports') {
+        if (!isset($_SESSION['user'])) jsonResponse(['error'=>'Unauthorized'],401);
+        $uid=(int)$_SESSION['user']['id'];
+        $stmt=$pdo->prepare("SELECT * FROM monthly_reports WHERE user_id=:u ORDER BY year DESC, month DESC");
+        $stmt->execute([':u'=>$uid]);
+        jsonResponse(['ok'=>true,'data'=>$stmt->fetchAll()]);
+    }
+
+    // Fix existing data with year=0 and month=0 (one-time fix)
+    if ($action === 'fix_monthly_reports' && $_SERVER['REQUEST_METHOD']==='POST') {
+        if (!isAdmin()) jsonResponse(['error'=>'Forbidden'],403);
+        $stmt = $pdo->prepare("UPDATE monthly_reports SET year=2025, month=8 WHERE year=0 OR month=0");
+        $stmt->execute();
+        jsonResponse(['ok'=>true,'message'=>'Data berhasil diperbaiki']);
+    }
+
+    if ($action === 'save_monthly_report' && $_SERVER['REQUEST_METHOD']==='POST') {
+        if (!isset($_SESSION['user'])) jsonResponse(['error'=>'Unauthorized'],401);
+        $uid=(int)$_SESSION['user']['id'];
+        $year=(int)($_POST['year']??date('Y'));
+        $month=(int)($_POST['month']??date('n'));
+        $summary=$_POST['summary']??'';
+        $achievements=$_POST['achievements']??'[]';
+        $obstacles=$_POST['obstacles']??'[]';
+        $submit=(bool)($_POST['submit']??false);
+        
+        // Validate year and month
+        if($year <= 0 || $month <= 0 || $month > 12) {
+            jsonResponse(['ok'=>false,'message'=>'Tahun atau bulan tidak valid'],400);
+        }
+        
+        $stmt=$pdo->prepare("SELECT * FROM monthly_reports WHERE user_id=:u AND year=:y AND month=:m");
+        $stmt->execute([':u'=>$uid, ':y'=>$year, ':m'=>$month]);
+        $row=$stmt->fetch();
+        if($row && in_array($row['status'], ['approved','disapproved'], true)) jsonResponse(['ok'=>false,'message'=>'Sudah final, tidak bisa diedit'],400);
+        $newStatus=$submit?'submitted':'draft';
+        if($row){
+            $upd=$pdo->prepare("UPDATE monthly_reports SET summary=:s, achievements=:a, obstacles=:o, status=:st, updated_at=NOW() WHERE id=:id");
+            $upd->execute([':s'=>$summary, ':a'=>$achievements, ':o'=>$obstacles, ':st'=>$newStatus, ':id'=>$row['id']]);
+            jsonResponse(['ok'=>true,'id'=>$row['id']]);
+        }else{
+            $ins=$pdo->prepare("INSERT INTO monthly_reports (user_id, year, month, summary, achievements, obstacles, status) VALUES (:u,:y,:m,:s,:a,:o,:st)");
+            $ins->execute([':u'=>$uid, ':y'=>$year, ':m'=>$month, ':s'=>$summary, ':a'=>$achievements, ':o'=>$obstacles, ':st'=>$newStatus]);
+            jsonResponse(['ok'=>true,'id'=>$pdo->lastInsertId()]);
+        }
+    }
+
     jsonResponse(['error' => 'Unknown endpoint'], 404);
 }
 
@@ -374,8 +666,8 @@ if (isset($_GET['ajax'])) {
 $page = $_GET['page'] ?? '';
 if ($page === 'logout') {
     session_destroy();
-    header('Location: ?page=login');
-exit; 
+    header('Location: ?page=landing');
+    exit;
 }
 
 ?>
@@ -388,6 +680,8 @@ exit;
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
     <link rel="stylesheet" href="https://rsms.me/inter/inter.css">
+    <link rel='stylesheet' href='https://cdn-uicons.flaticon.com/3.0.0/uicons-solid-rounded/css/uicons-solid-rounded.css'>
+    <link rel='stylesheet' href='https://cdn-uicons.flaticon.com/3.0.0/uicons-solid-straight/css/uicons-solid-straight.css'>
     <style>
         body { font-family: 'Inter', sans-serif; }
         .loader {
@@ -398,13 +692,66 @@ exit;
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
         #video-container { position: relative; width: 100%; max-width: 720px; margin: auto; }
         #video, #canvas { position: absolute; top: 0; left: 0; width: 100%; height: auto; }
+        /* Bordered tables */
+        table.bordered { border-collapse: collapse; width: 100%; table-layout: auto; }
+        table.bordered th, table.bordered td { border: 1px solid #e5e7eb; padding: 0.5rem; text-align: center; vertical-align: middle; }
+        /* Status badges */
+        .badge { padding: 0.125rem 0.5rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; display: inline-block; }
+        .badge-gray { background: #f3f4f6; color: #374151; }
+        .badge-green { background: #d1fae5; color: #065f46; }
+        .badge-red { background: #fee2e2; color: #991b1b; }
+        .badge-blue { background: #dbeafe; color: #1e40af; }
+        .btn-pill { border-radius: 9999px; padding: 0.25rem 0.75rem; font-weight: 600; }
+        .z-60 { z-index: 60; }
+        .z-70 { z-index: 70; }
+        .max-w-7xl { max-width: 80rem; }
     </style>
 </head>
 <body class="bg-gray-100 text-gray-800">
 
-<?php if (!isset($_SESSION['user']) && (!in_array($page, ['register'], true))) { $page = 'login'; } ?>
+<?php 
+// Public landing page: presensi can be accessed without login
+if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'], true))) { 
+    $page = 'landing'; 
+}
+?>
 
-<?php if ($page === 'login'): ?>
+<?php if ($page === 'landing'): ?>
+    <header class="bg-white shadow-md">
+        <div class="container mx-auto px-4 py-4 flex items-center justify-between">
+            <h1 class="text-2xl font-bold text-gray-700">Sistem Presensi Berbasis Wajah</h1>
+            <div class="relative">
+                <button id="btn-profile" class="flex items-center gap-3 px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg">
+                    <span class="text-sm text-gray-700">Akun</span>
+                    <img src="https://ui-avatars.com/api/?background=6366f1&color=fff&name=A" class="w-8 h-8 rounded-full" alt="profile">
+                </button>
+                <div id="dropdown-profile" class="absolute right-0 mt-2 bg-white rounded-lg shadow-lg border hidden min-w-max">
+                    <a href="?page=login" class="block px-4 py-2 text-sm text-indigo-600 hover:bg-indigo-50 whitespace-nowrap">Login</a>
+                    <a href="?page=register" class="block px-4 py-2 text-sm text-emerald-600 hover:bg-emerald-50 whitespace-nowrap">Register</a>
+                </div>
+            </div>
+        </div>
+    </header>
+    <main class="mx-auto p-4">
+        <div id="page-presensi" class="">
+            <div class="bg-white p-6 rounded-lg shadow-lg text-center">
+                <h2 class="text-xl font-bold mb-4">Pilih Jenis Presensi</h2>
+                <div id="scan-buttons-container" class="flex justify-center gap-4">
+                    <button id="btn-scan-masuk" class="bg-blue-500 hover:bg-blue-600 text-white btn-pill transition duration-300 text-lg">Presensi Masuk</button>
+                    <button id="btn-scan-pulang" class="bg-red-500 hover:bg-red-600 text-white btn-pill transition duration-300 text-lg">Presensi Pulang</button>
+                </div>
+                <div id="video-container" class="bg-gray-900 rounded-lg overflow-hidden aspect-video mt-4 hidden">
+                    <video id="video" autoplay muted playsinline></video>
+                    <canvas id="canvas"></canvas>
+                    <div class="absolute top-3 left-3">
+                        <button id="btn-back-scan" class="bg-white/90 hover:bg-white text-gray-800 font-semibold py-1.5 px-3 rounded-lg hidden">Kembali</button>
+                    </div>
+                </div>
+                <div id="presensi-status" class="mt-4 text-center font-medium text-lg p-3 rounded-md hidden"></div>
+            </div>
+        </div>
+    </main>
+<?php elseif ($page === 'login'): ?>
     <div class="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-sky-50 to-indigo-50">
         <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-8">
             <h1 class="text-2xl font-bold text-gray-800 mb-2">Masuk</h1>
@@ -422,6 +769,7 @@ exit;
             </form>
             <p class="text-center text-sm text-gray-600 mt-4">Belum punya akun? <a class="text-indigo-600 hover:underline" href="?page=register">Daftar</a></p>
             <div id="login-msg" class="text-center text-sm mt-4"></div>
+            <a href="?page=landing" class="bg-indigo-600 hover:bg-indigo-700 text-white hover:text-gray-800 rounded-full p-2 mb-4 pr-3"><i class="fi fi-sr-angle-left"></i></a>
         </div>
     </div>
 <?php elseif ($page === 'register'): ?>
@@ -477,6 +825,7 @@ exit;
             </form>
             <p class="text-center text-sm text-gray-600 mt-4">Sudah punya akun? <a class="text-emerald-600 hover:underline" href="?page=login">Login</a></p>
             <div id="register-msg" class="text-center text-sm mt-4"></div>
+            <a href="?page=landing" class="bg-gray-500 hover:bg-gray-600 text-white hover:text-gray-800 rounded-full p-2 mb-4 pr-3 "><i class="fi fi-sr-angle-left"></i></a>
         </div>
     </div>
 <?php else: ?>
@@ -485,12 +834,17 @@ exit;
             <h1 class="text-2xl font-bold text-gray-700">Sistem Presensi Berbasis Wajah</h1>
             <div class="relative">
                 <button id="btn-profile" class="flex items-center gap-3 px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg">
-                    <span class="text-sm text-gray-700"><?php echo htmlspecialchars($_SESSION['user']['nama'] ?? ''); ?></span>
-                    <img src="https://ui-avatars.com/api/?background=6366f1&color=fff&name=<?php echo urlencode($_SESSION['user']['nama'] ?? 'U'); ?>" class="w-8 h-8 rounded-full" alt="profile">
+                    <span class="text-sm text-gray-700"><?php echo htmlspecialchars($_SESSION['user']['nama'] ?? 'Akun'); ?></span>
+                    <img src="https://ui-avatars.com/api/?background=6366f1&color=fff&name=<?php echo urlencode($_SESSION['user']['nama'] ?? 'A'); ?>" class="w-8 h-8 rounded-full" alt="profile">
                 </button>
                 <div id="dropdown-profile" class="absolute right-0 mt-2 bg-white rounded-lg shadow-lg border hidden min-w-max">
-                    <div class="px-4 py-2 text-sm text-gray-600 border-b whitespace-nowrap"><?php echo htmlspecialchars($_SESSION['user']['email'] ?? ''); ?></div>
-                    <a href="?page=logout" class="block px-4 py-2 text-sm text-red-600 hover:bg-red-50 whitespace-nowrap">Logout</a>
+                    <?php if(isset($_SESSION['user'])): ?>
+                        <div class="px-4 py-2 text-sm text-gray-600 border-b whitespace-nowrap"><?php echo htmlspecialchars($_SESSION['user']['email'] ?? ''); ?></div>
+                        <a href="?page=logout" class="block px-4 py-2 text-sm text-red-600 hover:bg-red-50 whitespace-nowrap">Logout</a>
+                    <?php else: ?>
+                        <a href="?page=login" class="block px-4 py-2 text-sm text-indigo-600 hover:bg-indigo-50 whitespace-nowrap">Login</a>
+                        <a href="?page=register" class="block px-4 py-2 text-sm text-emerald-600 hover:bg-emerald-50 whitespace-nowrap">Register</a>
+                    <?php endif; ?>
                 </div>
             </div>
         </div>
@@ -500,32 +854,128 @@ exit;
         <div class="container mx-auto px-4">
             <div class="flex items-center justify-center space-x-4">
                 <?php if (!isAdmin()): ?>
-                    <button data-tab="presensi" class="tab-link py-3 px-4 font-semibold hover:bg-indigo-700 focus:outline-none focus:bg-indigo-700 transition duration-300">Input Presensi</button>
+                    <button data-tab="rekap" class="tab-link py-3 px-4 font-semibold hover:bg-indigo-700 focus:outline-none focus:bg-indigo-700 transition duration-300">Rekap Hadir</button>
+                    <button data-tab="laporan-bulanan" class="tab-link py-3 px-4 font-semibold hover:bg-indigo-700 focus:outline-none focus:bg-indigo-700 transition duration-300">Laporan Bulanan</button>
                 <?php endif; ?>
                 <?php if (isAdmin()): ?>
                     <button data-tab="members" class="tab-link py-3 px-4 font-semibold hover:bg-indigo-700 focus:outline-none focus:bg-indigo-700 transition duration-300">Kelola Member</button>
                     <button data-tab="laporan" class="tab-link py-3 px-4 font-semibold hover:bg-indigo-700 focus:outline-none focus:bg-indigo-700 transition duration-300">Data Presensi</button>
+                    <button data-tab="admin-monthly" class="tab-link py-3 px-4 font-semibold hover:bg-indigo-700 focus:outline-none focus:bg-indigo-700 transition duration-300">Laporan Bulanan</button>
                 <?php endif; ?>
             </div>
         </div>
     </nav>
+    
+    <main class="max-w-8xl mx-auto px-4 py-4">
+        <!-- Pegawai: Rekap Hadir -->
+        <div id="page-rekap" class="<?php echo isAdmin() ? 'hidden' : '';?>">
+            <div class="bg-white p-6 rounded-lg shadow-lg">
+                <h2 class="text-xl font-bold mb-4">Rekap Daftar Hadir</h2>
+                <div id="pegawai-info" class="text-sm text-gray-700 mb-4"></div>
+                <div id="rekap-controls" class="flex flex-wrap items-center gap-2 mb-4">
+                    <select id="rekap-month" class="p-2 border rounded-lg"></select>
+                    <select id="rekap-year" class="p-2 border rounded-lg"></select>
+                    <select id="rekap-week" class="p-2 border rounded-lg hidden"></select>
+                    <button id="btn-load-rekap" class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-4 py-2 rounded-lg">Tampilkan</button>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full bg-white bordered">
+                        <thead class="bg-gray-200">
+                            <tr>
+                                <th class="py-2 px-4">Hari</th>
+                                <th class="py-2 px-4">Tanggal</th>
+                                <th class="py-2 px-4">Jam Masuk</th>
+                                <th class="py-2 px-4">Jam Keluar</th>
+                                <th class="py-2 px-4">Laporan Harian</th>
+                                <th class="py-2 px-4">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="table-rekap-body"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
 
-    <main class="container mx-auto p-4">
-        <div id="page-presensi" class="">
-            <div class="bg-white p-6 rounded-lg shadow-lg text-center">
-                <h2 class="text-xl font-bold mb-4">Pilih Jenis Presensi</h2>
-                <div id="scan-buttons-container" class="flex justify-center gap-4">
-                    <button id="btn-scan-masuk" class="bg-blue-500 hover:bg-blue-600 text-white font-bold py-3 px-6 rounded-lg transition duration-300 text-lg">Presensi Masuk</button>
-                    <button id="btn-scan-pulang" class="bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-6 rounded-lg transition duration-300 text-lg">Presensi Pulang</button>
+        <!-- Pegawai: Laporan Bulanan -->
+        <div id="page-laporan-bulanan" class="hidden">
+            <div class="bg-white p-6 rounded-lg shadow-lg">
+                <h2 class="text-xl font-bold mb-4">Laporan Bulanan</h2>
+                <div id="pegawai-info-monthly" class="text-sm text-gray-700 mb-4"></div>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full bg-white bordered">
+                        <thead class="bg-gray-200">
+                            <tr>
+                                <th class="py-2 px-4">Bulan</th>
+                                <th class="py-2 px-4">Laporan</th>
+                                <th class="py-2 px-4">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="table-monthly-body"></tbody>
+                    </table>
                 </div>
-                <div id="video-container" class="bg-gray-900 rounded-lg overflow-hidden aspect-video mt-4 hidden">
-                    <video id="video" autoplay muted playsinline></video>
-                    <canvas id="canvas"></canvas>
-                    <div class="absolute top-3 left-3">
-                        <button id="btn-back-scan" class="bg-white/90 hover:bg-white text-gray-800 font-semibold py-1.5 px-3 rounded-lg hidden">Kembali</button>
+            </div>
+        </div>
+
+        <div id="page-monthly-form" class="hidden">
+            <div class="bg-white p-6 rounded-lg shadow-lg mt-4">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-xl font-bold" id="monthly-form-title">Buat Laporan Bulanan</h2>
+                    <button id="btn-back-to-monthly-list" class="bg-gray-300 hover:bg-gray-400 text-gray-800 font-bold py-2 px-4 rounded-lg">Kembali</button>
+                </div>
+                
+                <div id="pegawai-info-monthly-form" class="text-sm text-gray-700 mb-4 p-4 bg-indigo-50 rounded-lg"></div>
+
+                <form id="form-monthly-report" class="space-y-6">
+                    <input type="hidden" id="monthly-report-year">
+                    <input type="hidden" id="monthly-report-month">
+
+                    <div>
+                        <label class="block text-gray-700 font-semibold mb-2">1. Ringkasan Pekerjaan</label>
+                        <textarea id="monthly-summary" rows="5" class="w-full p-2 border rounded-lg" placeholder="Jelaskan ringkasan pekerjaan Anda selama sebulan..."></textarea>
                     </div>
-                </div>
-                <div id="presensi-status" class="mt-4 text-center font-medium text-lg p-3 rounded-md hidden"></div>
+
+                    <div>
+                        <label class="block text-gray-700 font-semibold mb-2">2. Pencapaian dan Hasil Kerja</label>
+                        <div class="overflow-x-auto">
+                            <table class="min-w-full bg-white bordered">
+                                <thead class="bg-gray-200">
+                                    <tr>
+                                        <th class="py-2 px-4 w-2/5">Pencapaian</th>
+                                        <th class="py-2 px-4 w-2/5">Detail</th>
+                                        <th class="py-2 px-4">Aksi</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="table-achievements-body">
+                                    </tbody>
+                            </table>
+                        </div>
+                        <button type="button" id="btn-add-achievement" class="mt-2 bg-blue-500 hover:bg-blue-600 text-white font-bold py-1 px-3 rounded-lg text-sm">Tambah Pencapaian</button>
+                    </div>
+
+                    <div>
+                        <label class="block text-gray-700 font-semibold mb-2">3. Kendala</label>
+                        <div class="overflow-x-auto">
+                            <table class="min-w-full bg-white bordered">
+                                <thead class="bg-gray-200">
+                                    <tr>
+                                        <th class="py-2 px-4 w-1/3">Kendala</th>
+                                        <th class="py-2 px-4 w-1/3">Solusi</th>
+                                        <th class="py-2 px-4 w-1/3">Catatan</th>
+                                        <th class="py-2 px-4">Aksi</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="table-obstacles-body">
+                                    </tbody>
+                            </table>
+                        </div>
+                        <button type="button" id="btn-add-obstacle" class="mt-2 bg-blue-500 hover:bg-blue-600 text-white font-bold py-1 px-3 rounded-lg text-sm">Tambah Kendala</button>
+                    </div>
+
+                    <div class="flex justify-end space-x-4 mt-6">
+                        <button type="button" id="btn-save-draft" class="bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded-lg">Simpan sebagai Draft</button>
+                        <button type="submit" class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-lg">Submit Laporan</button>
+                    </div>
+                </form>
             </div>
         </div>
 
@@ -538,7 +988,7 @@ exit;
                 </div>
                 <input type="text" id="search-member" placeholder="Cari member berdasarkan nama atau NIM..." class="w-full p-2 border rounded-lg mb-4">
                 <div class="overflow-x-auto">
-                    <table class="min-w-full bg-white">
+                    <table class="min-w-full bg-white bordered">
                         <thead class="bg-gray-200">
                             <tr>
                                 <th class="py-2 px-4">Foto</th>
@@ -555,35 +1005,88 @@ exit;
             </div>
         </div>
 
-        <div id="page-laporan" class="hidden">
+            <div id="page-laporan" class="hidden">
+                <div class="bg-white p-6 rounded-lg shadow-lg">
+                    <h2 class="text-xl font-bold mb-4">Laporan Kehadiran</h2>
+                    <div class="grid md:grid-cols-4 gap-4 mb-4">
+                        <label class="text-sm text-gray-600 flex flex-col">
+                            <span class="mb-1">Cari (Nama/NIM)</span>
+                            <input type="text" id="search-laporan" placeholder="Cari..." class="p-2 border rounded-lg">
+                        </label>
+                        <label class="text-sm text-gray-600 flex flex-col">
+                            <span class="mb-1">Tanggal Mulai</span>
+                            <input type="date" id="filter-tanggal-mulai" class="p-2 border rounded-lg">
+                        </label>
+                        <label class="text-sm text-gray-600 flex flex-col">
+                            <span class="mb-1">Tanggal Selesai</span>
+                            <input type="date" id="filter-tanggal-selesai" class="p-2 border rounded-lg">
+                        </label>
+                        <div class="flex items-end"><button id="btn-show-all" class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded-lg transition">Reset</button></div>
+                    </div>
+                    <div class="mb-4">
+                        <button id="btn-open-absence" class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-lg">Input Keterangan Manual</button>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full bg-white bordered">
+                            <thead class="bg-gray-200">
+                                <tr>
+                                    <th class="py-2 px-4">Tanggal</th>
+                                    <th class="py-2 px-4">NIM</th>
+                                    <th class="py-2 px-4">Nama</th>
+                                    <th class="py-2 px-4">Jam Masuk</th>
+                                    <th class="py-2 px-4">Ekspresi Masuk</th>
+                                    <th class="py-2 px-4">Status</th>
+                                    <th class="py-2 px-4">Ket</th>
+                                    <th class="py-2 px-4">Jam Pulang</th>
+                                    <th class="py-2 px-4">Ekspresi Pulang</th>
+                                    <th class="py-2 px-4">Status Laporan</th>
+                                    <th class="py-2 px-4">Aksi</th>
+                                </tr>
+                            </thead>
+                            <tbody id="table-laporan-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+        <?php if (isAdmin()): ?>
+        <!-- Admin Monthly Reports -->
+        <div id="page-admin-monthly" class="hidden">
             <div class="bg-white p-6 rounded-lg shadow-lg">
-                <h2 class="text-xl font-bold mb-4">Laporan Kehadiran</h2>
-                <div class="grid md:grid-cols-4 gap-4 mb-4">
-                    <input type="text" id="search-laporan" placeholder="Cari berdasarkan NIM atau Nama..." class="p-2 border rounded-lg">
-                    <input type="date" id="filter-tanggal-mulai" class="p-2 border rounded-lg">
-                    <input type="date" id="filter-tanggal-selesai" class="p-2 border rounded-lg">
-                    <button id="btn-show-all" class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded-lg transition">Reset</button>
+                <h2 class="text-xl font-bold mb-4">Laporan Bulanan (Admin)</h2>
+                <div class="grid md:grid-cols-5 gap-3 mb-4">
+                    <label class="text-sm text-gray-600 flex flex-col">
+                        <span class="mb-1">Cari (Nama/NIM)</span>
+                        <input type="text" id="am-search" class="p-2 border rounded-lg" placeholder="Cari...">
+                    </label>
+                    <label class="text-sm text-gray-600 flex flex-col">
+                        <span class="mb-1">Bulan</span>
+                        <select id="am-month" class="p-2 border rounded-lg"><option value="">Semua Bulan</option></select>
+                    </label>
+                    <label class="text-sm text-gray-600 flex flex-col">
+                        <span class="mb-1">Tahun</span>
+                        <select id="am-year" class="p-2 border rounded-lg"><option value="">Semua Tahun</option></select>
+                    </label>
+                    <div class="flex items-end"><button id="am-reset" class="bg-green-500 hover:bg-green-600 text-white px-3 rounded-lg py-2">Reset</button></div>
+                    <div></div>
                 </div>
                 <div class="overflow-x-auto">
-                    <table class="min-w-full bg-white">
+                    <table class="min-w-full bg-white bordered">
                         <thead class="bg-gray-200">
                             <tr>
-                                <th class="py-2 px-4">Tanggal</th>
-                                <th class="py-2 px-4">NIM</th>
+                                <th class="py-2 px-4">Bulan</th>
                                 <th class="py-2 px-4">Nama</th>
-                                <th class="py-2 px-4">Jam Masuk</th>
-                                <th class="py-2 px-4">Ekspresi Masuk</th>
+                                <th class="py-2 px-4">Detail</th>
                                 <th class="py-2 px-4">Status</th>
-                                <th class="py-2 px-4">Jam Pulang</th>
-                                <th class="py-2 px-4">Ekspresi Pulang</th>
                                 <th class="py-2 px-4">Aksi</th>
                             </tr>
                         </thead>
-                        <tbody id="table-laporan-body"></tbody>
+                        <tbody id="am-body"></tbody>
                     </table>
                 </div>
             </div>
         </div>
+        <?php endif; ?>
         <?php endif; ?>
     </main>
 
@@ -636,8 +1139,55 @@ exit;
         </div>
     </div>
 
+    <!-- Modal Edit Kehadiran -->
+    <div id="edit-att-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden">
+        <div class="bg-white p-6 rounded-lg shadow-2xl w-full max-w-sm">
+            <h3 class="text-xl font-bold mb-4">Edit Data Kehadiran</h3>
+            <form id="edit-att-form">
+                <input type="hidden" id="edit-att-id">
+                <div class="mb-3">
+                    <label class="block text-sm text-gray-600 mb-1">Tanggal</label>
+                    <input type="date" id="edit-att-date" class="w-full p-2 border rounded-lg" disabled>
+                </div>
+                <div class="mb-3">
+                    <label class="block text-sm text-gray-600 mb-1">Nama</label>
+                    <input type="text" id="edit-att-nama" class="w-full p-2 border rounded-lg" disabled>
+                </div>
+                <div class="mb-3">
+                    <label class="block text-sm text-gray-600 mb-1">Jam Masuk</label>
+                    <input type="time" id="edit-att-jam-masuk" class="w-full p-2 border rounded-lg">
+                </div>
+                <div class="mb-3">
+                    <label class="block text-sm text-gray-600 mb-1">Jam Pulang</label>
+                    <input type="time" id="edit-att-jam-pulang" class="w-full p-2 border rounded-lg">
+                </div>
+                <div class="mb-3">
+                    <label class="block text-sm text-gray-600 mb-1">Keterangan</label>
+                    <select id="edit-att-ket" class="w-full p-2 border rounded-lg">
+                        <option value="hadir">Hadir</option>
+                        <option value="izin">Izin</option>
+                        <option value="sakit">Sakit</option>
+                        <option value="alpha">Alpha</option>
+                        <option value="wfh">WFH</option>
+                    </select>
+                </div>
+                <div class="mb-3">
+                    <label class="block text-sm text-gray-600 mb-1">Status</label>
+                    <select id="edit-att-status" class="w-full p-2 border rounded-lg">
+                        <option value="ontime">On Time</option>
+                        <option value="terlambat">Terlambat</option>
+                    </select>
+                </div>
+                <div class="flex justify-end gap-2 mt-4">
+                    <button type="button" id="edit-att-cancel" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded">Batal</button>
+                    <button type="submit" id="edit-att-save" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded">Simpan</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <!-- Confirm Modal -->
-    <div id="confirm-modal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 hidden">
+    <div id="confirm-modal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-70 hidden">
         <div class="bg-white p-8 rounded-lg shadow-2xl w-full max-w-sm text-center">
             <p id="confirm-modal-message" class="text-lg mb-6">Apakah Anda yakin?</p>
             <div class="flex justify-center space-x-4">
@@ -646,10 +1196,67 @@ exit;
             </div>
         </div>
     </div>
+
+    <!-- Modal Absence -->
+    <div id="absence-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden">
+        <div class="bg-white p-6 rounded-lg shadow-2xl w-full max-w-lg">
+            <h3 class="text-xl font-bold mb-4">Input Keterangan Manual</h3>
+            <div class="grid gap-3">
+                <label class="text-sm text-gray-600 flex flex-col">
+                    <span class="mb-1">Cari Pegawai</span>
+                    <input type="text" id="abs-search" class="p-2 border rounded-lg" placeholder="Cari nama/NIM...">
+                </label>
+                <label class="text-sm text-gray-600 flex flex-col">
+                    <span class="mb-1">Pilih Pegawai</span>
+                    <select id="abs-user" class="p-2 border rounded-lg"></select>
+                </label>
+                <label class="text-sm text-gray-600 flex flex-col">
+                    <span class="mb-1">Tanggal</span>
+                    <input type="date" id="abs-date" class="p-2 border rounded-lg" value="<?php echo date('Y-m-d'); ?>">
+                </label>
+                <div class="mb-3">
+                    <label class="block text-sm text-gray-600 mb-1">Keterangan</label>
+                    <select id="abs-type" class="w-full p-2 border rounded-lg">
+                        <option value="izin">Izin</option>
+                        <option value="sakit">Sakit</option>
+                        <option value="wfh">WFH</option>
+                    </select>
+                </div>
+                <div id="abs-wfh-form" class="grid grid-cols-2 gap-2 hidden">
+                    <label class="text-sm text-gray-600 flex flex-col">
+                        <span class="mb-1">Jam Masuk</span>
+                        <input type="time" id="abs-jam-masuk" class="p-2 border rounded-lg">
+                    </label>
+                    <label class="text-sm text-gray-600 flex flex-col">
+                        <span class="mb-1">Jam Pulang</span>
+                        <input type="time" id="abs-jam-pulang" class="p-2 border rounded-lg">
+                    </label>
+                </div>
+            </div>
+            <div class="flex justify-end gap-2 mt-4">
+                <button id="abs-cancel" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded">Batal</button>
+                <button id="abs-save" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded">Simpan</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal Daily Report Review -->
+    <div id="dr-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden">
+        <div class="bg-white p-6 rounded-lg shadow-2xl w-full max-w-2xl relative">
+            <button id="dr-close" class="absolute top-3 right-3 text-gray-500">✕</button>
+            <h3 class="text-xl font-bold mb-2">Laporan Harian</h3>
+            <div id="dr-content" class="whitespace-pre-wrap border p-3 rounded mb-3 text-sm"></div>
+            <textarea id="dr-evaluation" class="w-full border rounded p-2" rows="4" placeholder="Evaluasi admin..."></textarea>
+            <div class="flex justify-end gap-2 mt-4">
+                <button id="dr-disapprove" class="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded">Disapprove</button>
+                <button id="dr-approve" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded">Approve</button>
+            </div>
+        </div>
+    </div>
 <?php endif; ?>
 
 <!-- Loading Overlay for model -->
-<div id="loading-overlay" class="fixed inset-0 bg-black bg-opacity-75 flex flex-col items-center justify-center z-50 hidden">
+<div id="loading-overlay" class="fixed inset-0 bg-black bg-opacity-75 flex flex-col items-center justify-center z-60 hidden">
     <div class="loader ease-linear rounded-full border-8 border-t-8 border-gray-200 h-24 w-24 mb-4"></div>
     <h2 class="text-center text-white text-xl font-semibold">Memuat Sistem Presensi...</h2>
     <p class="w-1/3 text-center text-white text-sm">Memuat model AI dan database wajah. Mohon tunggu sebentar.</p>
@@ -658,29 +1265,110 @@ exit;
     </div>
 </div>
 
+<div id="notif-bar" class="fixed top-4 left-1/2 transform -translate-x-1/2 bg-indigo-600 text-white px-6 py-3 rounded-lg shadow-lg z-70 hidden"></div>
+
 <script>
+function showNotif(msg, success=true){
+    const bar = qs('#notif-bar');
+    bar.textContent = msg;
+    bar.className = `fixed top-4 left-1/2 transform -translate-x-1/2 px-6 py-3 rounded-lg shadow-lg z-70 ${success?'bg-emerald-600':'bg-red-600'} text-white`;
+    bar.classList.remove('hidden');
+    setTimeout(()=> bar.classList.add('hidden'), 3000);
+}
 function qs(sel){ return document.querySelector(sel); }
 function qsa(sel){ return Array.from(document.querySelectorAll(sel)); }
-function speak(text){ 
-    try{ 
-        // Cancel any ongoing speech first
-        speechSynthesis.cancel();
-        
-        const u = new SpeechSynthesisUtterance(text); 
-        u.lang='id-ID'; 
-        u.rate=0.9; // Slightly slower for better clarity
-        u.pitch=1.0;
-        u.volume=1.0;
-        
-        // Add event listeners for better control
-        u.onstart = () => console.log('Speech started:', text);
-        u.onend = () => console.log('Speech ended:', text);
-        u.onerror = (e) => console.error('Speech error:', e);
-        
-        speechSynthesis.speak(u);
-    }catch(e){
-        console.error('Speech synthesis error:', e);
-    } 
+// Add a global variable to keep track of the current speech
+let currentSpeech = null;
+
+function speak(text) {
+    try {
+        // Cancel any ongoing speech before starting a new one
+        speechSynthesis.cancel();
+
+        // If there's a pending timeout, clear it to avoid conflicts
+        if (window.speechTimeout) {
+            clearTimeout(window.speechTimeout);
+            window.speechTimeout = null;
+        }
+
+        const u = new SpeechSynthesisUtterance(text);
+        u.lang = 'id-ID';
+        u.rate = 0.9;
+        u.pitch = 1.0;
+        u.volume = 1.0;
+
+        u.onstart = () => {
+            console.log('Speech started:', text);
+            // Clear the video scanning interval while the speech is active
+            if (videoInterval) {
+                clearInterval(videoInterval);
+                videoInterval = null;
+            }
+        };
+
+        u.onend = () => {
+            console.log('Speech ended:', text);
+            // Speech has finished, now reset the message and restart scanning
+            lastSpokenMessage = '';
+            if (isCameraActive && !videoInterval) {
+                startVideoInterval();
+            }
+        };
+
+        u.onerror = (e) => {
+            console.error('Speech error:', e);
+            // In case of an error, also reset and restart
+            lastSpokenMessage = '';
+            if (isCameraActive && !videoInterval) {
+                startVideoInterval();
+            }
+        };
+
+        speechSynthesis.speak(u);
+        currentSpeech = u;
+    } catch (e) {
+        console.error('Speech synthesis error:', e);
+    }
+}
+
+// Modify the `statusMessage` function to use the improved `speak` function
+function statusMessage(text, cls) {
+    if (!presensiStatus) return;
+    presensiStatus.textContent = text;
+    presensiStatus.className = 'mt-4 text-center font-medium text-lg p-3 rounded-md ' + cls;
+    presensiStatus.classList.remove('hidden');
+
+    // Only speak if the message is different from the last one
+    if (text !== lastSpokenMessage) {
+        lastSpokenMessage = text;
+        speak(text);
+    }
+}
+
+// Modify `handleRecognition` to stop video scanning immediately and let the `onend` callback restart it
+async function handleRecognition(nim, topExpression) {
+    if (!scanMode || isProcessingRecognition) return;
+    isProcessingRecognition = true;
+    // Stop the video interval immediately upon recognition
+    if (videoInterval) {
+        clearInterval(videoInterval);
+        videoInterval = null;
+    }
+    console.log('Recognition triggered:', { nim, topExpression, scanMode });
+    try {
+        const r = await api('?ajax=save_attendance', { nim, mode: scanMode, ekspresi: topExpression });
+        console.log('Attendance response:', r);
+        if (r.ok) {
+            statusMessage(r.message, r.statusClass || 'bg-green-100 text-green-700');
+        } else {
+            statusMessage(r.message || 'Gagal menyimpan presensi', r.statusClass || 'bg-yellow-100 text-yellow-700');
+        }
+    } catch (err) {
+        console.error('Error in handleRecognition:', err);
+        statusMessage('Terjadi kesalahan server', 'bg-red-100 text-red-700');
+    } finally {
+        isProcessingRecognition = false;
+    }
 }
 
 async function api(url, data){
@@ -701,20 +1389,23 @@ async function api(url, data){
 
 <?php if ($page === 'login'): ?>
 // Login
-qs('#form-login').addEventListener('submit', async (e)=>{
-    e.preventDefault();
-    const fd = new FormData(e.target);
-    const r = await api('?ajax=login', fd);
-    const msg = qs('#login-msg');
-    if(r.ok){
-        msg.className = 'text-green-600';
-        msg.textContent = 'Login berhasil. Mengalihkan...';
-        setTimeout(()=> location.href='?', 600);
-    } else {
-        msg.className = 'text-red-600';
-        msg.textContent = r.message || 'Gagal login';
-    }
-});
+const loginForm = qs('#form-login');
+if (loginForm) {
+    loginForm.addEventListener('submit', async (e)=>{
+        e.preventDefault();
+        const fd = new FormData(e.target);
+        const r = await api('?ajax=login', fd);
+        const msg = qs('#login-msg');
+        if(r.ok){
+            msg.className = 'text-green-600';
+            msg.textContent = 'Login berhasil. Mengalihkan...';
+            setTimeout(()=> location.href='?', 600);
+        } else {
+            msg.className = 'text-red-600';
+            msg.textContent = r.message || 'Gagal login';
+        }
+    });
+}
 <?php elseif ($page === 'register'): ?>
 // Register camera
 const regStart = qs('#reg-start-camera');
@@ -726,47 +1417,48 @@ const regVidContainer = qs('#reg-video-container');
 const regFotoData = qs('#reg-foto-data');
 let regStream = null;
 
-regStart.addEventListener('click', async ()=>{
-    try{
-        regStream = await navigator.mediaDevices.getUserMedia({ video: { width: 480, height: 360 } });
-        regVideo.srcObject = regStream;
-        regVidContainer.classList.remove('hidden');
-        regTake.classList.remove('hidden');
-        regStart.classList.add('hidden');
-    }catch(err){ alert('Tidak bisa mengakses kamera'); console.error(err); }
-});
+if (regStart) {
+    regStart.addEventListener('click', async ()=>{
+        try{
+            regStream = await navigator.mediaDevices.getUserMedia({ video: { width: 480, height: 360 } });
+            regVideo.srcObject = regStream;
+            regVidContainer.classList.remove('hidden');
+            regTake.classList.remove('hidden');
+            regStart.classList.add('hidden');
+        }catch(err){ showNotif('Tidak bisa mengakses kamera'); console.error(err); }
+    });
+}
 
-regTake.addEventListener('click', ()=>{
-    const ctx = regCanvas.getContext('2d');
-    regCanvas.width = regVideo.videoWidth;
-    regCanvas.height = regVideo.videoHeight;
-    ctx.drawImage(regVideo,0,0,regCanvas.width,regCanvas.height);
-    const dataUrl = regCanvas.toDataURL('image/jpeg');
-    regPreview.src = dataUrl; regPreview.classList.remove('hidden');
-    regFotoData.value = dataUrl;
-    if(regStream){ regStream.getTracks().forEach(t=>t.stop()); regStream=null; }
-    regVidContainer.classList.add('hidden');
-    regTake.classList.add('hidden');
-    regStart.classList.remove('hidden');
-    regStart.textContent = 'Ambil Ulang Foto';
-});
+if (regTake) {
+    regTake.addEventListener('click', ()=>{
+        const ctx = regCanvas.getContext('2d');
+        regCanvas.width = regVideo.videoWidth;
+        regCanvas.height = regVideo.videoHeight;
+        ctx.drawImage(regVideo,0,0,regCanvas.width,regCanvas.height);
+        const dataUrl = regCanvas.toDataURL('image/jpeg');
+        regPreview.src = dataUrl; regPreview.classList.remove('hidden');
+        regFotoData.value = dataUrl;
+        if(regStream){ regStream.getTracks().forEach(t=>t.stop()); regStream=null; }
+        regVidContainer.classList.add('hidden');
+        regTake.classList.add('hidden');
+        regStart.classList.remove('hidden');
+        regStart.textContent = 'Ambil Ulang Foto';
+    });
+}
 
-qs('#form-register').addEventListener('submit', async (e)=>{
-    e.preventDefault();
-    const fd = new FormData(e.target);
-    const r = await api('?ajax=register', fd);
-    const msg = qs('#register-msg');
-    if(r.ok){ msg.className='text-green-600'; msg.textContent='Registrasi berhasil. Silakan login.'; setTimeout(()=>location.href='?page=login', 800); }
-    else { msg.className='text-red-600'; msg.textContent=r.message||'Gagal registrasi'; }
-});
-<?php else: ?>
-// App (logged in)
-const pages = { presensi: qs('#page-presensi'), members: qs('#page-members'), laporan: qs('#page-laporan') };
-qsa('.tab-link').forEach(btn=>{
-    btn.addEventListener('click', ()=> showPage(btn.dataset.tab));
-});
-function showPage(name){ Object.values(pages).forEach(p=> p && (p.style.display='none')); if(pages[name]) pages[name].style.display='block'; if(name==='members') renderMembers(); if(name==='laporan') renderLaporan(); if(name==='presensi') resetPresensiPage(); }
-
+const registerForm = qs('#form-register');
+if (registerForm) {
+    registerForm.addEventListener('submit', async (e)=>{
+        e.preventDefault();
+        const fd = new FormData(e.target);
+        const r = await api('?ajax=register', fd);
+        const msg = qs('#register-msg');
+        if(r.ok){ msg.className='text-green-600'; msg.textContent='Registrasi berhasil. Silakan login.'; setTimeout(()=>location.href='?page=login', 800); }
+        else { msg.className='text-red-600'; msg.textContent=r.message||'Gagal registrasi'; }
+    });
+}
+<?php elseif ($page === 'landing'): ?>
+// Landing page - Face recognition attendance
 const videoContainer = qs('#video-container');
 const video = qs('#video');
 const canvas = qs('#canvas');
@@ -784,89 +1476,77 @@ let scanMode = '';
 let lastSpokenMessage = '';
 let videoPlayListenerAdded = false;
 
-// Ensure initial page sets after variables exist
-<?php if (isAdmin()): ?>
-showPage('members');
-<?php else: ?>
-showPage('presensi');
-<?php endif; ?>
+// Initialize face recognition system
+async function initializeFaceRecognition() {
+    try {
+        await loadFaceApiModels();
+        await loadLabeledFaceDescriptors();
+        console.log('Face recognition system initialized successfully');
+    } catch (error) {
+        console.error('Failed to initialize face recognition:', error);
+        showNotif('Gagal memuat sistem pengenalan wajah', false);
+    }
+}
 
-function statusMessage(text, cls){ 
-    presensiStatus.textContent = text; 
-    presensiStatus.className = 'mt-4 text-center font-medium text-lg p-3 rounded-md '+cls; 
-    presensiStatus.classList.remove('hidden'); 
-    
-    if(text!==lastSpokenMessage){ 
-        speak(text); 
-        lastSpokenMessage=text; 
-        
-        // Stop scanning temporarily to let speech finish
+function statusMessage(text, cls){
+    if (!presensiStatus) return;
+    presensiStatus.textContent = text;
+    presensiStatus.className = 'mt-4 text-center font-medium text-lg p-3 rounded-md '+cls;
+    presensiStatus.classList.remove('hidden');
+
+    if(text!==lastSpokenMessage){
+        speak(text);
+        lastSpokenMessage=text;
+
         if(videoInterval) {
             clearInterval(videoInterval);
             videoInterval = null;
         }
-        
-        // Calculate speech duration based on text length (more accurate)
-        // Indonesian speech rate: approximately 150-200 words per minute
-        // Average word length: 5-6 characters
+
         const wordCount = text.split(' ').length;
-        const estimatedSpeechDuration = Math.max(5000, wordCount * 350); // 350ms per word, minimum 5 seconds
-        
-        console.log(`Text: "${text}" | Words: ${wordCount} | Estimated duration: ${estimatedSpeechDuration}ms`);
-        
-        // Store the timeout ID for potential cancellation
+        const estimatedSpeechDuration = Math.max(5000, wordCount * 350);
+
         window.speechTimeout = setTimeout(()=>{
             lastSpokenMessage='';
             if(isCameraActive && !videoInterval) {
                 startVideoInterval();
             }
         }, estimatedSpeechDuration);
-    } 
+    }
 }
 
 async function loadFaceApiModels(){
+    if (!loadingOverlay) return;
+    
     const loadingProgress = qs('#loading-progress');
     loadingOverlay.classList.remove('hidden');
-    
-    // Use working CDN for model weights
-    const MODEL_URL = 'https://justadudewhohacks.github.io/face-api.js/models';
-    
+
+    const MODEL_URL = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights';
+
     try {
         loadingProgress.textContent = 'Memuat model deteksi wajah...';
         await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
-        
+
         loadingProgress.textContent = 'Memuat model landmark wajah...';
         await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
-        
+
         loadingProgress.textContent = 'Memuat model pengenalan wajah...';
         await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
-        
+
         loadingProgress.textContent = 'Memuat model ekspresi wajah...';
         await faceapi.nets.faceExpressionNet.loadFromUri(MODEL_URL);
-        
+
         loadingProgress.textContent = 'Model AI berhasil dimuat!';
-        console.log('Face recognition models loaded successfully');
-        
-        // Small delay to show completion message
         await new Promise(resolve => setTimeout(resolve, 500));
-        
     } catch (error) {
-        console.error('Error loading face recognition models:', error);
-        loadingProgress.textContent = 'Error memuat model AI. Coba refresh halaman.';
-        
-        // Show error message to user
+        loadingProgress.textContent = 'Gagal memuat model AI. Silakan refresh halaman.';
         if (presensiStatus) {
             presensiStatus.textContent = 'Gagal memuat model AI. Silakan refresh halaman.';
             presensiStatus.className = 'mt-4 text-center font-medium text-lg p-3 rounded-md bg-red-100 text-red-700';
             presensiStatus.classList.remove('hidden');
         }
-        
-        // Hide loading after error
-        setTimeout(() => {
-            loadingOverlay.classList.add('hidden');
-        }, 3000);
-        
-        throw error; // Re-throw to stop further execution
+        setTimeout(() => { loadingOverlay.classList.add('hidden'); }, 3000);
+        throw error;
     } finally {
         loadingOverlay.classList.add('hidden');
     }
@@ -881,22 +1561,17 @@ async function fetchMembers(){
 async function loadLabeledFaceDescriptors(){
     const members = await fetchMembers();
     labeledFaceDescriptors = [];
-    
-    // Process members in batches for better performance
     const batchSize = 3;
     for (let i = 0; i < members.length; i += batchSize) {
         const batch = members.slice(i, i + batchSize);
-        
         const batchPromises = batch.map(async (m) => {
             if (!m.foto_base64) return null;
-            
             try {
                 const img = await faceapi.fetchImage(m.foto_base64);
                 const det = await faceapi.detectSingleFace(img, new faceapi.TinyFaceDetectorOptions({
                     inputSize: 320,
                     scoreThreshold: 0.5
                 })).withFaceLandmarks().withFaceDescriptor();
-                
                 if (det) {
                     return new faceapi.LabeledFaceDescriptors(m.nim, [det.descriptor]);
                 }
@@ -905,17 +1580,12 @@ async function loadLabeledFaceDescriptors(){
             }
             return null;
         });
-        
         const batchResults = await Promise.all(batchPromises);
         labeledFaceDescriptors.push(...batchResults.filter(Boolean));
-        
-        // Small delay between batches to prevent blocking
         if (i + batchSize < members.length) {
             await new Promise(resolve => setTimeout(resolve, 50));
         }
     }
-    
-    console.log(`Loaded ${labeledFaceDescriptors.length} face descriptors`);
 }
 
 function startScan(mode){
@@ -926,57 +1596,53 @@ function startScan(mode){
     startVideo();
 }
 
-btnScanMasuk && btnScanMasuk.addEventListener('click', ()=> startScan('masuk'));
-btnScanPulang && btnScanPulang.addEventListener('click', ()=> startScan('pulang'));
-btnBackScan && btnBackScan.addEventListener('click', ()=>{ resetPresensiPage(); });
+if (btnScanMasuk) {
+    btnScanMasuk.addEventListener('click', ()=> startScan('masuk'));
+}
+if (btnScanPulang) {
+    btnScanPulang.addEventListener('click', ()=> startScan('pulang'));
+}
+if (btnBackScan) {
+    btnBackScan.addEventListener('click', ()=>{ resetPresensiPage(); });
+}
 
 function resetPresensiPage(){
     stopVideo();
     scanButtonsContainer.classList.remove('hidden');
     videoContainer.classList.add('hidden');
     btnBackScan.classList.add('hidden');
-    presensiStatus.classList.add('hidden');
-    presensiStatus.textContent='';
-    
-    // Reset video play listener flag
+    if (presensiStatus) {
+        presensiStatus.classList.add('hidden');
+        presensiStatus.textContent='';
+    }
     videoPlayListenerAdded = false;
-    
-    // Clear any pending timeouts
     if (window.presensiTimeout) {
         clearTimeout(window.presensiTimeout);
         window.presensiTimeout = null;
     }
-    
-    // Clear speech timeout
     if (window.speechTimeout) {
         clearTimeout(window.speechTimeout);
         window.speechTimeout = null;
     }
-    
-    // Stop any ongoing speech
     speechSynthesis.cancel();
 }
 
 function startVideo(){
+    if (!video) return;
+    
     if(navigator.mediaDevices && navigator.mediaDevices.getUserMedia){
-        // Optimize camera settings for better performance
         const constraints = {
             video: {
                 width: { ideal: 640, max: 1280 },
                 height: { ideal: 480, max: 720 },
-                frameRate: { ideal: 15, max: 30 }, // Lower frame rate for better performance
+                frameRate: { ideal: 15, max: 30 },
                 facingMode: 'user'
             }
         };
-        
         navigator.mediaDevices.getUserMedia(constraints).then(stream => {
             video.srcObject = stream;
             isCameraActive = true;
-            
-            // Wait for video to be ready before starting detection
-            video.addEventListener('loadedmetadata', () => {
-                console.log('Camera started successfully');
-            });
+            video.addEventListener('loadedmetadata', () => {});
         }).catch(err => {
             console.error('Error camera', err);
             statusMessage('Error: Tidak dapat mengakses kamera.', 'bg-red-100 text-red-700');
@@ -985,53 +1651,42 @@ function startVideo(){
 }
 
 function stopVideo(){
-    if(video.srcObject){ video.srcObject.getTracks().forEach(t=>t.stop()); video.srcObject=null; }
+    if(video && video.srcObject){ video.srcObject.getTracks().forEach(t=>t.stop()); video.srcObject=null; }
     isCameraActive=false; if(videoInterval) clearInterval(videoInterval); speechSynthesis.cancel();
     if(canvas){ const ctx = canvas.getContext('2d'); ctx.clearRect(0,0,canvas.width,canvas.height); }
 }
 
 function startVideoInterval(){
-    if(!isCameraActive || videoInterval) return;
-    
-    // Check if models are loaded
+    if(!isCameraActive || videoInterval || !video) return;
     if (!faceapi.nets.tinyFaceDetector.isLoaded) {
         console.error('Face detection models not loaded');
         statusMessage('Model AI belum dimuat. Silakan refresh halaman.', 'bg-red-100 text-red-700');
         return;
     }
-    
     const displaySize = { width: video.clientWidth, height: video.clientHeight };
     faceapi.matchDimensions(canvas, displaySize);
-    
-    // Optimize interval for better performance
     videoInterval = setInterval(async ()=>{
         try {
-            // Use more efficient detection options
             const detections = await faceapi.detectAllFaces(video, new faceapi.TinyFaceDetectorOptions({
-                inputSize: 320, // Smaller input size for faster processing
+                inputSize: 320,
                 scoreThreshold: 0.5
             })).withFaceLandmarks().withFaceDescriptors().withFaceExpressions();
-            
             const resized = faceapi.resizeResults(detections, displaySize);
             const ctx = canvas.getContext('2d');
             ctx.clearRect(0,0,canvas.width,canvas.height);
-            
             if (resized.length > 0) {
                 faceapi.draw.drawDetections(canvas, resized);
-                
                 if (labeledFaceDescriptors && labeledFaceDescriptors.length > 0) {
-                    const faceMatcher = new faceapi.FaceMatcher(labeledFaceDescriptors, 0.6); // Slightly higher threshold
+                    const faceMatcher = new faceapi.FaceMatcher(labeledFaceDescriptors, 0.6);
                     const results = resized.map(d => faceMatcher.findBestMatch(d.descriptor));
-                    
                     results.forEach((result, i) => {
                         const box = resized[i].detection.box;
                         const expressions = resized[i].expressions || {};
                         const topExpression = getTopExpression(expressions);
-                        const drawBox = new faceapi.draw.DrawBox(box, { 
-                            label: `${result.toString()} (${topExpression})` 
+                        const drawBox = new faceapi.draw.DrawBox(box, {
+                            label: `${result.toString()} (${topExpression})`
                         });
                         drawBox.draw(canvas);
-                        
                         if (result.label !== 'unknown') {
                             handleRecognition(result.label, topExpression);
                         }
@@ -1040,8 +1695,7 @@ function startVideoInterval(){
                     statusMessage('Database wajah kosong. Silakan tambah member.', 'bg-gray-200 text-gray-600');
                 }
             } else {
-                // Only update status if no faces detected
-                if (presensiStatus.textContent !== 'Arahkan wajah ke kamera') {
+                if (presensiStatus && presensiStatus.textContent !== 'Arahkan wajah ke kamera') {
                     presensiStatus.textContent = 'Arahkan wajah ke kamera';
                     presensiStatus.className = 'mt-4 text-center font-medium text-lg p-3 rounded-md bg-blue-100 text-blue-700';
                     presensiStatus.classList.remove('hidden');
@@ -1049,21 +1703,21 @@ function startVideoInterval(){
             }
         } catch (error) {
             console.error('Face detection error:', error);
-            // Don't spam error messages
-            if (presensiStatus.textContent !== 'Error deteksi wajah') {
+            if (presensiStatus && presensiStatus.textContent !== 'Error deteksi wajah') {
                 statusMessage('Error deteksi wajah. Coba refresh halaman.', 'bg-red-100 text-red-700');
             }
         }
-    }, 1000); // Reduced from 1500ms to 1000ms for better responsiveness
+    }, 1000);
 }
 
-// Optimize video event handling
-video && video.addEventListener('play', ()=>{
-    if (!videoPlayListenerAdded) {
-        startVideoInterval();
-        videoPlayListenerAdded = true;
-    }
-});
+if (video) {
+    video.addEventListener('play', ()=>{
+        if (!videoPlayListenerAdded) {
+            startVideoInterval();
+            videoPlayListenerAdded = true;
+        }
+    });
+}
 
 function getTopExpression(expressions){
     const map = { happy:'Senang', sad:'Sedih', neutral:'Biasa', angry:'Marah', disgusted:'Capek', surprised:'Ngantuk', fearful:'Laper' };
@@ -1071,57 +1725,109 @@ function getTopExpression(expressions){
     return map[top] || 'Biasa';
 }
 
-// Prevent multiple recognition calls
 let isProcessingRecognition = false;
 
 async function handleRecognition(nim, topExpression){
     if(!scanMode || isProcessingRecognition) return;
-    
     isProcessingRecognition = true;
+    
+    console.log('Recognition triggered:', { nim, topExpression, scanMode });
     
     try{
         const r = await api('?ajax=save_attendance', { nim, mode: scanMode, ekspresi: topExpression });
+        console.log('Attendance response:', r);
+        
         if(r.ok){
             statusMessage(r.message, r.statusClass || 'bg-green-100 text-green-700');
             stopVideoAfterRecognition();
         } else {
             statusMessage(r.message || 'Gagal menyimpan presensi', r.statusClass || 'bg-yellow-100 text-yellow-700');
         }
-    }catch(err){ 
-        console.error(err); 
-        statusMessage('Terjadi kesalahan server', 'bg-red-100 text-red-700'); 
+    }catch(err){
+        console.error('Error in handleRecognition:', err);
+        statusMessage('Terjadi kesalahan server', 'bg-red-100 text-red-700');
     } finally {
-        // Reset processing flag after a delay
         setTimeout(() => {
             isProcessingRecognition = false;
         }, 2000);
     }
 }
 
-function stopVideoAfterRecognition(){ 
+function stopVideoAfterRecognition(){
     if(videoInterval) {
-        clearInterval(videoInterval); 
+        clearInterval(videoInterval);
         videoInterval = null;
     }
-    
-        // Calculate appropriate delay based on current status message
-    let delayDuration = 10000; // Default 10 seconds
-    
+    let delayDuration = 10000;
     if (presensiStatus && presensiStatus.textContent) {
         const currentText = presensiStatus.textContent;
         const wordCount = currentText.split(' ').length;
-        
-        // More generous timing: 500ms per word + buffer time for natural pauses
         delayDuration = Math.max(10000, wordCount * 500 + 3000);
-        
-        console.log(`Current message: "${currentText}" | Words: ${wordCount} | Delay: ${delayDuration}ms`);
     }
-    
-    // Wait for speech to finish completely before returning to main page
-    setTimeout(()=>{ 
-        if(isCameraActive) resetPresensiPage(); 
+    setTimeout(()=>{
+        if(isCameraActive) resetPresensiPage();
     }, delayDuration);
 }
+
+// Initialize face recognition when page loads
+document.addEventListener('DOMContentLoaded', () => {
+    initializeFaceRecognition();
+});
+
+<?php else: ?>
+// App (logged in)
+const pages = { rekap: qs('#page-rekap'), 'laporan-bulanan': qs('#page-laporan-bulanan'), members: qs('#page-members'), laporan: qs('#page-laporan'), 'admin-monthly': qs('#page-admin-monthly') };
+qsa('.tab-link').forEach(btn=>{
+    btn.addEventListener('click', ()=> showPage(btn.dataset.tab));
+});
+function showPage(name){ Object.values(pages).forEach(p=> p && (p.style.display='none')); if(pages[name]) pages[name].style.display='block'; if(name==='members') renderMembers(); if(name==='laporan') renderLaporan(); if(name==='rekap') initRekapPage(); if(name==='laporan-bulanan') renderMonthly(); if(name==='admin-monthly') renderAdminMonthly(); }
+
+// Ensure initial page sets after variables exist
+<?php if (isAdmin()): ?>
+showPage('members');
+<?php else: ?>
+showPage('rekap');
+<?php endif; ?>
+
+// Initialize month/year selectors for rekap page
+document.addEventListener('DOMContentLoaded', () => {
+    const monthSel = qs('#rekap-month');
+    const yearSel = qs('#rekap-year');
+    
+    if (monthSel) {
+        const months = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+        months.forEach((month, index) => {
+            const option = document.createElement('option');
+            option.value = String(index + 1);
+            option.textContent = month;
+            if (index === new Date().getMonth()) {
+                option.selected = true;
+            }
+            monthSel.appendChild(option);
+        });
+    }
+    
+    if (yearSel) {
+        const currentYear = new Date().getFullYear();
+        for (let year = currentYear - 2; year <= currentYear + 1; year++) {
+            const option = document.createElement('option');
+            option.value = String(year);
+            option.textContent = String(year);
+            if (year === currentYear) {
+                option.selected = true;
+            }
+            yearSel.appendChild(option);
+        }
+    }
+    
+    // Initialize rekap page on load
+    if (qs('#page-rekap')) {
+        initRekapPage();
+    }
+});
+
+// Face recognition functions are handled in the landing page section
+// The logged-in app focuses on admin/employee dashboard functionality
 
 // Members (Admin)
 async function renderMembers(){
@@ -1138,9 +1844,9 @@ async function renderMembers(){
             <td class="py-2 px-4">${m.nama||''}</td>
             <td class="py-2 px-4">${m.prodi||''}</td>
             <td class="py-2 px-4">${m.startup||'-'}</td>
-            <td class="py-2 px-4">
-                <button class="btn-edit-member bg-yellow-400 hover:bg-yellow-500 text-white font-bold py-1 px-2 rounded" data-id="${m.id}" data-json='${JSON.stringify(m).replace(/'/g,"&apos;")}' >Edit</button>
-                <button class="btn-delete-member bg-red-500 hover:bg-red-600 text-white font-bold py-1 px-2 rounded ml-2" data-id="${m.id}">Hapus</button>
+            <td class="py-2 px-4 text-center">
+                <button class="btn-edit-member text-yellow-600 font-bold" data-id="${m.id}" data-json='${JSON.stringify(m).replace(/'/g,"&apos;")}' title="Edit"><i class="fi fi-sr-pen-square"></i></button>
+                <button class="btn-delete-member text-red-600 font-bold ml-2" data-id="${m.id}" title="Hapus"><i class="fi fi-ss-trash"></i></button>
             </td>`;
         body.appendChild(tr);
     });
@@ -1166,7 +1872,7 @@ function resetModalCamera(){ stopModalCamera(); modalVideoContainer.classList.ad
 function stopModalCamera(){ if(modalStream){ modalStream.getTracks().forEach(t=>t.stop()); modalStream=null; } }
 
 btnStartCamera && btnStartCamera.addEventListener('click', async ()=>{
-    try{ modalStream = await navigator.mediaDevices.getUserMedia({ video: { width: 480, height: 360 } }); modalVideo.srcObject = modalStream; modalVideoContainer.classList.remove('hidden'); btnTakePhoto.classList.remove('hidden'); btnStartCamera.classList.add('hidden'); fotoPreview.classList.add('hidden'); }catch(err){ alert('Tidak bisa mengakses kamera.'); console.error(err); }
+    try{ modalStream = await navigator.mediaDevices.getUserMedia({ video: { width: 480, height: 360 } }); modalVideo.srcObject = modalStream; modalVideoContainer.classList.remove('hidden'); btnTakePhoto.classList.remove('hidden'); btnStartCamera.classList.add('hidden'); fotoPreview.classList.add('hidden'); }catch(err){ showNotif('Tidak bisa mengakses kamera.'); console.error(err); }
 });
 
 btnTakePhoto && btnTakePhoto.addEventListener('click', ()=>{
@@ -1180,31 +1886,207 @@ btnAddMember && btnAddMember.addEventListener('click', ()=>{
 
 btnCancelModal && btnCancelModal.addEventListener('click', ()=>{ stopModalCamera(); memberModal.classList.add('hidden'); });
 
-document.addEventListener('click', (e)=>{
-    if(e.target.classList.contains('btn-edit-member')){
-        const data = JSON.parse(e.target.getAttribute('data-json').replace(/&apos;/g, "'"));
-        resetModalCamera();
-        qs('#modal-title').textContent='Edit Member';
-        qs('#member-id').value = data.id;
-        qs('#email').value = data.email || '';
-        qs('#nim').value = data.nim || '';
-        qs('#nim').readOnly = true;
-        qs('#nama').value = data.nama || '';
-        qs('#prodi').value = data.prodi || '';
-        qs('#startup').value = data.startup || '';
-        fotoPreview.src = data.foto_base64 || '';
-        if(data.foto_base64) fotoPreview.classList.remove('hidden');
-        btnStartCamera.textContent='Ambil Ulang Foto';
-        qs('#password-admin-wrapper').classList.add('hidden');
-        memberModal.classList.remove('hidden');
+document.addEventListener('click', async (e)=>{
+    const btnEdit = e.target.closest('.btn-edit-member');
+    const btnDelete = e.target.closest('.btn-delete-member');
+    const btnViewDr = e.target.closest('.btn-view-dr-admin');
+    const btnEditAtt = e.target.closest('.btn-edit-att');
+    const btnDeleteLaporan = e.target.closest('.btn-delete-laporan');
+    const btnViewMonth = e.target.closest('.btn-view-month');
+    const btnAmApprove = e.target.closest('.btn-am-approve');
+    const btnAmDisapprove = e.target.closest('.btn-am-disapprove');
+    const btnViewMonthDetail = e.target.closest('.btn-view-month-detail');
+
+    if(btnEdit){
+        const data = JSON.parse(btnEdit.getAttribute('data-json').replace(/&apos;/g, "'"));
+        resetModalCamera();
+        qs('#modal-title').textContent='Edit Member';
+        qs('#member-id').value = data.id;
+        qs('#email').value = data.email || '';
+        qs('#nim').value = data.nim || '';
+        qs('#nim').readOnly = true;
+        qs('#nama').value = data.nama || '';
+        qs('#prodi').value = data.prodi || '';
+        qs('#startup').value = data.startup || '';
+        fotoPreview.src = data.foto_base64 || '';
+        if(data.foto_base64) fotoPreview.classList.remove('hidden');
+        btnStartCamera.textContent='Ambil Ulang Foto';
+        qs('#password-admin-wrapper').classList.add('hidden');
+        memberModal.classList.remove('hidden');
+    }
+
+    if(btnDelete){
+        const id = btnDelete.getAttribute('data-id');
+        showConfirmModal('Apakah Anda yakin ingin menghapus member ini?', async ()=>{
+            await api('?ajax=delete_member', { id });
+            renderMembers(); loadLabeledFaceDescriptors();
+        });
+    }
+
+    if(btnDeleteLaporan){
+        const id = btnDeleteLaporan.getAttribute('data-id');
+        showConfirmModal('Apakah Anda yakin ingin menghapus data kehadiran ini?', async ()=>{ await api('?ajax=delete_attendance', { id }); renderLaporan(); });
+    }
+    
+        if(btnEditAtt){
+        const att = JSON.parse(btnEditAtt.getAttribute('data-json').replace(/&apos;/g, "'"));
+        qs('#edit-att-id').value = att.id;
+        qs('#edit-att-date').value = (att.jam_masuk_iso||'').slice(0,10);
+        qs('#edit-att-nama').value = att.nama || '';
+        qs('#edit-att-jam-masuk').value = att.jam_masuk ? att.jam_masuk.substring(0, 5) : '';
+        qs('#edit-att-jam-pulang').value = att.jam_pulang ? att.jam_pulang.substring(0, 5) : '';
+        qs('#edit-att-ket').value = att.ket || 'hadir';
+        qs('#edit-att-status').value = att.status || 'ontime';
+        editAttModal.classList.remove('hidden');
     }
-    if(e.target.classList.contains('btn-delete-member')){
-        const id = e.target.getAttribute('data-id');
-        showConfirmModal('Apakah Anda yakin ingin menghapus member ini?', async ()=>{
-            await api('?ajax=delete_member', { id });
-            renderMembers(); loadLabeledFaceDescriptors();
-        });
+
+    if(btnViewDr){
+        const userId = btnViewDr.getAttribute('data-user'); const date = btnViewDr.getAttribute('data-date');
+        const r = await api('?ajax=get_daily_report_detail', { user_id: userId, date });
+        const modal = qs('#dr-modal'); const content=qs('#dr-content'); const evalEl=qs('#dr-evaluation');
+        modal.dataset.reportId = r?.data?.id || '';
+        content.textContent = r?.data?.content || '(Belum ada laporan)';
+        evalEl.value = r?.data?.evaluation || '';
+        modal.classList.remove('hidden');
+    }
+    
+        if(btnViewMonthDetail){
+        const id = btnViewMonthDetail.getAttribute('data-id');
+        const r = await api('?ajax=get_monthly_report_detail', { id });
+        if(!r.ok) { showNotif(r.message || 'Laporan tidak ditemukan', false); return; }
+        const item = r.data;
+        if(!item) { showNotif('Laporan tidak ditemukan', false); return; }
+        
+        // Create modal if it doesn't exist
+        let modal = qs('#monthly-detail-modal');
+        if(!modal) {
+            modal = document.createElement('div');
+            modal.id = 'monthly-detail-modal';
+            modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden';
+            modal.innerHTML = `
+                <div class="bg-white p-6 rounded-lg shadow-2xl w-full max-w-6xl max-h-[90vh] overflow-y-auto">
+                    <div class="flex justify-between items-center mb-4>
+                        <h3 id="monthly-detail-title" class="text-xl font-bold"></h3>
+                        <button onclick="this.closest('#monthly-detail-modal').classList.add('hidden')" class="text-gray-500 hover:text-gray-700">✕</button>
+                    </div>
+                    <div class="space-y-6">
+                        <div>
+                            <h4 class="font-semibold text-gray-700 mb-2">Ringkasan Pekerjaan:</h4>
+                            <div class="bg-gray-50 p-3 rounded border">
+                                <p id="monthly-detail-summary" class="text-gray-600 whitespace-pre-wrap"></p>
+                            </div>
+                        </div>
+                        <div>
+                            <h4 class="font-semibold text-gray-700 mb-2">Pencapaian dan Hasil Kerja:</h4>
+                            <div class="overflow-x-auto">
+                                <table class="min-w-full bg-white bordered">
+                                    <thead class="bg-gray-200">
+                                        <tr>
+                                            <th class="py-2 px-4">No</th>
+                                            <th class="py-2 px-4">Pencapaian</th>
+                                            <th class="py-2 px-4">Detail</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="monthly-detail-achievements-table"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <div>
+                            <h4 class="font-semibold text-gray-700 mb-2">Kendala:</h4>
+                            <div class="overflow-x-auto">
+                                <table class="min-w-full bg-white bordered">
+                                    <thead class="bg-gray-200">
+                                        <tr>
+                                            <th class="py-2 px-4">No</th>
+                                            <th class="py-2 px-4">Kendala</th>
+                                            <th class="py-2 px-4">Solusi</th>
+                                            <th class="py-2 px-4">Catatan</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="monthly-detail-obstacles-table"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+        }
+        
+        qs('#monthly-detail-title').textContent = `Laporan Bulanan ${item.nama} - ${monthName(parseInt(item.month))} ${item.year}`;
+        qs('#monthly-detail-summary').textContent = item.summary || '(Tidak ada ringkasan)';
+        
+        // Parse achievements properly and fill table
+        let achievements = [];
+        try {
+            achievements = JSON.parse(item.achievements || '[]');
+        } catch (e) {
+            achievements = [];
+        }
+        
+        const achievementsTable = qs('#monthly-detail-achievements-table');
+        if (achievements.length > 0) {
+            achievementsTable.innerHTML = achievements.map((a, index) => {
+                const achievement = typeof a === 'object' ? (a.achievement || '') : a;
+                const detail = typeof a === 'object' ? (a.detail || '') : '';
+                return `
+                    <tr class="border-b hover:bg-gray-50">
+                        <td class="py-2 px-4 text-center">${index + 1}</td>
+                        <td class="py-2 px-4">${achievement}</td>
+                        <td class="py-2 px-4">${detail}</td>
+                    </tr>
+                `;
+            }).join('');
+        } else {
+            achievementsTable.innerHTML = `
+                <tr class="border-b">
+                    <td colspan="3" class="py-2 px-4 text-center text-gray-500">Tidak ada data pencapaian</td>
+                </tr>
+            `;
+        }
+        
+        // Parse obstacles properly and fill table
+        let obstacles = [];
+        try {
+            obstacles = JSON.parse(item.obstacles || '[]');
+        } catch (e) {
+            obstacles = [];
+        }
+        
+        const obstaclesTable = qs('#monthly-detail-obstacles-table');
+        if (obstacles.length > 0) {
+            obstaclesTable.innerHTML = obstacles.map((o, index) => {
+                const obstacle = typeof o === 'object' ? (o.obstacle || '') : o;
+                const solution = typeof o === 'object' ? (o.solution || '') : '';
+                const note = typeof o === 'object' ? (o.note || '') : '';
+                return `
+                    <tr class="border-b hover:bg-gray-50">
+                        <td class="py-2 px-4 text-center">${index + 1}</td>
+                        <td class="py-2 px-4">${obstacle}</td>
+                        <td class="py-2 px-4">${solution}</td>
+                        <td class="py-2 px-4">${note}</td>
+                    </tr>
+                `;
+            }).join('');
+        } else {
+            obstaclesTable.innerHTML = `
+                <tr class="border-b">
+                    <td colspan="4" class="py-2 px-4 text-center text-gray-500">Tidak ada data kendala</td>
+                </tr>
+            `;
+        }
+        modal.classList.remove('hidden');
     }
+    
+    if(btnAmApprove){
+        const id = btnAmApprove.getAttribute('data-id'); const status = 'approved';
+        showConfirmModal('Yakin set status laporan bulanan?', async ()=>{ await api('?ajax=admin_set_monthly_status', { id, status }); renderAdminMonthly(); });
+    }
+
+    if(btnAmDisapprove){
+        const id = btnAmDisapprove.getAttribute('data-id'); const status = 'disapproved';
+        showConfirmModal('Yakin set status laporan bulanan?', async ()=>{ await api('?ajax=admin_set_monthly_status', { id, status }); renderAdminMonthly(); });
+    }
 });
 
 memberForm && memberForm.addEventListener('submit', async (e)=>{
@@ -1219,9 +2101,9 @@ memberForm && memberForm.addEventListener('submit', async (e)=>{
         startup: qs('#startup').value,
         foto: fotoDataUrlInput.value,
     };
-    if(!id){ payload.password = qs('#password-new').value; const confirm = qs('#password-confirm').value; if(!payload.password || payload.password!==confirm){ alert('Password admin untuk member baru wajib dan harus cocok'); return; } }
+    if(!id){ payload.password = qs('#password-new').value; const confirm = qs('#password-confirm').value; if(!payload.password || payload.password!==confirm){ showNotif('Password admin untuk member baru wajib dan harus cocok'); return; } }
     const r = await api('?ajax=save_member', payload);
-    if(r.ok){ renderMembers(); loadLabeledFaceDescriptors(); stopModalCamera(); memberModal.classList.add('hidden'); } else { alert(r.message||'Gagal menyimpan'); }
+    if(r.ok){ renderMembers(); loadLabeledFaceDescriptors(); stopModalCamera(); memberModal.classList.add('hidden'); } else { showNotif(r.message||'Gagal menyimpan'); }
 });
 
 // Laporan
@@ -1238,30 +2120,57 @@ async function renderLaporan(){
         return (nameMatch||nimMatch) && dateMatch;
     }).sort((a,b)=> new Date(b.jam_masuk_iso||0) - new Date(a.jam_masuk_iso||0));
     const body = qs('#table-laporan-body'); if(!body) return; body.innerHTML='';
-    if(filtered.length===0){ body.innerHTML = `<tr><td colspan="9" class="text-center py-4">Tidak ada data kehadiran.</td></tr>`; return; }
+    if(filtered.length===0){ body.innerHTML = `<tr><td colspan="11" class="text-center py-4">Tidak ada data kehadiran.</td></tr>`; return; }
     filtered.forEach(att=>{
         const d = new Date(att.jam_masuk_iso);
         const tanggal = isNaN(d.getTime()) ? '-' : d.toLocaleDateString('id-ID', { year:'numeric', month:'long', day:'numeric'});
         const statusClass = att.status === 'terlambat' ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700';
         const statusText = att.status === 'terlambat' ? 'Terlambat' : 'On Time';
+
+        let dailyReportStatus = 'Belum ada laporan';
+        let dailyReportClass = 'badge-gray';
+        if(att.daily_report_status) {
+            dailyReportStatus = att.daily_report_status === 'approved' ? 'Sudah di-approve' : (att.daily_report_status === 'disapproved' ? 'Tidak di-approve' : 'Belum di-approve');
+            dailyReportClass = att.daily_report_status === 'approved' ? 'badge-green' : (att.daily_report_status === 'disapproved' ? 'badge-red' : 'badge-blue');
+        }
+
         const tr = document.createElement('tr'); tr.className='border-b hover:bg-gray-50';
+        
+        // Format jam untuk tampilan (hanya jam:menit)
+        const formatTime = (timeStr) => {
+            if (!timeStr || timeStr === '-') return '-';
+            if (timeStr === 'izin' || timeStr === 'sakit' || timeStr === 'wfh') return timeStr;
+            // Extract only HH:MM from HH:MM:SS
+            return timeStr.substring(0, 5);
+        };
+        
+        const jamMasuk = (att.ket === 'izin' || att.ket === 'sakit' || att.ket === 'wfh') ? att.ket : formatTime(att.jam_masuk);
+        const jamPulang = (att.ket === 'izin' || att.ket === 'sakit') ? att.ket : formatTime(att.jam_pulang);
+        const ekspresiMasuk = (att.ket === 'izin' || att.ket === 'sakit' || att.ket === 'wfh') ? '-' : (att.ekspresi_masuk || '-');
+        const ekspresiPulang = (att.ket === 'izin' || att.ket === 'sakit') ? '-' : (att.ekspresi_pulang || '-');
+        
         tr.innerHTML = `
             <td class="py-2 px-4">${tanggal}</td>
             <td class="py-2 px-4">${att.nim||''}</td>
             <td class="py-2 px-4">${att.nama||''}</td>
-            <td class="py-2 px-4">${att.jam_masuk||''}</td>
-            <td class="py-2 px-4">${att.ekspresi_masuk||'-'}</td>
-            <td class="py-2 px-4"><span class="px-2 py-1 rounded-full text-xs font-medium ${statusClass}">${statusText}</span></td>
-            <td class="py-2 px-4">${att.jam_pulang||'Belum Pulang'}</td>
-            <td class="py-2 px-4">${att.ekspresi_pulang||'-'}</td>
-            <td class="py-2 px-4"><button class="btn-delete-laporan bg-red-500 hover:bg-red-600 text-white font-bold py-1 px-2 rounded" data-id="${att.id}">Hapus</button></td>`;
+            <td class="py-2 px-4">${jamMasuk}</td>
+            <td class="py-2 px-4">${ekspresiMasuk}</td>
+            <td class="py-2 px-4"><span class="badge ${statusClass}">${statusText}</span></td>
+            <td class="py-2 px-4">${att.ket||'-'}</td>
+            <td class="py-2 px-4">${jamPulang}</td>
+            <td class="py-2 px-4">${ekspresiPulang}</td>
+            <td class="py-2 px-4"><span class="badge ${dailyReportClass}">${dailyReportStatus}</span></td>
+            <td class="py-2 px-4">
+                <button title="Lihat Laporan" class="btn-view-dr-admin text-blue-600 font-bold" data-user="${att.user_id}" data-date="${(att.jam_masuk_iso||'').slice(0,10)}"><i class="fi fi-ss-eye"></i></button>
+                <button title="Edit" class="btn-edit-att text-yellow-600 font-bold ml-1" data-json='${JSON.stringify(att).replace(/'/g,"&apos;")}'><i class="fi fi-sr-pen-square"></i></button>
+                <button title="Hapus" class="btn-delete-laporan text-red-600 font-bold ml-1" data-id="${att.id}"><i class="fi fi-ss-trash"></i></button>
+            </td>`;
         body.appendChild(tr);
     });
 }
 
 [qs('#search-laporan'), qs('#filter-tanggal-mulai'), qs('#filter-tanggal-selesai')].forEach(el=>{ if(el) el.addEventListener('input', renderLaporan); });
 
-// Show all data button
 qs('#btn-show-all') && qs('#btn-show-all').addEventListener('click', ()=>{
     if(qs('#search-laporan')) qs('#search-laporan').value = '';
     if(qs('#filter-tanggal-mulai')) qs('#filter-tanggal-mulai').value = '';
@@ -1269,38 +2178,786 @@ qs('#btn-show-all') && qs('#btn-show-all').addEventListener('click', ()=>{
     renderLaporan();
 });
 
+// Absence modal handlers
+qs('#btn-open-absence') && qs('#btn-open-absence').addEventListener('click', async ()=>{
+    const modal = qs('#absence-modal');
+    const select = qs('#abs-user'); const search = qs('#abs-search');
+    const r = await fetch('?ajax=get_members'); const j = await r.json(); const members=(j.data||[]);
+    const fill = (term='')=>{ select.innerHTML=''; members.filter(m=> (m.nama||'').toLowerCase().includes(term)|| (m.nim||'').toLowerCase().includes(term)).forEach(m=>{ const o=document.createElement('option'); o.value=m.id; o.textContent=`${m.nama} (${m.nim})`; select.appendChild(o); }); };
+    search.oninput = ()=> fill(search.value.toLowerCase()); fill('');
+    modal.classList.remove('hidden');
+});
+qs('#abs-cancel') && qs('#abs-cancel').addEventListener('click', ()=> qs('#absence-modal').classList.add('hidden'));
+// Add event listener for abs-type change
+document.addEventListener('change', (e) => {
+    if (e.target.id === 'abs-type') {
+        const wfhForm = qs('#abs-wfh-form');
+        if (e.target.value === 'wfh') {
+            wfhForm.classList.remove('hidden');
+        } else {
+            wfhForm.classList.add('hidden');
+        }
+    }
+});
+
+qs('#abs-save') && qs('#abs-save').addEventListener('click', async ()=>{
+    const payload = {
+        user_id: qs('#abs-user').value,
+        date: qs('#abs-date').value,
+        type: qs('#abs-type').value,
+        jam_masuk: qs('#abs-jam-masuk')?.value,
+        jam_pulang: qs('#abs-jam-pulang')?.value
+    };
+    const r = await api('?ajax=admin_add_absence', payload);
+    if(r.ok){
+        qs('#absence-modal').classList.add('hidden');
+        renderLaporan();
+    } else {
+        showNotif(r.message||'Gagal simpan');
+    }
+});
+// Daily report review modal
+qs('#dr-close') && qs('#dr-close').addEventListener('click', ()=> qs('#dr-modal').classList.add('hidden'));
+qs('#dr-approve') && qs('#dr-approve').addEventListener('click', ()=> handleDrApproveDisapprove('approved'));
+qs('#dr-disapprove') && qs('#dr-disapprove').addEventListener('click', ()=> handleDrApproveDisapprove('disapproved'));
+async function handleDrApproveDisapprove(status){
+    const id = qs('#dr-modal').dataset.reportId; const evaluation = qs('#dr-evaluation').value;
+    if(!id){ showNotif('Tidak ada laporan.'); return; }
+    showConfirmModal('Yakin '+(status==='approved'?'approve':'disapprove')+'?', async ()=>{
+        const r = await api('?ajax=admin_set_daily_status', { id, status, evaluation });
+        if(r.ok){ qs('#dr-modal').classList.add('hidden'); renderLaporan(); } else { showNotif(r.message||'Gagal'); }
+    });
+}
+
+const editAttModal = qs('#edit-att-modal');
+qs('#edit-att-cancel') && qs('#edit-att-cancel').addEventListener('click', ()=> editAttModal.classList.add('hidden'));
+qs('#edit-att-form') && qs('#edit-att-form').addEventListener('submit', async (e)=>{
+    e.preventDefault();
+    const id = qs('#edit-att-id').value;
+    const jam_masuk = qs('#edit-att-jam-masuk').value || '';
+    const jam_pulang = qs('#edit-att-jam-pulang').value || '';
+    const ket = qs('#edit-att-ket').value || '';
+    const status = qs('#edit-att-status').value || '';
+    
+    // Add seconds to time values
+    const jam_masuk_with_seconds = jam_masuk ? jam_masuk + ':00' : '';
+    const jam_pulang_with_seconds = jam_pulang ? jam_pulang + ':00' : '';
+    
+    const r = await api('?ajax=admin_update_attendance', { 
+        id, 
+        jam_masuk: jam_masuk_with_seconds, 
+        jam_pulang: jam_pulang_with_seconds, 
+        ket, 
+        status 
+    });
+    showNotif(r.ok ? 'Berhasil disimpan.' : (r.message || 'Gagal menyimpan'), r.ok);
+    if(r.ok){ editAttModal.classList.add('hidden'); renderLaporan(); }
+});
+
 document.addEventListener('click', async (e)=>{
     if(e.target.classList.contains('btn-delete-laporan')){
         const id = e.target.getAttribute('data-id');
         showConfirmModal('Apakah Anda yakin ingin menghapus data kehadiran ini?', async ()=>{ await api('?ajax=delete_attendance', { id }); renderLaporan(); });
     }
+    if(e.target.classList.contains('btn-edit-att')){
+        const att = JSON.parse(e.target.getAttribute('data-json').replace(/&apos;/g, "'"));
+        qs('#edit-att-id').value = att.id;
+        qs('#edit-att-date').value = (att.jam_masuk_iso||'').slice(0,10);
+        qs('#edit-att-nama').value = att.nama || '';
+        qs('#edit-att-jam-masuk').value = att.jam_masuk || '';
+        qs('#edit-att-jam-pulang').value = att.jam_pulang || '';
+        editAttModal.classList.remove('hidden');
+    }
+    if(e.target.classList.contains('btn-view-dr-admin')){
+        const userId = e.target.getAttribute('data-user'); const date = e.target.getAttribute('data-date');
+        const r = await api('?ajax=get_daily_report_detail', { user_id: userId, date });
+        const modal = qs('#dr-modal'); const content=qs('#dr-content'); const evalEl=qs('#dr-evaluation');
+        modal.dataset.reportId = r?.data?.id || '';
+        content.textContent = r?.data?.content || '(Belum ada laporan)';
+        evalEl.value = r?.data?.evaluation || '';
+        modal.classList.remove('hidden');
+    }
 });
 
-// Confirm modal logic
 let onConfirmCallback = null;
-function showConfirmModal(message, cb){ const modal=qs('#confirm-modal'); qs('#confirm-modal-message').textContent=message; onConfirmCallback=cb; modal.classList.remove('hidden'); }
-qs('#btn-confirm-yes') && qs('#btn-confirm-yes').addEventListener('click', ()=>{ if(typeof onConfirmCallback==='function') onConfirmCallback(); qs('#confirm-modal').classList.add('hidden'); onConfirmCallback=null; });
-qs('#btn-confirm-no') && qs('#btn-confirm-no').addEventListener('click', ()=>{ qs('#confirm-modal').classList.add('hidden'); onConfirmCallback=null; });
+function showConfirmModal(message, cb){
+    const modal=qs('#confirm-modal');
+    qs('#confirm-modal-message').textContent=message;
+    onConfirmCallback=cb;
+    modal.classList.remove('hidden');
+    modal.classList.add('flex');
+}
+qs('#btn-confirm-yes') && qs('#btn-confirm-yes').addEventListener('click', ()=>{
+    if(typeof onConfirmCallback==='function') onConfirmCallback();
+    qs('#confirm-modal').classList.add('hidden');
+    qs('#confirm-modal').classList.remove('flex');
+    onConfirmCallback=null;
+});
+qs('#btn-confirm-no') && qs('#btn-confirm-no').addEventListener('click', ()=>{
+    qs('#confirm-modal').classList.add('hidden');
+    qs('#confirm-modal').classList.remove('flex');
+    onConfirmCallback=null;
+});
 
-// Init models and descriptors on first load - only for pegawai
-(async function init(){
-    <?php if (isAdmin()): ?>
-    // Admin doesn't need face recognition - skip loading
-    console.log('Admin user - skipping face recognition models');
-    <?php else: ?>
-    // Show loading for pegawai users
-    loadingOverlay.classList.remove('hidden');
-    try {
-        await loadFaceApiModels();
-        await loadLabeledFaceDescriptors();
-    } catch (error) {
-        console.error('Error loading face recognition:', error);
-    } finally {
-        loadingOverlay.classList.add('hidden');
+// Pegawai app: setup Rekap and Monthly pages
+const pageMonthlyList = qs('#page-laporan-bulanan');
+const pageMonthlyForm = qs('#page-monthly-form');
+
+function addAchievementRow(data = { achievement: '', detail: '' }) {
+    const body = qs('#table-achievements-body');
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+        <td class="p-1"><input type="text" class="w-full p-2 border rounded" value="${data.achievement}" placeholder="Capaian..."></td>
+        <td class="p-1"><input type="text" class="w-full p-2 border rounded" value="${data.detail}" placeholder="Detail capaian..."></td>
+        <td class="p-1 text-center"><button type="button" class="btn-delete-row text-red-500 font-bold">Hapus</button></td>
+    `;
+    body.appendChild(tr);
+}
+
+function addObstacleRow(data = { obstacle: '', solution: '', note: '' }) {
+    const body = qs('#table-obstacles-body');
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+        <td class="p-1"><input type="text" class="w-full p-2 border rounded" value="${data.obstacle}" placeholder="Kendala..."></td>
+        <td class="p-1"><input type="text" class="w-full p-2 border rounded" value="${data.solution}" placeholder="Solusi..."></td>
+        <td class="p-1"><input type="text" class="w-full p-2 border rounded" value="${data.note}" placeholder="Catatan..."></td>
+        <td class="p-1 text-center"><button type="button" class="btn-delete-row text-red-500 font-bold">Hapus</button></td>
+    `;
+    body.appendChild(tr);
+}
+
+// Event listeners untuk tombol tambah baris
+qs('#btn-add-achievement').addEventListener('click', () => addAchievementRow());
+qs('#btn-add-obstacle').addEventListener('click', () => addObstacleRow());
+
+// Event listener untuk hapus baris (delegation)
+pageMonthlyForm.addEventListener('click', e => {
+    if (e.target.classList.contains('btn-delete-row')) {
+        e.target.closest('tr').remove();
     }
-    <?php endif; ?>
-})();
+});
+
+// Kembali ke daftar
+qs('#btn-back-to-monthly-list').addEventListener('click', () => {
+    pageMonthlyForm.classList.add('hidden');
+    pageMonthlyList.scrollIntoView({ behavior: 'smooth', block: 'start' });
+});
+
+// Fungsi untuk menyimpan laporan (baik draft maupun submit)
+async function saveMonthlyReport(isSubmit) {
+    const year = qs('#monthly-report-year').value;
+    const month = qs('#monthly-report-month').value;
+    const summary = qs('#monthly-summary').value;
+
+    const achievements = qsa('#table-achievements-body tr').map(tr => {
+        const inputs = tr.querySelectorAll('input');
+        return { achievement: inputs[0].value, detail: inputs[1].value };
+    }).filter(item => item.achievement || item.detail);
+
+    const obstacles = qsa('#table-obstacles-body tr').map(tr => {
+        const inputs = tr.querySelectorAll('input');
+        return { obstacle: inputs[0].value, solution: inputs[1].value, note: inputs[2].value };
+    }).filter(item => item.obstacle || item.solution || item.note);
+
+    const payload = {
+        year: parseInt(year),
+        month: parseInt(month),
+        summary,
+        achievements: JSON.stringify(achievements),
+        obstacles: JSON.stringify(obstacles),
+        submit: isSubmit
+    };
+    
+    const r = await api('?ajax=save_monthly_report', payload);
+    if (r.ok) {
+        showNotif(isSubmit ? 'Laporan berhasil disubmit!' : 'Laporan berhasil disimpan sebagai draft.');
+        pageMonthlyForm.classList.add('hidden');
+        pageMonthlyList.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        renderMonthly(); // Refresh list
+    } else {
+        showNotif(r.message || 'Gagal menyimpan laporan.');
+    }
+}
+
+qs('#btn-save-draft').addEventListener('click', () => saveMonthlyReport(false));
+qs('#form-monthly-report').addEventListener('submit', (e) => {
+    e.preventDefault();
+    saveMonthlyReport(true);
+});
+// --- End Monthly Report Form Logic ---
+
+function getWeekNumberInMonth(date) {
+    const d = new Date(date);
+    d.setHours(0, 0, 0, 0);
+    const firstDayOfMonth = new Date(d.getFullYear(), d.getMonth(), 1);
+    const firstDayOfWeek = firstDayOfMonth.getDay();
+    const offsetDays = firstDayOfWeek === 0 ? 6 : firstDayOfWeek - 1; // Monday = 0, Sunday = 6
+    const weekNumber = Math.ceil((d.getDate() + offsetDays) / 7);
+    return weekNumber;
+}
+
+// Flag to prevent multiple calls
+let isInitRekapRunning = false;
+
+async function initRekapPage() {
+    if (isInitRekapRunning) {
+        console.log('initRekapPage already running, skipping...');
+        return;
+    }
+    
+    isInitRekapRunning = true;
+    const m = parseInt(qs('#rekap-month')?.value || String(new Date().getMonth() + 1));
+    const y = parseInt(qs('#rekap-year')?.value || String(new Date().getFullYear()));
+    console.log('Loading rekap for month:', m, 'year:', y);
+    const r = await api('?ajax=get_rekap', { month: m, year: y });
+    console.log('Rekap data:', r);
+
+    const weekSel = qs('#rekap-week');
+    if (weekSel) {
+        weekSel.innerHTML = '';
+        weekSel.classList.add('hidden');
+        if (r.ok && r.data.length > 0) {
+            const datesInMonth = r.data.map(d => new Date(d.date));
+            const weeks = [...new Set(datesInMonth.map(d => getWeekNumberInMonth(d)))].sort((a, b) => a - b);
+            console.log('Available weeks:', weeks);
+            if (weeks.length >= 1) {
+                // Always show week selector if there's data
+                if (weeks.length > 1) {
+                    // Add "All Weeks" option only if there are multiple weeks
+                    const allOption = document.createElement('option');
+                    allOption.value = '0';
+                    allOption.textContent = 'Semua Minggu';
+                    weekSel.appendChild(allOption);
+                }
+                
+                weeks.forEach(w => {
+                    const option = document.createElement('option');
+                    option.value = w;
+                    option.textContent = `Minggu ke-${w}`;
+                    weekSel.appendChild(option);
+                });
+                weekSel.classList.remove('hidden');
+                
+                // Set default to current week if we're viewing current month and year
+                const currentWeek = getWeekNumberInMonth(new Date());
+                const currentMonth = new Date().getMonth() + 1;
+                const currentYear = new Date().getFullYear();
+                
+                // Always set to current week if we're viewing current month and year
+                if (m === currentMonth && y === currentYear) {
+                    weekSel.value = currentWeek;
+                    console.log('Setting default week to:', currentWeek);
+                    console.log('Week selector value after setting:', weekSel.value);
+                } else {
+                    // For other months, set to first available week
+                    if (weeks.length > 0) {
+                        weekSel.value = weeks[0];
+                        console.log('Setting to first available week:', weeks[0]);
+                        console.log('Week selector value after setting:', weekSel.value);
+                    }
+                }
+            }
+        }
+    }
+
+    // Get selected week (use current week as default if no selection)
+    const currentWeek = getWeekNumberInMonth(new Date());
+    let selectedWeek = parseInt(qs('#rekap-week')?.value || currentWeek);
+    
+    // If week selector is hidden or no value, show all data
+    if (!qs('#rekap-week') || qs('#rekap-week').classList.contains('hidden') || !qs('#rekap-week').value) {
+        selectedWeek = 0; // Show all weeks
+    }
+    
+    // Debug logging
+    console.log('Current week:', currentWeek);
+    console.log('Selected week:', selectedWeek);
+    console.log('Week selector value:', qs('#rekap-week')?.value);
+    console.log('Current month:', new Date().getMonth() + 1, 'Selected month:', m);
+    console.log('Current year:', new Date().getFullYear(), 'Selected year:', y);
+    
+    const body = qs('#table-rekap-body');
+    if (!body) {
+        isInitRekapRunning = false;
+        return;
+    }
+    body.innerHTML = '';
+    if (!r.ok || !r.data || r.data.length === 0) {
+        body.innerHTML = `<tr><td colspan="6" class="text-center py-4">Tidak ada data.</td></tr>`;
+        isInitRekapRunning = false;
+        return;
+    }
+
+    // Store current data globally for week filtering
+    window.currentRekapData = r.data;
+    
+    // Render the data
+    renderRekapData(r.data, m, y);
+    
+    // Reset flag
+    isInitRekapRunning = false;
+}
+
+function renderRekapData(data, m, y) {
+    // Get selected week (use current week as default if no selection)
+    const currentWeek = getWeekNumberInMonth(new Date());
+    let selectedWeek = parseInt(qs('#rekap-week')?.value || currentWeek);
+    
+    // If week selector is hidden or no value, show all data
+    if (!qs('#rekap-week') || qs('#rekap-week').classList.contains('hidden') || !qs('#rekap-week').value) {
+        selectedWeek = 0; // Show all weeks
+    }
+    
+    // Debug logging
+    console.log('Current week:', currentWeek);
+    console.log('Selected week:', selectedWeek);
+    console.log('Week selector value:', qs('#rekap-week')?.value);
+    console.log('Current month:', new Date().getMonth() + 1, 'Selected month:', m);
+    console.log('Current year:', new Date().getFullYear(), 'Selected year:', y);
+    
+    const body = qs('#table-rekap-body');
+    if (!body) {
+        return;
+    }
+    body.innerHTML = '';
+    if (!data || data.length === 0) {
+        body.innerHTML = `<tr><td colspan="6" class="text-center py-4">Tidak ada data.</td></tr>`;
+        return;
+    }
+
+    // Show data for selected week, or all data if no week selector
+    let dataToShow = data;
+    if (selectedWeek > 0) {
+        dataToShow = data.filter(row => {
+            const rowWeek = getWeekNumberInMonth(new Date(row.date));
+            console.log('Row date:', row.date, 'Row week:', rowWeek, 'Selected week:', selectedWeek);
+            return rowWeek === selectedWeek;
+        });
+    } else {
+        // Show all data when "Semua Minggu" is selected or no week selector
+        dataToShow = data;
+    }
+
+    // Calculate past 5 working days (excluding weekends) - only for current month/year
+    const today = new Date();
+    const currentMonth = today.getMonth() + 1;
+    const currentYear = today.getFullYear();
+    const past5WorkingDays = [];
+    
+    // Only calculate past 5 days if we're viewing current month and year
+    if (m === currentMonth && y === currentYear) {
+        let tempDate = new Date(today);
+        let workingDaysFound = 0;
+        
+        while (workingDaysFound < 5) {
+            const dayOfWeek = tempDate.getDay();
+            if (dayOfWeek !== 0 && dayOfWeek !== 6) { // Not Sunday (0) and not Saturday (6)
+                past5WorkingDays.push(tempDate.toISOString().slice(0, 10));
+                workingDaysFound++;
+            }
+            tempDate.setDate(tempDate.getDate() - 1);
+        }
+    }
+    
+
+
+    if (dataToShow.length === 0) {
+        if (selectedWeek > 0) {
+            body.innerHTML = `<tr><td colspan="6" class="text-center py-4">Tidak ada data untuk minggu ke-${selectedWeek}.</td></tr>`;
+        } else {
+            body.innerHTML = `<tr><td colspan="6" class="text-center py-4">Tidak ada data untuk periode ini.</td></tr>`;
+        }
+        return;
+    }
+
+    dataToShow.forEach(row => {
+        const d = new Date(row.date);
+        const tanggal = d.toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' });
+        const dayMap = { Monday: 'Senin', Tuesday: 'Selasa', Wednesday: 'Rabu', Thursday: 'Kamis', Friday: 'Jumat' };
+        const day = dayMap[d.toLocaleDateString('en-US', { weekday: 'long' })] || '';
+        const dr = row.daily_report;
+        let reportBtns = '';
+        
+        // Check if attendance is complete (has entry time or is WFH)
+        const hasEntryTime = row.jam_masuk && row.jam_masuk !== '-';
+        const isWFH = row.ket === 'wfh';
+        const isAttendanceComplete = hasEntryTime || isWFH;
+        
+        // Check if within 5-day timeframe (only for current month/year)
+        const isWithinTimeframe = (m === currentMonth && y === currentYear) ? past5WorkingDays.includes(row.date) : true;
+        
+        // Check if can edit (not approved and within timeframe)
+        const canEdit = dr && dr.status !== 'approved' && isWithinTimeframe;
+        
+
+
+        if (dr) {
+            if (dr.status === 'approved') {
+                // Only view button for approved reports
+                reportBtns = `<button title="Lihat" class="btn-view-dr text-blue-600 font-bold" data-date="${row.date}"><i class="fi fi-ss-eye"></i></button>`;
+            } else {
+                // For disapproved and pending reports, always allow edit and view
+                reportBtns = `<button title="Edit" class="btn-edit-dr text-yellow-600 font-bold ml-1" data-date="${row.date}"><i class="fi fi-sr-pen-square"></i></button>
+                            <button title="Lihat" class="btn-view-dr text-blue-600 font-bold ml-1" data-date="${row.date}"><i class="fi fi-ss-eye"></i></button>`;
+            }
+        } else {
+            // No report exists
+            if (isAttendanceComplete && isWithinTimeframe) {
+                reportBtns = `<button class="btn-create-dr bg-emerald-500 hover:bg-emerald-600 text-white btn-pill" data-date="${row.date}">Buat</button>`;
+            } else if (!isAttendanceComplete && isWithinTimeframe) {
+                reportBtns = `<span class="text-gray-400">Tidak presensi</span>`;
+            } else if (!isWithinTimeframe) {
+                reportBtns = `<span class="text-gray-400">Tidak tersedia</span>`;
+            }
+        }
+
+        const statusLabel = dr ? (dr.status === 'approved' ? `<span class="badge badge-green">Di-approve</span>` : (dr.status === 'disapproved' ? `<span class="badge badge-red">Tidak di-approve</span>` : `<span class="badge badge-gray">Belum di-approve</span>`)) : '<span class="badge badge-gray">Belum ada laporan</span>';
+        // Format time for display (only HH:MM)
+        const formatTimeDisplay = (timeStr) => {
+            if (!timeStr || timeStr === '-') return '-';
+            if (timeStr === 'izin' || timeStr === 'sakit' || timeStr === 'wfh') return timeStr;
+            return timeStr.substring(0, 5);
+        };
+        
+        const tr = document.createElement('tr');
+        tr.className = 'border-b hover:bg-gray-50 text-center';
+        tr.innerHTML = `
+            <td class="py-2 px-4">${day}</td>
+            <td class="py-2 px-4">${tanggal}</td>
+            <td class="py-2 px-4">${formatTimeDisplay(row.jam_masuk)}</td>
+            <td class="py-2 px-4">${formatTimeDisplay(row.jam_pulang)}</td>
+            <td class="py-2 px-4">${reportBtns}</td>
+            <td class="py-2 px-4">${statusLabel}</td>`;
+        body.appendChild(tr);
+    });
+    
+    // Reset flag
+    isInitRekapRunning = false;
+}
+
+// Initialize rekap page controls
+const rekapControls = qs('#rekap-controls');
+if (rekapControls) {
+    console.log('Initializing rekap controls...');
+    // Add event listeners for month, year, and week selectors
+    qs('#rekap-month') && qs('#rekap-month').addEventListener('change', () => {
+        console.log('Month changed to:', qs('#rekap-month').value);
+        // Don't reset week selector, just reload data
+        initRekapPage();
+    });
+    qs('#rekap-year') && qs('#rekap-year').addEventListener('change', () => {
+        console.log('Year changed to:', qs('#rekap-year').value);
+        // Don't reset week selector, just reload data
+        initRekapPage();
+    });
+    qs('#rekap-week') && qs('#rekap-week').addEventListener('change', () => {
+        console.log('Week selector changed to:', qs('#rekap-week').value);
+        // Just reload the current data with new week filter
+        const currentData = window.currentRekapData;
+        if (currentData) {
+            const m = parseInt(qs('#rekap-month')?.value || String(new Date().getMonth() + 1));
+            const y = parseInt(qs('#rekap-year')?.value || String(new Date().getFullYear()));
+            renderRekapData(currentData, m, y);
+        }
+    });
+    qs('#btn-load-rekap') && qs('#btn-load-rekap').addEventListener('click', () => {
+        console.log('Load rekap button clicked');
+        initRekapPage();
+    });
+}
+
+const drUserModal = document.createElement('div');
+drUserModal.id='dr-user-modal';
+drUserModal.className='fixed inset-0 bg-black/50 hidden items-center justify-center z-50';
+drUserModal.innerHTML = `
+    <div class="bg-white p-6 rounded-lg shadow-2xl w-full max-w-2xl">
+        <h3 class="text-xl font-bold mb-2">Laporan Harian</h3>
+        <div class="text-sm text-gray-500 mb-2" id="dr-user-date"></div>
+        <textarea id="dr-user-content" class="w-full border rounded p-2" rows="8" placeholder="Tulis detail pekerjaan hari ini..."></textarea>
+        <div id="dr-evaluation-container" class="mt-4 hidden">
+            <h4 class="text-sm font-bold text-gray-700 mb-1">Evaluasi Admin:</h4>
+            <p id="dr-user-evaluation" class="whitespace-pre-wrap border p-3 rounded bg-gray-100"></p>
+        </div>
+        <div class="flex justify-end gap-2 mt-4">
+          <button id="dr-user-cancel" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded">Batal</button>
+          <button id="dr-user-save" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded">Simpan</button>
+        </div>
+    </div>`;
+document.body.appendChild(drUserModal);
+
+document.addEventListener('click', async (e)=>{
+    const target = e.target.closest('.btn-create-dr, .btn-edit-dr, .btn-view-dr');
+    if(target){
+        const date = target.getAttribute('data-date');
+        qs('#dr-user-date').textContent = 'Tanggal: '+date;
+        const isView = target.classList.contains('btn-view-dr');
+        const ta = qs('#dr-user-content');
+        ta.value = '';
+        ta.disabled = false;
+        qs('#dr-user-save').style.display = 'inline-block';
+        qs('#dr-evaluation-container').classList.add('hidden');
+        
+        const r = await api('?ajax=get_rekap', { month: new Date(date).getMonth()+1, year: new Date(date).getFullYear() });
+        const item = (r.data||[]).find(x=> x.date===date);
+        if(item && item.daily_report){
+            ta.value = item.daily_report.content||'';
+            if(item.daily_report.status==='approved' || isView){
+                 ta.disabled=true;
+                 qs('#dr-user-save').style.display='none';
+                 if (item.daily_report.evaluation) {
+                     qs('#dr-user-evaluation').textContent = item.daily_report.evaluation;
+                     qs('#dr-evaluation-container').classList.remove('hidden');
+                 }
+            } else {
+                 qs('#dr-evaluation-container').classList.add('hidden');
+            }
+        }
+        drUserModal.classList.remove('hidden'); 
+        drUserModal.classList.add('flex');
+        drUserModal.dataset.date = date;
+    }
+});
+qs('#dr-user-cancel') && qs('#dr-user-cancel').addEventListener('click', ()=>{ drUserModal.classList.add('hidden'); drUserModal.classList.remove('flex'); });
+qs('#dr-user-save') && qs('#dr-user-save').addEventListener('click', async ()=>{
+    const date = drUserModal.dataset.date; const content = qs('#dr-user-content').value;
+    const r = await api('?ajax=save_daily_report', { date, content });
+    if(r.ok){ drUserModal.classList.add('hidden'); drUserModal.classList.remove('flex'); initRekapPage(); } else { showNotif(r.message||'Gagal simpan'); }
+});
+
+// Helper function for month names
+function monthName(monthIndex) {
+    const months = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+    return months[monthIndex] || '';
+}
+
+// Tambahkan state untuk paginasi di atas fungsi renderMonthly
+let currentMonthlyPageYear = new Date().getFullYear();
+
+async function renderMonthly() {
+    const res = await fetch('?ajax=get_monthly_reports');
+    const j = await res.json();
+    const list = (j.data || []);
+    const body = qs('#table-monthly-body');
+    if (!body) return;
+    body.innerHTML = ''; // Kosongkan tabel body
+
+    const monthName = (m) => ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'][m - 1];
+
+    const year = currentMonthlyPageYear; // Gunakan tahun dari state
+    const allMonths = Array.from({ length: 12 }, (_, i) => i + 1);
+
+    // Logic untuk aturan waktu (2 bulan terakhir)
+    const now = new Date();
+    const currentYear = now.getFullYear();
+    const currentMonth = now.getMonth() + 1; // 1-12
+
+    allMonths.forEach(m => {
+        // Handle case where year/month might be 0 or invalid
+        let item = list.find(it => {
+            const itemYear = parseInt(it.year) || 0;
+            const itemMonth = parseInt(it.month) || 0;
+            return itemMonth === m && itemYear === year;
+        });
+        
+        // If no item found for this month, check if there's a record with year=0 or month=0 for this month
+        if (!item && m === 8 && year === 2025) {
+            item = list.find(it => {
+                const itemYear = parseInt(it.year) || 0;
+                const itemMonth = parseInt(it.month) || 0;
+                return (itemYear === 0 || itemMonth === 0) && it.status === 'approved';
+            });
+        }
+        
+        const tr = document.createElement('tr');
+        tr.className = 'border-b hover:bg-gray-50 text-center';
+        const label = `${monthName(m)} ${year}`;
+
+        let actionBtn;
+        let statusBadge;
+
+        // Cek apakah bulan ini valid untuk diedit/dibuat
+        const isEditableTime = (year === currentYear && (m === currentMonth || m === currentMonth - 1)) ||
+                               (year === currentYear - 1 && currentMonth === 1 && m === 12);
+
+        if (item) { // Jika laporan sudah ada
+            const isApproved = item.status === 'approved';
+            const isDraft = item.status === 'draft';
+            const isSubmitted = item.status === 'submitted';
+            
+            if (isApproved) {
+                // Jika sudah di-approve, hanya bisa view (regardless of timeframe)
+                actionBtn = `<button class="btn-view-month text-blue-600 font-bold" data-json='${JSON.stringify(item).replace(/'/g, "&apos;")}'><i class="fi fi-ss-eye"></i> Lihat</button>`;
+            } else if (isDraft) {
+                // Jika draft, bisa view dan edit (jika dalam timeframe)
+                actionBtn = `<button class="btn-view-month text-blue-600 font-bold" data-json='${JSON.stringify(item).replace(/'/g, "&apos;")}'><i class="fi fi-ss-eye"></i> Lihat</button>`;
+                if (isEditableTime) {
+                    actionBtn += ` <button class="btn-edit-month text-yellow-600 font-bold ml-2" data-json='${JSON.stringify(item).replace(/'/g, "&apos;")}'><i class="fi fi-sr-pen-square"></i> Edit Draft</button>`;
+                }
+            } else if (isSubmitted) {
+                // Jika submitted, bisa view dan edit (jika dalam timeframe)
+                actionBtn = `<button class="btn-view-month text-blue-600 font-bold" data-json='${JSON.stringify(item).replace(/'/g, "&apos;")}'><i class="fi fi-ss-eye"></i> Lihat</button>`;
+                if (isEditableTime) {
+                    actionBtn += ` <button class="btn-edit-month text-yellow-600 font-bold ml-2" data-json='${JSON.stringify(item).replace(/'/g, "&apos;")}'><i class="fi fi-sr-pen-square"></i> Edit</button>`;
+                }
+            } else {
+                // Jika disapproved, bisa view dan edit (jika dalam timeframe)
+                actionBtn = `<button class="btn-view-month text-blue-600 font-bold" data-json='${JSON.stringify(item).replace(/'/g, "&apos;")}'><i class="fi fi-ss-eye"></i> Lihat</button>`;
+                if (isEditableTime) {
+                    actionBtn += ` <button class="btn-edit-month text-yellow-600 font-bold ml-2" data-json='${JSON.stringify(item).replace(/'/g, "&apos;")}'><i class="fi fi-sr-pen-square"></i> Edit</button>`;
+                }
+            }
+            
+            // Status badge
+            if (isApproved) {
+                statusBadge = `<span class="badge badge-green">Di-approve</span>`;
+            } else if (item.status === 'disapproved') {
+                statusBadge = `<span class="badge badge-red">Tidak di-approve</span>`;
+            } else if (isDraft) {
+                statusBadge = `<span class="badge badge-gray">Draft</span>`;
+            } else if (isSubmitted) {
+                statusBadge = `<span class="badge badge-blue">Submitted</span>`;
+            } else {
+                statusBadge = `<span class="badge badge-gray">${item.status}</span>`;
+            }
+        } else { // Jika laporan belum ada
+            if (isEditableTime) {
+                actionBtn = `<button class="btn-create-month bg-emerald-500 hover:bg-emerald-600 text-white btn-pill" data-year="${year}" data-month="${m}">Buat</button>`;
+            } else {
+                actionBtn = `<span class="text-gray-400">Not Available</span>`;
+            }
+            statusBadge = `<span class="badge badge-gray">Belum ada laporan</span>`;
+        }
+
+        tr.innerHTML = `
+            <td class="py-2 px-4">${label}</td>
+            <td class="py-2 px-4">${actionBtn}</td>
+            <td class="py-2 px-4">${statusBadge}</td>`;
+        body.appendChild(tr);
+    });
+    
+    // Hapus dan buat ulang tombol paginasi
+    let paginationDiv = qs('#monthly-pagination');
+    if (paginationDiv) paginationDiv.remove();
+    
+    paginationDiv = document.createElement('div');
+    paginationDiv.id = 'monthly-pagination';
+    paginationDiv.className = 'mt-4 flex justify-center gap-2';
+    paginationDiv.innerHTML = `
+        <button data-year="2025" class="page-btn px-4 py-2 rounded ${currentMonthlyPageYear === 2025 ? 'bg-indigo-600 text-white' : 'bg-gray-200'}">2025</button>
+        <button data-year="2026" class="page-btn px-4 py-2 rounded ${currentMonthlyPageYear === 2026 ? 'bg-indigo-600 text-white' : 'bg-gray-200'}">2026</button>
+    `;
+    body.closest('.overflow-x-auto').insertAdjacentElement('afterend', paginationDiv);
+}
+
+
+async function renderAdminMonthly(){
+    const mSel = qs('#am-month'); const ySel = qs('#am-year');
+    if(mSel && mSel.options.length<=2){
+        const months=['Januari','Februari','Maret','April','Mei','Juni','Juli','Agustus','September','Oktober','November','Desember'];
+        months.forEach((m,i)=>{ const o=document.createElement('option'); o.value=String(i+1); o.textContent=m; mSel.appendChild(o); });
+        const yNow=new Date().getFullYear(); for(let y=yNow-2;y<=yNow+1;y++){ const o=document.createElement('option'); o.value=String(y); o.textContent=String(y); ySel.appendChild(o);}
+    }
+    const body = qs('#am-body'); if(!body) return; body.innerHTML='';
+    const payload = { term: qs('#am-search')?.value||'', month: qs('#am-month')?.value||'', year: qs('#am-year')?.value||'' };
+    const r = await api('?ajax=admin_get_monthly_reports', payload);
+    const j = r.data||[];
+    if(j.length===0){ body.innerHTML = `<tr><td colspan="5" class="text-center py-4">Tidak ada data.</td></tr>`; return; }
+    const monthName=(m)=>['Januari','Februari','Maret','April','Mei','Juni','Juli','Agustus','September','Oktober','November','Desember'][m-1];
+    j.forEach(it=>{
+        const tr=document.createElement('tr'); tr.className='border-b hover:bg-gray-50';
+        const label = `${monthName(parseInt(it.month))} ${it.year}`;
+        const detailBtn = `<button class="btn-view-month-detail text-blue-600 font-bold text-center" data-id="${it.id}"><i class="fi fi-ss-eye text-xl"></i></button>`;
+        const statusBadge = it.status==='approved'? `<span class="badge badge-green">Di-approve</span>`:(it.status==='disapproved'?`<span class="badge badge-red">Tidak di-approve</span>`:`<span class="badge badge-gray">Belum di-approve</span>`);
+        const actions = (it.status === 'draft' || it.status === 'submitted' || it.status === 'approved' || it.status === 'disapproved') ?
+            `<button class="btn-am-approve bg-emerald-600 hover:bg-emerald-700 text-white px-2 py-1 rounded mr-1" data-id="${it.id}">Approve</button>
+            <button class="btn-am-disapprove bg-red-500 hover:bg-red-600 text-white px-2 py-1 rounded" data-id="${it.id}">Disapprove</button>` : '';
+
+        tr.innerHTML = `
+            <td class="py-2 px-4">${label}</td>
+            <td class="py-2 px-4">${it.nama||''}</td>
+            <td class="py-2 px-4">${detailBtn}</td>
+            <td class="py-2 px-4">${statusBadge}</td>
+            <td class="py-2 px-4">${actions}</td>`;
+        body.appendChild(tr);
+    });
+}
+
+['#am-search','#am-month','#am-year'].forEach(sel=>{ if(qs(sel)) qs(sel).addEventListener('input', renderAdminMonthly); });
+qs('#am-reset') && qs('#am-reset').addEventListener('click', ()=>{ if(qs('#am-search')) qs('#am-search').value=''; if(qs('#am-month')) qs('#am-month').value=''; if(qs('#am-year')) qs('#am-year').value=''; renderAdminMonthly(); });
+
+document.addEventListener('click', async (e)=>{
+    if(e.target.classList.contains('btn-am-approve')||e.target.classList.contains('btn-am-disapprove')){
+        const id = e.target.getAttribute('data-id'); const status = e.target.classList.contains('btn-am-approve') ? 'approved' : 'disapproved';
+        showConfirmModal('Yakin set status laporan bulanan?', async ()=>{ await api('?ajax=admin_set_monthly_status', { id, status }); renderAdminMonthly(); });
+    }
+});
 <?php endif; ?>
+
+// Tambahkan event listener untuk tombol-tombol di tabel laporan bulanan
+document.addEventListener('click', async (e) => {
+    const target = e.target.closest('.btn-create-month, .btn-edit-month, .btn-view-month, .page-btn');
+    if (!target) return;
+
+    if (target.classList.contains('page-btn')) {
+        currentMonthlyPageYear = parseInt(target.dataset.year);
+        renderMonthly();
+        return;
+    }
+
+    // Tampilkan form di atas daftar
+    pageMonthlyForm.classList.remove('hidden');
+    pageMonthlyForm.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+    const isViewOnly = target.classList.contains('btn-view-month');
+    
+    let year, month, reportData = null;
+
+    if (target.classList.contains('btn-create-month')) {
+        year = parseInt(target.dataset.year);
+        month = parseInt(target.dataset.month);
+        qs('#monthly-form-title').textContent = `Buat Laporan Bulan ${monthName(month-1)} ${year}`;
+    } else { // Edit atau View
+        reportData = JSON.parse(target.dataset.json.replace(/&apos;/g, "'"));
+        year = parseInt(reportData.year) || 0;
+        month = parseInt(reportData.month) || 0;
+        qs('#monthly-form-title').textContent = `${isViewOnly ? 'Lihat' : 'Edit'} Laporan Bulan ${monthName(month-1)} ${year}`;
+    }
+
+    // Set info pegawai di form
+    qs('#pegawai-info-monthly-form').innerHTML = qs('#pegawai-info-monthly').innerHTML;
+    
+    // Reset dan isi form
+    qs('#form-monthly-report').reset();
+    qs('#table-achievements-body').innerHTML = '';
+    qs('#table-obstacles-body').innerHTML = '';
+    qs('#monthly-report-year').value = year;
+    qs('#monthly-report-month').value = month;
+
+    if (reportData) {
+        qs('#monthly-summary').value = reportData.summary || '';
+        const achievements = JSON.parse(reportData.achievements || '[]');
+        const obstacles = JSON.parse(reportData.obstacles || '[]');
+        achievements.forEach(addAchievementRow);
+        obstacles.forEach(addObstacleRow);
+    } else {
+        // Tambah satu baris kosong saat membuat baru
+        addAchievementRow();
+        addObstacleRow();
+    }
+    
+    // Atur visibilitas tombol dan field jika view-only
+    const fields = qsa('#form-monthly-report input, #form-monthly-report textarea, #form-monthly-report button');
+    fields.forEach(field => {
+        // Jangan disable tombol kembali
+        if(field.id !== 'btn-back-to-monthly-list') {
+            field.disabled = isViewOnly;
+        }
+    });
+
+    // Sembunyikan tombol simpan jika view-only
+    qs('#btn-save-draft').style.display = isViewOnly ? 'none' : 'inline-block';
+    qs('button[type="submit"]', qs('#form-monthly-report')).style.display = isViewOnly ? 'none' : 'inline-block';
+});
 </script>
 </body>
 </html>
