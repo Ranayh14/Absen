@@ -24,16 +24,22 @@ function getPdo(): PDO {
         return $pdo;
     } catch (PDOException $e) {
         // Create database if missing, then connect again
-        $pdoRoot = new PDO("mysql:host=$DB_HOST;charset=utf8mb4", $DB_USER, $DB_PASS, [
-            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-        ]);
-        $pdoRoot->exec("CREATE DATABASE IF NOT EXISTS `$DB_NAME` CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci");
-        $pdoRoot = null;
-        $pdo = new PDO("mysql:host=$DB_HOST;dbname=$DB_NAME;charset=utf8mb4", $DB_USER, $DB_PASS, [
-            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-        ]);
-        return $pdo;
+        try {
+            $pdoRoot = new PDO("mysql:host=$DB_HOST;charset=utf8mb4", $DB_USER, $DB_PASS, [
+                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+            ]);
+            $pdoRoot->exec("CREATE DATABASE IF NOT EXISTS `$DB_NAME` CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci");
+            $pdoRoot = null;
+            $pdo = new PDO("mysql:host=$DB_HOST;dbname=$DB_NAME;charset=utf8mb4", $DB_USER, $DB_PASS, [
+                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+            ]);
+            return $pdo;
+        } catch (PDOException $e2) {
+            // If we can't even connect to MySQL, return a proper error
+            error_log("Database connection failed: " . $e2->getMessage());
+            throw new Exception("Database connection failed");
+        }
     }
 }
 
@@ -53,6 +59,7 @@ function ensureSchema(PDO $pdo): void {
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
     );
+    
     // attendance
     $pdo->exec(
         "CREATE TABLE IF NOT EXISTS attendance (
@@ -61,9 +68,11 @@ function ensureSchema(PDO $pdo): void {
             jam_masuk VARCHAR(20) NULL,
             jam_masuk_iso DATETIME NULL,
             ekspresi_masuk VARCHAR(50) NULL,
+            screenshot_masuk LONGTEXT NULL,
             jam_pulang VARCHAR(20) NULL,
             jam_pulang_iso DATETIME NULL,
             ekspresi_pulang VARCHAR(50) NULL,
+            screenshot_pulang LONGTEXT NULL,
             status ENUM('ontime','terlambat') DEFAULT 'ontime',
             ket ENUM('hadir','izin','sakit','alpha') DEFAULT 'hadir',
             daily_report_id INT NULL,
@@ -73,18 +82,31 @@ function ensureSchema(PDO $pdo): void {
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
     );
     
-    // Add status column if it doesn't exist (for existing databases)
-    try {
-        $pdo->exec("ALTER TABLE attendance ADD COLUMN status ENUM('ontime','terlambat') DEFAULT 'ontime' AFTER ekspresi_pulang");
-    } catch (PDOException $e) {
-        // Column already exists, ignore error
+    // Add missing columns if they don't exist (for existing databases)
+    $requiredColumns = [
+        'ekspresi_masuk' => "ALTER TABLE attendance ADD COLUMN ekspresi_masuk VARCHAR(50) NULL AFTER jam_masuk_iso",
+        'ekspresi_pulang' => "ALTER TABLE attendance ADD COLUMN ekspresi_pulang VARCHAR(50) NULL AFTER jam_pulang_iso",
+        'screenshot_masuk' => "ALTER TABLE attendance ADD COLUMN screenshot_masuk LONGTEXT NULL AFTER ekspresi_masuk",
+        'screenshot_pulang' => "ALTER TABLE attendance ADD COLUMN screenshot_pulang LONGTEXT NULL AFTER ekspresi_pulang",
+        'status' => "ALTER TABLE attendance ADD COLUMN status ENUM('ontime','terlambat') DEFAULT 'ontime' AFTER ekspresi_pulang",
+        'ket' => "ALTER TABLE attendance ADD COLUMN ket ENUM('hadir','izin','sakit','alpha') DEFAULT 'hadir' AFTER status",
+        'daily_report_id' => "ALTER TABLE attendance ADD COLUMN daily_report_id INT NULL AFTER ket"
+    ];
+    
+    foreach ($requiredColumns as $column => $sql) {
+        try {
+            $pdo->exec($sql);
+        } catch (PDOException $e) {
+            // Column already exists, ignore error
+        }
     }
-    // Add ket column
-    try { $pdo->exec("ALTER TABLE attendance ADD COLUMN ket ENUM('hadir','izin','sakit','alpha') DEFAULT 'hadir' AFTER status"); } catch (PDOException $e) {}
-    // Add daily_report_id column
-    try { $pdo->exec("ALTER TABLE attendance ADD COLUMN daily_report_id INT NULL AFTER ket"); } catch (PDOException $e) {}
-    // Add wfh to ket column enum
-    try { $pdo->exec("ALTER TABLE attendance MODIFY ket ENUM('hadir', 'izin', 'sakit', 'alpha', 'wfh') DEFAULT 'hadir'"); } catch (PDOException $e) {}
+    
+    // Update ket column enum to include wfh
+    try { 
+        $pdo->exec("ALTER TABLE attendance MODIFY ket ENUM('hadir', 'izin', 'sakit', 'alpha', 'wfh') DEFAULT 'hadir'"); 
+    } catch (PDOException $e) {
+        // Ignore error if column doesn't exist or enum is already correct
+    }
 
     // Daily reports table
     $pdo->exec(
@@ -121,6 +143,27 @@ function ensureSchema(PDO $pdo): void {
     );
 }
 
+function verifyAttendanceTable(PDO $pdo): bool {
+    try {
+        // Check if attendance table exists and has required columns
+        $stmt = $pdo->query("DESCRIBE attendance");
+        $columns = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        
+        $requiredColumns = ['id', 'user_id', 'jam_masuk', 'jam_masuk_iso', 'ekspresi_masuk', 'screenshot_masuk', 'jam_pulang', 'jam_pulang_iso', 'ekspresi_pulang', 'screenshot_pulang', 'status', 'ket'];
+        $missingColumns = array_diff($requiredColumns, $columns);
+        
+        if (!empty($missingColumns)) {
+            error_log("Missing columns in attendance table: " . implode(', ', $missingColumns));
+            return false;
+        }
+        
+        return true;
+    } catch (PDOException $e) {
+        error_log("Error verifying attendance table: " . $e->getMessage());
+        return false;
+    }
+}
+
 function seedAdmin(PDO $pdo, string $email, string $password): void {
     $stmt = $pdo->prepare("SELECT id FROM users WHERE role='admin' LIMIT 1");
     $stmt->execute();
@@ -132,9 +175,27 @@ function seedAdmin(PDO $pdo, string $email, string $password): void {
     }
 }
 
-$pdo = getPdo();
-ensureSchema($pdo);
-seedAdmin($pdo, $DEFAULT_ADMIN_EMAIL, $DEFAULT_ADMIN_PASSWORD);
+try {
+    $pdo = getPdo();
+    ensureSchema($pdo);
+    
+    // Verify that the attendance table has all required columns
+    if (!verifyAttendanceTable($pdo)) {
+        error_log("Attendance table verification failed - attempting to fix schema");
+        ensureSchema($pdo); // Try to fix the schema again
+        if (!verifyAttendanceTable($pdo)) {
+            throw new Exception("Failed to create proper attendance table schema");
+        }
+    }
+    
+    seedAdmin($pdo, $DEFAULT_ADMIN_EMAIL, $DEFAULT_ADMIN_PASSWORD);
+} catch (Exception $e) {
+    error_log("Database initialization failed: " . $e->getMessage());
+    if (isset($_GET['ajax'])) {
+        jsonResponse(['error' => 'Database connection failed'], 500);
+    }
+    // For non-AJAX requests, we'll let the page load but show an error
+}
 
 // ----- HELPERS -----
 function jsonResponse($data, int $code = 200): void {
@@ -157,6 +218,11 @@ function isPegawai(): bool { return isset($_SESSION['user']) && $_SESSION['user'
 // ----- AJAX ENDPOINTS -----
 if (isset($_GET['ajax'])) {
     $action = $_GET['ajax'];
+
+    // Check if database is available
+    if (!isset($pdo)) {
+        jsonResponse(['error' => 'Database connection failed'], 500);
+    }
 
     // Must be authenticated for all endpoints except auth-related and public landing scan
     if (!in_array($action, ['login', 'register', 'get_members', 'save_attendance'], true)) {
@@ -295,9 +361,16 @@ if (isset($_GET['ajax'])) {
         $nim = trim($_POST['nim'] ?? '');
         $mode = $_POST['mode'] ?? ''; // masuk/pulang
         $ekspresi = $_POST['ekspresi'] ?? null;
+        $screenshot = $_POST['screenshot'] ?? null; // base64 screenshot data
         
         // Debug logging
-        error_log("Attendance request: NIM=$nim, Mode=$mode, Expression=$ekspresi");
+        error_log("Attendance request: NIM=$nim, Mode=$mode, Expression=$ekspresi, Screenshot=" . ($screenshot ? 'YES' : 'NO'));
+        
+        // Verify attendance table structure before proceeding
+        if (!verifyAttendanceTable($pdo)) {
+            error_log("Attendance table structure verification failed during save_attendance");
+            jsonResponse(['ok' => false, 'message' => 'Database structure error. Please contact administrator.'], 500);
+        }
         
         if (!$nim || !in_array($mode, ['masuk', 'pulang'], true)) jsonResponse(['ok' => false, 'message' => 'Bad request'], 400);
         $stmt = $pdo->prepare("SELECT * FROM users WHERE nim=:nim LIMIT 1");
@@ -306,7 +379,7 @@ if (isset($_GET['ajax'])) {
         if (!$u) jsonResponse(['ok' => false, 'message' => 'NIM tidak ditemukan'], 404);
     
         $now = new DateTime('now', new DateTimeZone('Asia/Jakarta'));
-        $jamSekarang = $now->format('H:i:s');
+        $jamSekarang = $now->format('H:i:s'); // Tetap simpan dengan detik untuk database
         $iso = $now->format('Y-m-d H:i:s');
         $today = $now->format('Y-m-d');
         $currentHour = (int)$now->format('H');
@@ -362,19 +435,21 @@ if (isset($_GET['ajax'])) {
                     }
                 }
                 
-                $ins = $pdo->prepare("INSERT INTO attendance (user_id, jam_masuk, jam_masuk_iso, ekspresi_masuk, status) VALUES (:uid, :jam, :iso, :exp, :status)");
-                $ins->execute([':uid' => $u['id'], ':jam' => $jamSekarang, ':iso' => $iso, ':exp' => $ekspresi, ':status' => $status]);
+                $ins = $pdo->prepare("INSERT INTO attendance (user_id, jam_masuk, jam_masuk_iso, ekspresi_masuk, screenshot_masuk, status) VALUES (:uid, :jam, :iso, :exp, :screenshot, :status)");
+                $ins->execute([':uid' => $u['id'], ':jam' => $jamSekarang, ':iso' => $iso, ':exp' => $ekspresi, ':screenshot' => $screenshot, ':status' => $status]);
                 
                 if ($isLate) {
-                    $statusText = "Selamat datang, {$u['nama']}! Anda terlihat {$ekspresi}. Jam masuk tercatat pukul {$jamSekarang}. Anda telat masuk{$lateMessage}";
-                    jsonResponse(['ok' => true, 'message' => $statusText, 'nama' => $u['nama'], 'jam' => $jamSekarang, 'statusClass' => 'bg-yellow-100 text-yellow-700']);
+                    $jamMasukFormat = substr($jamSekarang, 0, 5); // Ambil hanya jam:menit
+                    $statusText = "Selamat datang, {$u['nama']}! Anda terlihat {$ekspresi}. Jam masuk tercatat pukul {$jamMasukFormat}. Anda telat masuk{$lateMessage}";
+                    jsonResponse(['ok' => true, 'message' => $statusText, 'nama' => $u['nama'], 'jam' => $jamMasukFormat, 'statusClass' => 'bg-yellow-100 text-yellow-700']);
                 } else {
-                    $statusText = "Selamat datang, {$u['nama']}! Anda terlihat {$ekspresi}. Jam masuk tercatat pukul {$jamSekarang}. On time!";
-                    jsonResponse(['ok' => true, 'message' => $statusText, 'nama' => $u['nama'], 'jam' => $jamSekarang, 'statusClass' => 'bg-green-100 text-green-700']);
+                    $jamMasukFormat = substr($jamSekarang, 0, 5); // Ambil hanya jam:menit
+                    $statusText = "Selamat datang, {$u['nama']}! Anda terlihat {$ekspresi}. Jam masuk tercatat pukul {$jamMasukFormat}. On time!";
+                    jsonResponse(['ok' => true, 'message' => $statusText, 'nama' => $u['nama'], 'jam' => $jamMasukFormat, 'statusClass' => 'bg-green-100 text-green-700']);
                 }
             } else {
                 $masukTime = new DateTime($todayRow['jam_masuk_iso']);
-                $statusText = "Anda sudah presensi masuk pada " . $masukTime->format('d/m/Y H:i:s') . " dan belum pulang.";
+                $statusText = "Anda sudah presensi masuk pada " . $masukTime->format('d/m/Y H:i') . " dan belum pulang.";
                 jsonResponse(['ok' => false, 'message' => $statusText, 'statusClass' => 'bg-yellow-100 text-yellow-700'], 400);
             }
         } else {
@@ -402,10 +477,11 @@ if (isset($_GET['ajax'])) {
                     $statusText = "Minimal waktu kerja 4 jam untuk presensi pulang. Anda baru bekerja " . round($diffHours, 1) . " jam.";
                     jsonResponse(['ok' => false, 'message' => $statusText, 'statusClass' => 'bg-red-100 text-red-700'], 400);
                 } else {
-                    $upd = $pdo->prepare("UPDATE attendance SET jam_pulang=:jam, jam_pulang_iso=:iso, ekspresi_pulang=:exp WHERE id=:id");
-                    $upd->execute([':jam' => $jamSekarang, ':iso' => $iso, ':exp' => $ekspresi, ':id' => $todayRow['id']]);
-                    $statusText = "Selamat jalan, {$u['nama']}! Anda terlihat {$ekspresi}. Jam pulang tercatat pukul {$jamSekarang}.";
-                    jsonResponse(['ok' => true, 'message' => $statusText, 'nama' => $u['nama'], 'jam' => $jamSekarang, 'statusClass' => 'bg-green-100 text-green-700']);
+                    $upd = $pdo->prepare("UPDATE attendance SET jam_pulang=:jam, jam_pulang_iso=:iso, ekspresi_pulang=:exp, screenshot_pulang=:screenshot WHERE id=:id");
+                    $upd->execute([':jam' => $jamSekarang, ':iso' => $iso, ':exp' => $ekspresi, ':screenshot' => $screenshot, ':id' => $todayRow['id']]);
+                    $jamPulangFormat = substr($jamSekarang, 0, 5); // Ambil hanya jam:menit
+                    $statusText = "Selamat jalan, {$u['nama']}! Anda terlihat {$ekspresi}. Jam pulang tercatat pukul {$jamPulangFormat}.";
+                    jsonResponse(['ok' => true, 'message' => $statusText, 'nama' => $u['nama'], 'jam' => $jamPulangFormat, 'statusClass' => 'bg-green-100 text-green-700']);
                 }
             }
         }
@@ -1034,11 +1110,11 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                                     <th class="py-2 px-4">NIM</th>
                                     <th class="py-2 px-4">Nama</th>
                                     <th class="py-2 px-4">Jam Masuk</th>
-                                    <th class="py-2 px-4">Ekspresi Masuk</th>
+                                    <th class="py-2 px-4">Bukti Masuk</th>
                                     <th class="py-2 px-4">Status</th>
                                     <th class="py-2 px-4">Ket</th>
                                     <th class="py-2 px-4">Jam Pulang</th>
-                                    <th class="py-2 px-4">Ekspresi Pulang</th>
+                                    <th class="py-2 px-4">Bukti Pulang</th>
                                     <th class="py-2 px-4">Status Laporan</th>
                                     <th class="py-2 px-4">Aksi</th>
                                 </tr>
@@ -1240,6 +1316,19 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
         </div>
     </div>
 
+    <!-- Modal Screenshot -->
+    <div id="screenshot-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden">
+        <div class="bg-white p-6 rounded-lg shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-y-auto">
+            <div class="flex justify-between items-center mb-4">
+                <h3 id="screenshot-modal-title" class="text-xl font-bold"></h3>
+                <button onclick="closeScreenshotModal()" class="text-gray-500 hover:text-gray-700 text-2xl">✕</button>
+            </div>
+            <div class="text-center">
+                <img id="screenshot-modal-image" src="" alt="Screenshot" class="max-w-full max-h-[70vh] object-contain mx-auto rounded-lg shadow-lg">
+            </div>
+        </div>
+    </div>
+
     <!-- Modal Daily Report Review -->
     <div id="dr-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden">
         <div class="bg-white p-6 rounded-lg shadow-2xl w-full max-w-2xl relative">
@@ -1277,6 +1366,36 @@ function showNotif(msg, success=true){
 }
 function qs(sel){ return document.querySelector(sel); }
 function qsa(sel){ return Array.from(document.querySelectorAll(sel)); }
+
+// Screenshot modal functions
+function showScreenshotModal(imageSrc, title) {
+    const modal = qs('#screenshot-modal');
+    const modalTitle = qs('#screenshot-modal-title');
+    const modalImage = qs('#screenshot-modal-image');
+    
+    if (modal && modalTitle && modalImage) {
+        modalTitle.textContent = title;
+        modalImage.src = imageSrc;
+        modal.classList.remove('hidden');
+        modal.classList.add('flex');
+    }
+}
+
+function closeScreenshotModal() {
+    const modal = qs('#screenshot-modal');
+    if (modal) {
+        modal.classList.add('hidden');
+        modal.classList.remove('flex');
+    }
+}
+
+// Close screenshot modal when clicking outside
+document.addEventListener('click', (e) => {
+    const modal = qs('#screenshot-modal');
+    if (modal && !modal.contains(e.target) && !e.target.closest('img[onclick*="showScreenshotModal"]')) {
+        closeScreenshotModal();
+    }
+});
 // Add a global variable to keep track of the current speech
 let currentSpeech = null;
 
@@ -1345,36 +1464,38 @@ function statusMessage(text, cls) {
     }
 }
 
-// Modify `handleRecognition` to stop video scanning immediately and let the `onend` callback restart it
-async function handleRecognition(nim, topExpression) {
-    if (!scanMode || isProcessingRecognition) return;
-    isProcessingRecognition = true;
-    // Stop the video interval immediately upon recognition
-    if (videoInterval) {
-        clearInterval(videoInterval);
-        videoInterval = null;
-    }
-    console.log('Recognition triggered:', { nim, topExpression, scanMode });
-    try {
-        const r = await api('?ajax=save_attendance', { nim, mode: scanMode, ekspresi: topExpression });
-        console.log('Attendance response:', r);
-        if (r.ok) {
-            statusMessage(r.message, r.statusClass || 'bg-green-100 text-green-700');
-        } else {
-            statusMessage(r.message || 'Gagal menyimpan presensi', r.statusClass || 'bg-yellow-100 text-yellow-700');
-        }
-    } catch (err) {
-        console.error('Error in handleRecognition:', err);
-        statusMessage('Terjadi kesalahan server', 'bg-red-100 text-red-700');
-    } finally {
-        isProcessingRecognition = false;
-    }
-}
+
 
 async function api(url, data){
-    const res = await fetch(url, { method: 'POST', body: data instanceof FormData ? data : new URLSearchParams(data) });
-    const json = await res.json();
-    return json;
+    try {
+        // Log the data being sent (but not the full screenshot to avoid console spam)
+        const logData = { ...data };
+        if (logData.screenshot) {
+            logData.screenshot = logData.screenshot.substring(0, 50) + '... (truncated)';
+        }
+        console.log('API call data:', logData);
+        
+        const res = await fetch(url, { method: 'POST', body: data instanceof FormData ? data : new URLSearchParams(data) });
+        
+        // Get response text first to check if it's valid JSON
+        const responseText = await res.text();
+        
+        // Try to parse as JSON
+        let json;
+        try {
+            json = JSON.parse(responseText);
+        } catch (parseError) {
+            console.error('Response is not valid JSON:', responseText);
+            throw new Error('Server returned invalid JSON response');
+        }
+        
+        // Return the JSON response regardless of HTTP status code
+        // Let the calling function handle the business logic (ok: false, etc.)
+        return json;
+    } catch (error) {
+        console.error('API call failed:', error);
+        throw error;
+    }
 }
 
 // Profile dropdown
@@ -1733,8 +1854,39 @@ async function handleRecognition(nim, topExpression){
     
     console.log('Recognition triggered:', { nim, topExpression, scanMode });
     
+    // Take screenshot before sending data
+    let screenshot = null;
+    try {
+        // Wait a bit for video to be ready
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+        if (video && canvas && video.videoWidth > 0 && video.videoHeight > 0) {
+            console.log('Taking screenshot...', { videoWidth: video.videoWidth, videoHeight: video.videoHeight });
+            const ctx = canvas.getContext('2d');
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            screenshot = canvas.toDataURL('image/jpeg', 0.8);
+            console.log('Screenshot taken successfully, size:', screenshot.length);
+        } else {
+            console.warn('Video not ready for screenshot:', { 
+                video: !!video, 
+                canvas: !!canvas, 
+                videoWidth: video?.videoWidth, 
+                videoHeight: video?.videoHeight 
+            });
+        }
+    } catch (screenshotError) {
+        console.warn('Failed to take screenshot:', screenshotError);
+    }
+    
     try{
-        const r = await api('?ajax=save_attendance', { nim, mode: scanMode, ekspresi: topExpression });
+        const r = await api('?ajax=save_attendance', { 
+            nim, 
+            mode: scanMode, 
+            ekspresi: topExpression,
+            screenshot: screenshot 
+        });
         console.log('Attendance response:', r);
         
         if(r.ok){
@@ -1745,7 +1897,13 @@ async function handleRecognition(nim, topExpression){
         }
     }catch(err){
         console.error('Error in handleRecognition:', err);
-        statusMessage('Terjadi kesalahan server', 'bg-red-100 text-red-700');
+        let errorMessage = 'Terjadi kesalahan server';
+        if (err.message.includes('invalid JSON')) {
+            errorMessage = 'Server mengalami masalah teknis. Silakan coba lagi.';
+        } else if (err.message.includes('HTTP error')) {
+            errorMessage = 'Koneksi ke server bermasalah. Silakan coba lagi.';
+        }
+        statusMessage(errorMessage, 'bg-red-100 text-red-700');
     } finally {
         setTimeout(() => {
             isProcessingRecognition = false;
@@ -1965,7 +2123,7 @@ document.addEventListener('click', async (e)=>{
             modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden';
             modal.innerHTML = `
                 <div class="bg-white p-6 rounded-lg shadow-2xl w-full max-w-6xl max-h-[90vh] overflow-y-auto">
-                    <div class="flex justify-between items-center mb-4>
+                    <div class="flex justify-between items-center mb-4">
                         <h3 id="monthly-detail-title" class="text-xl font-bold"></h3>
                         <button onclick="this.closest('#monthly-detail-modal').classList.add('hidden')" class="text-gray-500 hover:text-gray-700">✕</button>
                     </div>
@@ -2013,8 +2171,15 @@ document.addEventListener('click', async (e)=>{
             document.body.appendChild(modal);
         }
         
-        qs('#monthly-detail-title').textContent = `Laporan Bulanan ${item.nama} - ${monthName(parseInt(item.month))} ${item.year}`;
-        qs('#monthly-detail-summary').textContent = item.summary || '(Tidak ada ringkasan)';
+        const titleElement = qs('#monthly-detail-title');
+        const summaryElement = qs('#monthly-detail-summary');
+        
+        if (titleElement) {
+            titleElement.textContent = `Laporan Bulanan ${item.nama} - ${monthName(parseInt(item.month))} ${item.year}`;
+        }
+        if (summaryElement) {
+            summaryElement.textContent = item.summary || '(Tidak ada ringkasan)';
+        }
         
         // Parse achievements properly and fill table
         let achievements = [];
@@ -2025,24 +2190,26 @@ document.addEventListener('click', async (e)=>{
         }
         
         const achievementsTable = qs('#monthly-detail-achievements-table');
-        if (achievements.length > 0) {
-            achievementsTable.innerHTML = achievements.map((a, index) => {
-                const achievement = typeof a === 'object' ? (a.achievement || '') : a;
-                const detail = typeof a === 'object' ? (a.detail || '') : '';
-                return `
-                    <tr class="border-b hover:bg-gray-50">
-                        <td class="py-2 px-4 text-center">${index + 1}</td>
-                        <td class="py-2 px-4">${achievement}</td>
-                        <td class="py-2 px-4">${detail}</td>
+        if (achievementsTable) {
+            if (achievements.length > 0) {
+                achievementsTable.innerHTML = achievements.map((a, index) => {
+                    const achievement = typeof a === 'object' ? (a.achievement || '') : a;
+                    const detail = typeof a === 'object' ? (a.detail || '') : '';
+                    return `
+                        <tr class="border-b hover:bg-gray-50">
+                            <td class="py-2 px-4 text-center">${index + 1}</td>
+                            <td class="py-2 px-4">${achievement}</td>
+                            <td class="py-2 px-4">${detail}</td>
+                        </tr>
+                    `;
+                }).join('');
+            } else {
+                achievementsTable.innerHTML = `
+                    <tr class="border-b">
+                        <td colspan="3" class="py-2 px-4 text-center text-gray-500">Tidak ada data pencapaian</td>
                     </tr>
                 `;
-            }).join('');
-        } else {
-            achievementsTable.innerHTML = `
-                <tr class="border-b">
-                    <td colspan="3" class="py-2 px-4 text-center text-gray-500">Tidak ada data pencapaian</td>
-                </tr>
-            `;
+            }
         }
         
         // Parse obstacles properly and fill table
@@ -2054,28 +2221,32 @@ document.addEventListener('click', async (e)=>{
         }
         
         const obstaclesTable = qs('#monthly-detail-obstacles-table');
-        if (obstacles.length > 0) {
-            obstaclesTable.innerHTML = obstacles.map((o, index) => {
-                const obstacle = typeof o === 'object' ? (o.obstacle || '') : o;
-                const solution = typeof o === 'object' ? (o.solution || '') : '';
-                const note = typeof o === 'object' ? (o.note || '') : '';
-                return `
-                    <tr class="border-b hover:bg-gray-50">
-                        <td class="py-2 px-4 text-center">${index + 1}</td>
-                        <td class="py-2 px-4">${obstacle}</td>
-                        <td class="py-2 px-4">${solution}</td>
-                        <td class="py-2 px-4">${note}</td>
-                    </tr>
-                `;
-            }).join('');
-        } else {
-            obstaclesTable.innerHTML = `
-                <tr class="border-b">
-                    <td colspan="4" class="py-2 px-4 text-center text-gray-500">Tidak ada data kendala</td>
+        if (obstaclesTable) {
+            if (obstacles.length > 0) {
+                obstaclesTable.innerHTML = obstacles.map((o, index) => {
+                    const obstacle = typeof o === 'object' ? (o.obstacle || '') : o;
+                    const solution = typeof o === 'object' ? (o.solution || '') : '';
+                    const note = typeof o === 'object' ? (o.note || '') : '';
+                    return `
+                        <tr class="border-b hover:bg-gray-50">
+                            <td class="py-2 px-4 text-center">${index + 1}</td>
+                            <td class="py-2 px-4">${obstacle}</td>
+                            <td class="py-2 px-4">${solution}</td>
+                            <td class="py-2 px-4">${note}</td>
+                        </tr>
+                    `;
+                }).join('');
+            } else {
+                obstaclesTable.innerHTML = `
+                    <tr class="border-b">
+                        <td colspan="4" class="py-2 px-4 text-center text-gray-500">Tidak ada data kendala</td>
                 </tr>
             `;
+            }
         }
-        modal.classList.remove('hidden');
+        if (modal) {
+            modal.classList.remove('hidden');
+        }
     }
     
     if(btnAmApprove){
@@ -2146,19 +2317,32 @@ async function renderLaporan(){
         
         const jamMasuk = (att.ket === 'izin' || att.ket === 'sakit' || att.ket === 'wfh') ? att.ket : formatTime(att.jam_masuk);
         const jamPulang = (att.ket === 'izin' || att.ket === 'sakit') ? att.ket : formatTime(att.jam_pulang);
-        const ekspresiMasuk = (att.ket === 'izin' || att.ket === 'sakit' || att.ket === 'wfh') ? '-' : (att.ekspresi_masuk || '-');
-        const ekspresiPulang = (att.ket === 'izin' || att.ket === 'sakit') ? '-' : (att.ekspresi_pulang || '-');
+        
+        // Create screenshot display functions
+        const createScreenshotDisplay = (screenshotData, ekspresi, mode) => {
+            if (att.ket === 'izin' || att.ket === 'sakit' || (att.ket === 'wfh' && mode === 'pulang')) {
+                return '<div class="text-center">-</div>';
+            }
+            if (screenshotData) {
+                const escapedSrc = screenshotData.replace(/'/g, "\\'");
+                return `<div class="text-center"><img src="${screenshotData}" alt="Bukti ${mode}" class="w-16 h-12 object-cover rounded cursor-pointer hover:scale-150 transition-transform mx-auto" onclick="showScreenshotModal('${escapedSrc}', 'Bukti ${mode}')" title="Klik untuk memperbesar"></div>`;
+            }
+            return `<div class="text-center">${ekspresi || '-'}</div>`;
+        };
+        
+        const buktiMasuk = createScreenshotDisplay(att.screenshot_masuk, att.ekspresi_masuk, 'masuk');
+        const buktiPulang = createScreenshotDisplay(att.screenshot_pulang, att.ekspresi_pulang, 'pulang');
         
         tr.innerHTML = `
             <td class="py-2 px-4">${tanggal}</td>
             <td class="py-2 px-4">${att.nim||''}</td>
             <td class="py-2 px-4">${att.nama||''}</td>
             <td class="py-2 px-4">${jamMasuk}</td>
-            <td class="py-2 px-4">${ekspresiMasuk}</td>
+            <td class="py-2 px-4">${buktiMasuk}</td>
             <td class="py-2 px-4"><span class="badge ${statusClass}">${statusText}</span></td>
             <td class="py-2 px-4">${att.ket||'-'}</td>
             <td class="py-2 px-4">${jamPulang}</td>
-            <td class="py-2 px-4">${ekspresiPulang}</td>
+            <td class="py-2 px-4">${buktiPulang}</td>
             <td class="py-2 px-4"><span class="badge ${dailyReportClass}">${dailyReportStatus}</span></td>
             <td class="py-2 px-4">
                 <button title="Lihat Laporan" class="btn-view-dr-admin text-blue-600 font-bold" data-user="${att.user_id}" data-date="${(att.jam_masuk_iso||'').slice(0,10)}"><i class="fi fi-ss-eye"></i></button>
@@ -2605,7 +2789,7 @@ function renderRekapData(data, m, y) {
             if (isAttendanceComplete && isWithinTimeframe) {
                 reportBtns = `<button class="btn-create-dr bg-emerald-500 hover:bg-emerald-600 text-white btn-pill" data-date="${row.date}">Buat</button>`;
             } else if (!isAttendanceComplete && isWithinTimeframe) {
-                reportBtns = `<span class="text-gray-400">Tidak presensi</span>`;
+                reportBtns = `<span class="text-gray-400">Belum presensi</span>`;
             } else if (!isWithinTimeframe) {
                 reportBtns = `<span class="text-gray-400">Tidak tersedia</span>`;
             }
