@@ -611,6 +611,133 @@ if (isset($_GET['ajax'])) {
         jsonResponse(['ok'=>true]);
     }
 
+    // Dashboard endpoints
+    if ($action === 'get_dashboard_data') {
+        if (!isAdmin()) jsonResponse(['error'=>'Forbidden'],403);
+        
+        $today = date('Y-m-d');
+        $monthStart = date('Y-m-01');
+        $monthEnd = date('Y-m-t');
+        
+        // Get today's late employees
+        $todayLateStmt = $pdo->prepare("
+            SELECT u.nama, u.foto_base64, a.jam_masuk, a.status
+            FROM attendance a 
+            JOIN users u ON u.id = a.user_id 
+            WHERE DATE(a.jam_masuk_iso) = :today 
+            AND a.status = 'terlambat'
+            ORDER BY a.jam_masuk_iso DESC
+        ");
+        $todayLateStmt->execute([':today' => $today]);
+        $todayLate = $todayLateStmt->fetchAll();
+        
+        // Get monthly attendance statistics
+        $monthlyStatsStmt = $pdo->prepare("
+            SELECT 
+                u.id,
+                u.nama,
+                u.foto_base64,
+                COUNT(CASE WHEN a.status = 'terlambat' THEN 1 END) as late_count,
+                COUNT(CASE WHEN a.status = 'ontime' THEN 1 END) as ontime_count,
+                COUNT(CASE WHEN a.ket = 'hadir' OR a.ket = 'wfh' THEN 1 END) as present_count,
+                COUNT(*) as total_days
+            FROM users u
+            LEFT JOIN attendance a ON u.id = a.user_id 
+                AND DATE(a.jam_masuk_iso) BETWEEN :month_start AND :month_end
+            WHERE u.role = 'pegawai'
+            GROUP BY u.id, u.nama, u.foto_base64
+            HAVING total_days > 0
+            ORDER BY late_count DESC, ontime_count ASC
+        ");
+        $monthlyStatsStmt->execute([':month_start' => $monthStart, ':month_end' => $monthEnd]);
+        $monthlyStats = $monthlyStatsStmt->fetchAll();
+        
+        // Get summary statistics
+        $totalEmployeesStmt = $pdo->prepare("SELECT COUNT(*) as total FROM users WHERE role = 'pegawai'");
+        $totalEmployeesStmt->execute();
+        $totalEmployees = $totalEmployeesStmt->fetch()['total'];
+        
+        $presentTodayStmt = $pdo->prepare("
+            SELECT COUNT(DISTINCT user_id) as present 
+            FROM attendance 
+            WHERE DATE(jam_masuk_iso) = :today 
+            AND (ket = 'hadir' OR ket = 'wfh')
+        ");
+        $presentTodayStmt->execute([':today' => $today]);
+        $presentToday = $presentTodayStmt->fetch()['present'];
+        
+        $lateTodayStmt = $pdo->prepare("
+            SELECT COUNT(DISTINCT user_id) as late 
+            FROM attendance 
+            WHERE DATE(jam_masuk_iso) = :today 
+            AND status = 'terlambat'
+        ");
+        $lateTodayStmt->execute([':today' => $today]);
+        $lateToday = $lateTodayStmt->fetch()['late'];
+        
+        $absentToday = $totalEmployees - $presentToday;
+        
+        // Get attendance trend for 1 year (August 2025 - August 2026)
+        $trendData = [];
+        $startDate = '2025-08-01';
+        $endDate = '2026-08-31';
+        
+        $currentDate = new DateTime($startDate);
+        $endDateTime = new DateTime($endDate);
+        
+        while ($currentDate <= $endDateTime) {
+            $year = $currentDate->format('Y');
+            $month = $currentDate->format('m');
+            $monthName = $currentDate->format('M Y');
+            
+            // Get monthly statistics
+            $presentStmt = $pdo->prepare("
+                SELECT COUNT(DISTINCT user_id) as present 
+                FROM attendance 
+                WHERE YEAR(jam_masuk_iso) = :year 
+                AND MONTH(jam_masuk_iso) = :month 
+                AND (ket = 'hadir' OR ket = 'wfh')
+            ");
+            $presentStmt->execute([':year' => $year, ':month' => $month]);
+            $present = $presentStmt->fetch()['present'];
+            
+            $lateStmt = $pdo->prepare("
+                SELECT COUNT(DISTINCT user_id) as late 
+                FROM attendance 
+                WHERE YEAR(jam_masuk_iso) = :year 
+                AND MONTH(jam_masuk_iso) = :month 
+                AND status = 'terlambat'
+            ");
+            $lateStmt->execute([':year' => $year, ':month' => $month]);
+            $late = $lateStmt->fetch()['late'];
+            
+            $trendData[] = [
+                'date' => $currentDate->format('Y-m'),
+                'day' => $monthName,
+                'present' => $present,
+                'late' => $late,
+                'absent' => $totalEmployees - $present
+            ];
+            
+            $currentDate->add(new DateInterval('P1M'));
+        }
+        
+        jsonResponse([
+            'ok' => true,
+            'data' => [
+                'today_late' => $todayLate,
+                'monthly_stats' => $monthlyStats,
+                'attendance_trend' => $trendData,
+                'summary' => [
+                    'total_employees' => $totalEmployees,
+                    'present_today' => $presentToday,
+                    'late_today' => $lateToday,
+                    'absent_today' => $absentToday
+                ]
+            ]
+        ]);
+    }
+
     // --- Pegawai Daily Reports API ---
     if ($action === 'get_user_info') {
         if (!isset($_SESSION['user'])) jsonResponse(['error'=>'Unauthorized'],401);
@@ -755,6 +882,7 @@ if ($page === 'logout') {
     <title>Aplikasi Presensi Wajah</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link rel="stylesheet" href="https://rsms.me/inter/inter.css">
     <link rel='stylesheet' href='https://cdn-uicons.flaticon.com/3.0.0/uicons-solid-rounded/css/uicons-solid-rounded.css'>
     <link rel='stylesheet' href='https://cdn-uicons.flaticon.com/3.0.0/uicons-solid-straight/css/uicons-solid-straight.css'>
@@ -934,6 +1062,7 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                     <button data-tab="laporan-bulanan" class="tab-link py-3 px-4 font-semibold hover:bg-indigo-700 focus:outline-none focus:bg-indigo-700 transition duration-300">Laporan Bulanan</button>
                 <?php endif; ?>
                 <?php if (isAdmin()): ?>
+                    <button data-tab="dashboard" class="tab-link py-3 px-4 font-semibold hover:bg-indigo-700 focus:outline-none focus:bg-indigo-700 transition duration-300">Dashboard</button>
                     <button data-tab="members" class="tab-link py-3 px-4 font-semibold hover:bg-indigo-700 focus:outline-none focus:bg-indigo-700 transition duration-300">Kelola Member</button>
                     <button data-tab="laporan" class="tab-link py-3 px-4 font-semibold hover:bg-indigo-700 focus:outline-none focus:bg-indigo-700 transition duration-300">Data Presensi</button>
                     <button data-tab="admin-monthly" class="tab-link py-3 px-4 font-semibold hover:bg-indigo-700 focus:outline-none focus:bg-indigo-700 transition duration-300">Laporan Bulanan</button>
@@ -1163,6 +1292,69 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
             </div>
         </div>
         <?php endif; ?>
+        <?php endif; ?>
+
+        <!-- Admin Dashboard -->
+        <?php if (isAdmin()): ?>
+        <div id="page-dashboard" class="hidden">
+            <div class="bg-white p-6 rounded-lg shadow-lg">
+                <h2 class="text-xl font-bold mb-6">Dashboard Presensi</h2>
+
+                <!-- Summary Cards -->
+                <div class="grid md:grid-cols-4 gap-4 mb-6">
+                    <div class="bg-blue-50 p-4 rounded-lg text-center">
+                        <div class="text-2xl font-bold text-blue-600" id="totalEmployees">0</div>
+                        <div class="text-sm text-blue-700">Total Pegawai</div>
+                    </div>
+                    <div class="bg-green-50 p-4 rounded-lg text-center">
+                        <div class="text-2xl font-bold text-green-600" id="presentToday">0</div>
+                        <div class="text-sm text-green-700">Hadir Hari Ini</div>
+                    </div>
+                    <div class="bg-red-50 p-4 rounded-lg text-center">
+                        <div class="text-2xl font-bold text-red-600" id="lateToday">0</div>
+                        <div class="text-sm text-red-700">Terlambat Hari Ini</div>
+                    </div>
+                    <div class="bg-yellow-50 p-4 rounded-lg text-center">
+                        <div class="text-2xl font-bold text-yellow-600" id="absentToday">0</div>
+                        <div class="text-sm text-yellow-700">Tidak Hadir</div>
+                    </div>
+                </div>
+                
+                <!-- Today's Late Employees -->
+                <div class="mb-8">
+                    <h3 class="text-lg font-semibold mb-4 text-gray-700">Pegawai Terlambat Hari Ini</h3>
+                    <div class="bg-gray-50 p-4 rounded-lg">
+                        <canvas id="todayLateChart" width="400" height="200"></canvas>
+                    </div>
+                </div>
+
+                <!-- Attendance Trend Chart -->
+                <div class="mb-8">
+                    <h3 class="text-lg font-semibold mb-4 text-gray-700">Tren Kehadiran 1 Tahun (Agustus 2025 - Agustus 2026)</h3>
+                    <div class="bg-white p-4 rounded-lg shadow-sm">
+                        <canvas id="attendanceTrendChart" width="400" height="200"></canvas>
+                    </div>
+                </div>                
+
+                <!-- Monthly Attendance Performance -->
+                <div class="mb-8">
+                    <h3 class="text-lg font-semibold mb-4 text-gray-700">Performa Kehadiran Bulan Ini</h3>
+                    <div class="grid md:grid-cols-2 gap-6">
+                        <!-- Most Frequently Late -->
+                        <div class="bg-red-50 p-4 rounded-lg">
+                            <h4 class="text-md font-semibold mb-3 text-red-700">Paling Sering Terlambat</h4>
+                            <canvas id="mostLateChart" width="300" height="200"></canvas>
+                        </div>
+                        
+                        <!-- Most Attentive -->
+                        <div class="bg-green-50 p-4 rounded-lg">
+                            <h4 class="text-md font-semibold mb-3 text-green-700">Paling Rajin</h4>
+                            <canvas id="mostAttentiveChart" width="300" height="200"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
         <?php endif; ?>
     </main>
 
@@ -1934,15 +2126,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
 <?php else: ?>
 // App (logged in)
-const pages = { rekap: qs('#page-rekap'), 'laporan-bulanan': qs('#page-laporan-bulanan'), members: qs('#page-members'), laporan: qs('#page-laporan'), 'admin-monthly': qs('#page-admin-monthly') };
+const pages = { rekap: qs('#page-rekap'), 'laporan-bulanan': qs('#page-laporan-bulanan'), members: qs('#page-members'), laporan: qs('#page-laporan'), 'admin-monthly': qs('#page-admin-monthly'), dashboard: qs('#page-dashboard') };
 qsa('.tab-link').forEach(btn=>{
     btn.addEventListener('click', ()=> showPage(btn.dataset.tab));
 });
-function showPage(name){ Object.values(pages).forEach(p=> p && (p.style.display='none')); if(pages[name]) pages[name].style.display='block'; if(name==='members') renderMembers(); if(name==='laporan') renderLaporan(); if(name==='rekap') initRekapPage(); if(name==='laporan-bulanan') renderMonthly(); if(name==='admin-monthly') renderAdminMonthly(); }
+function showPage(name){ Object.values(pages).forEach(p=> p && (p.style.display='none')); if(pages[name]) pages[name].style.display='block'; if(name==='members') renderMembers(); if(name==='laporan') renderLaporan(); if(name==='rekap') initRekapPage(); if(name==='laporan-bulanan') renderMonthly(); if(name==='admin-monthly') renderAdminMonthly(); if(name==='dashboard') renderDashboard(); }
 
 // Ensure initial page sets after variables exist
 <?php if (isAdmin()): ?>
-showPage('members');
+showPage('dashboard');
 <?php else: ?>
 showPage('rekap');
 <?php endif; ?>
@@ -3068,6 +3260,336 @@ async function renderAdminMonthly(){
 
 ['#am-search','#am-month','#am-year'].forEach(sel=>{ if(qs(sel)) qs(sel).addEventListener('input', renderAdminMonthly); });
 qs('#am-reset') && qs('#am-reset').addEventListener('click', ()=>{ if(qs('#am-search')) qs('#am-search').value=''; if(qs('#am-month')) qs('#am-month').value=''; if(qs('#am-year')) qs('#am-year').value=''; renderAdminMonthly(); });
+
+// Dashboard functions
+let dashboardCharts = {};
+
+async function renderDashboard() {
+    try {
+        const response = await fetch('?ajax=get_dashboard_data');
+        const result = await response.json();
+        
+        if (!result.ok) {
+            showNotif('Gagal memuat data dashboard', false);
+            return;
+        }
+        
+        const data = result.data;
+        
+        // Update summary cards
+        qs('#totalEmployees').textContent = data.summary.total_employees;
+        qs('#presentToday').textContent = data.summary.present_today;
+        qs('#lateToday').textContent = data.summary.late_today;
+        qs('#absentToday').textContent = data.summary.absent_today;
+        
+        // Render charts
+        renderTodayLateChart(data.today_late);
+        renderMonthlyPerformanceCharts(data.monthly_stats);
+        renderAttendanceTrendChart(data.attendance_trend);
+        
+    } catch (error) {
+        console.error('Error loading dashboard:', error);
+        showNotif('Gagal memuat data dashboard', false);
+    }
+}
+
+function renderTodayLateChart(todayLateData) {
+    const ctx = qs('#todayLateChart');
+    if (!ctx) return;
+    
+    // Destroy existing chart if it exists
+    if (dashboardCharts.todayLate) {
+        dashboardCharts.todayLate.destroy();
+    }
+    
+    if (todayLateData.length === 0) {
+        ctx.style.display = 'none';
+        ctx.parentElement.innerHTML = '<div class="text-center text-gray-500 py-8">Tidak ada pegawai yang terlambat hari ini</div>';
+        return;
+    }
+    
+    ctx.style.display = 'block';
+    
+    // Create a horizontal bar chart with employee photos
+    const chartContainer = ctx.parentElement;
+    chartContainer.innerHTML = `
+        <div class="space-y-4">
+            ${todayLateData.map((item, index) => {
+                const checkInTime = item.jam_masuk ? item.jam_masuk.substring(0, 5) : 'N/A';
+                const delayMinutes = item.jam_masuk ? 
+                    Math.max(0, (parseInt(item.jam_masuk.split(':')[0]) - 8) * 60 + parseInt(item.jam_masuk.split(':')[1])) : 0;
+                
+                return `
+                    <div class="bg-white border border-red-200 rounded-lg p-4 shadow-sm">
+                        <div class="flex items-center space-x-4">
+                            <div class="relative">
+                                <img src="${item.foto_base64 || 'https://ui-avatars.com/api/?background=ef4444&color=fff&name=' + encodeURIComponent(item.nama)}" 
+                                     alt="${item.nama}" 
+                                     class="w-16 h-16 rounded-full object-cover border-2 border-red-300">
+                                <div class="absolute -top-2 -right-2 bg-red-500 text-white text-xs rounded-full w-6 h-6 flex items-center justify-center font-bold">
+                                    ${index + 1}
+                                </div>
+                            </div>
+                            <div class="flex-1">
+                                <h4 class="font-semibold text-gray-800 text-lg">${item.nama}</h4>
+                                <p class="text-sm text-red-600">Jam Masuk: ${checkInTime}</p>
+                                ${delayMinutes > 0 ? `<p class="text-xs text-red-500">Terlambat ${delayMinutes} menit</p>` : ''}
+                            </div>
+                            <div class="text-right">
+                                <div class="text-2xl font-bold text-red-600">${checkInTime}</div>
+                                <div class="text-xs text-gray-500">Jam Masuk</div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('')}
+        </div>
+    `;
+}
+
+function renderMonthlyPerformanceCharts(monthlyStats) {
+    // Most Frequently Late Chart - Bar Chart
+    const mostLateCtx = qs('#mostLateChart');
+    if (mostLateCtx) {
+        if (dashboardCharts.mostLate) {
+            dashboardCharts.mostLate.destroy();
+        }
+        
+        const topLate = monthlyStats.slice(0, 5).filter(item => item.late_count > 0);
+        
+        if (topLate.length === 0) {
+            mostLateCtx.style.display = 'none';
+            mostLateCtx.parentElement.innerHTML = '<div class="text-center text-gray-500 py-8">Tidak ada data keterlambatan bulan ini</div>';
+        } else {
+            mostLateCtx.style.display = 'block';
+            
+            // Create bar chart with employee photos
+            const lateContainer = mostLateCtx.parentElement;
+            lateContainer.innerHTML = `
+                <div class="space-y-4">
+                    ${topLate.map((item, index) => {
+                        const maxLate = Math.max(...topLate.map(x => x.late_count));
+                        const percentage = (item.late_count / maxLate) * 100;
+                        
+                        return `
+                            <div class="bg-white border border-red-200 rounded-lg p-4 shadow-sm">
+                                <div class="flex items-center space-x-4 mb-3">
+                                    <div class="relative">
+                                        <img src="${item.foto_base64 || 'https://ui-avatars.com/api/?background=ef4444&color=fff&name=' + encodeURIComponent(item.nama)}" 
+                                             alt="${item.nama}" 
+                                             class="w-12 h-12 rounded-full object-cover border-2 border-red-300">
+                                        <div class="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center font-bold">
+                                            ${index + 1}
+                                        </div>
+                                    </div>
+                                    <div class="flex-1">
+                                        <h4 class="font-semibold text-gray-800">${item.nama}</h4>
+                                        <p class="text-sm text-red-600">${item.late_count} kali terlambat</p>
+                                    </div>
+                                    <div class="text-right">
+                                        <div class="text-xl font-bold text-red-600">${item.late_count}</div>
+                                        <div class="text-xs text-gray-500">kali</div>
+                                    </div>
+                                </div>
+                                <div class="w-full bg-gray-200 rounded-full h-3">
+                                    <div class="bg-gradient-to-r from-red-400 to-red-600 h-3 rounded-full transition-all duration-500" 
+                                         style="width: ${percentage}%"></div>
+                                </div>
+                            </div>
+                        `;
+                    }).join('')}
+                </div>
+            `;
+        }
+    }
+    
+    // Most Attentive Chart - Pie Chart Style
+    const mostAttentiveCtx = qs('#mostAttentiveChart');
+    if (mostAttentiveCtx) {
+        if (dashboardCharts.mostAttentive) {
+            dashboardCharts.mostAttentive.destroy();
+        }
+        
+        const topAttentive = monthlyStats
+            .filter(item => item.ontime_count > 0)
+            .sort((a, b) => b.ontime_count - a.ontime_count)
+            .slice(0, 5);
+        
+        if (topAttentive.length === 0) {
+            mostAttentiveCtx.style.display = 'none';
+            mostAttentiveCtx.parentElement.innerHTML = '<div class="text-center text-gray-500 py-8">Tidak ada data kehadiran bulan ini</div>';
+        } else {
+            mostAttentiveCtx.style.display = 'block';
+            
+            // Create pie chart style layout with employee photos
+            const attentiveContainer = mostAttentiveCtx.parentElement;
+            const totalOnTime = topAttentive.reduce((sum, item) => sum + item.ontime_count, 0);
+            
+            attentiveContainer.innerHTML = `
+                <div class="grid grid-cols-1 gap-4">
+                    ${topAttentive.map((item, index) => {
+                        const percentage = ((item.ontime_count / totalOnTime) * 100).toFixed(1);
+                        const colors = ['#22c55e', '#16a34a', '#15803d', '#166534', '#14532d'];
+                        
+                        return `
+                            <div class="bg-white border border-green-200 rounded-lg p-4 shadow-sm">
+                                <div class="flex items-center space-x-4">
+                                    <div class="relative">
+                                        <div class="w-16 h-16 rounded-full flex items-center justify-center" 
+                                             style="background: conic-gradient(${colors[index]} 0deg ${percentage * 3.6}deg, #e5e7eb ${percentage * 3.6}deg 360deg)">
+                                            <img src="${item.foto_base64 || 'https://ui-avatars.com/api/?background=22c55e&color=fff&name=' + encodeURIComponent(item.nama)}" 
+                                                 alt="${item.nama}" 
+                                                 class="w-12 h-12 rounded-full object-cover border-2 border-white">
+                                        </div>
+                                        <div class="absolute -top-2 -right-2 bg-green-500 text-white text-xs rounded-full w-6 h-6 flex items-center justify-center font-bold">
+                                            ${index + 1}
+                                        </div>
+                                    </div>
+                                    <div class="flex-1">
+                                        <h4 class="font-semibold text-gray-800 text-lg">${item.nama}</h4>
+                                        <p class="text-sm text-green-600">${item.ontime_count} kali tepat waktu</p>
+                                        <p class="text-xs text-gray-500">${percentage}% dari total kehadiran</p>
+                                    </div>
+                                    <div class="text-right">
+                                        <div class="text-2xl font-bold text-green-600">${item.ontime_count}</div>
+                                        <div class="text-xs text-gray-500">kali</div>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    }).join('')}
+                </div>
+            `;
+        }
+    }
+}
+
+function renderAttendanceTrendChart(trendData) {
+    const ctx = qs('#attendanceTrendChart');
+    if (!ctx) return;
+    
+    // Destroy existing chart if it exists
+    if (dashboardCharts.attendanceTrend) {
+        dashboardCharts.attendanceTrend.destroy();
+    }
+    
+    if (!trendData || trendData.length === 0) {
+        ctx.style.display = 'none';
+        ctx.parentElement.innerHTML = '<div class="text-center text-gray-500 py-8">Tidak ada data tren kehadiran</div>';
+        return;
+    }
+    
+    ctx.style.display = 'block';
+    
+    const labels = trendData.map(item => item.day);
+    const presentData = trendData.map(item => item.present);
+    const lateData = trendData.map(item => item.late);
+    const absentData = trendData.map(item => item.absent);
+    
+    dashboardCharts.attendanceTrend = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [
+                {
+                    label: 'On-Time',
+                    data: presentData,
+                    borderColor: '#22c55e',
+                    backgroundColor: 'rgba(34, 197, 94, 0.1)',
+                    borderWidth: 3,
+                    fill: true,
+                    tension: 0.4,
+                    pointBackgroundColor: '#22c55e',
+                    pointBorderColor: '#ffffff',
+                    pointBorderWidth: 2,
+                    pointRadius: 6
+                },
+                {
+                    label: 'Terlambat',
+                    data: lateData,
+                    borderColor: '#ef4444',
+                    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                    borderWidth: 3,
+                    fill: true,
+                    tension: 0.4,
+                    pointBackgroundColor: '#ef4444',
+                    pointBorderColor: '#ffffff',
+                    pointBorderWidth: 2,
+                    pointRadius: 6
+                },
+                {
+                    label: 'Tidak Hadir',
+                    data: absentData,
+                    borderColor: '#f59e0b',
+                    backgroundColor: 'rgba(245, 158, 11, 0.1)',
+                    borderWidth: 3,
+                    fill: true,
+                    tension: 0.4,
+                    pointBackgroundColor: '#f59e0b',
+                    pointBorderColor: '#ffffff',
+                    pointBorderWidth: 2,
+                    pointRadius: 6
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    position: 'top',
+                    labels: {
+                        usePointStyle: true,
+                        padding: 20,
+                        font: {
+                            size: 12,
+                            weight: 'bold'
+                        }
+                    }
+                },
+                tooltip: {
+                    backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                    titleColor: '#ffffff',
+                    bodyColor: '#ffffff',
+                    borderColor: '#ffffff',
+                    borderWidth: 1,
+                    cornerRadius: 8,
+                    displayColors: true
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    grid: {
+                        color: 'rgba(0, 0, 0, 0.1)',
+                        drawBorder: false
+                    },
+                    ticks: {
+                        font: {
+                            size: 12
+                        }
+                    }
+                },
+                x: {
+                    grid: {
+                        color: 'rgba(0, 0, 0, 0.1)',
+                        drawBorder: false
+                    },
+                    ticks: {
+                        font: {
+                            size: 12,
+                            weight: 'bold'
+                        }
+                    }
+                }
+            },
+            interaction: {
+                intersect: false,
+                mode: 'index'
+            }
+        }
+    });
+}
 
 document.addEventListener('click', async (e)=>{
     if(e.target.classList.contains('btn-am-approve')||e.target.classList.contains('btn-am-disapprove')){
