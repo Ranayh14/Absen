@@ -468,21 +468,11 @@ if (isset($_GET['ajax'])) {
                 $statusText = "Anda belum melakukan presensi masuk hari ini atau sudah pulang.";
                 jsonResponse(['ok' => false, 'message' => $statusText, 'statusClass' => 'bg-yellow-100 text-yellow-700'], 400);
             } else {
-                // Calculate work hours
-                $masuk = new DateTime($todayRow['jam_masuk_iso']);
-                $diffHours = ($now->getTimestamp() - $masuk->getTimestamp()) / 3600;
-                
-                                // Allow pulang after minimum 4 hours of work (more flexible)
-                if ($diffHours < 4) {
-                    $statusText = "Minimal waktu kerja 4 jam untuk presensi pulang. Anda baru bekerja " . round($diffHours, 1) . " jam.";
-                    jsonResponse(['ok' => false, 'message' => $statusText, 'statusClass' => 'bg-red-100 text-red-700'], 400);
-                } else {
-                    $upd = $pdo->prepare("UPDATE attendance SET jam_pulang=:jam, jam_pulang_iso=:iso, ekspresi_pulang=:exp, screenshot_pulang=:screenshot WHERE id=:id");
-                    $upd->execute([':jam' => $jamSekarang, ':iso' => $iso, ':exp' => $ekspresi, ':screenshot' => $screenshot, ':id' => $todayRow['id']]);
-                    $jamPulangFormat = substr($jamSekarang, 0, 5); // Ambil hanya jam:menit
-                    $statusText = "Selamat jalan, {$u['nama']}! Anda terlihat {$ekspresi}. Jam pulang tercatat pukul {$jamPulangFormat}.";
-                    jsonResponse(['ok' => true, 'message' => $statusText, 'nama' => $u['nama'], 'jam' => $jamPulangFormat, 'statusClass' => 'bg-green-100 text-green-700']);
-                }
+                $upd = $pdo->prepare("UPDATE attendance SET jam_pulang=:jam, jam_pulang_iso=:iso, ekspresi_pulang=:exp, screenshot_pulang=:screenshot WHERE id=:id");
+                $upd->execute([':jam' => $jamSekarang, ':iso' => $iso, ':exp' => $ekspresi, ':screenshot' => $screenshot, ':id' => $todayRow['id']]);
+                $jamPulangFormat = substr($jamSekarang, 0, 5); // Ambil hanya jam:menit
+                $statusText = "Selamat jalan, {$u['nama']}! Anda terlihat {$ekspresi}. Jam pulang tercatat pukul {$jamPulangFormat}.";
+                jsonResponse(['ok' => true, 'message' => $statusText, 'nama' => $u['nama'], 'jam' => $jamPulangFormat, 'statusClass' => 'bg-green-100 text-green-700']);
             }
         }
     }
@@ -2083,7 +2073,7 @@ async function handleRecognition(nim, topExpression){
         
         if(r.ok){
             statusMessage(r.message, r.statusClass || 'bg-green-100 text-green-700');
-            stopVideoAfterRecognition();
+            //stopVideoAfterRecognition();
         } else {
             statusMessage(r.message || 'Gagal menyimpan presensi', r.statusClass || 'bg-yellow-100 text-yellow-700');
         }
