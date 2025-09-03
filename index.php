@@ -225,7 +225,7 @@ if (isset($_GET['ajax'])) {
     }
 
     // Must be authenticated for all endpoints except auth-related and public landing scan
-    if (!in_array($action, ['login', 'register', 'get_members', 'save_attendance'], true)) {
+    if (!in_array($action, ['login', 'register', 'get_members', 'save_attendance', 'get_today_attendance'], true)) {
         if (!isset($_SESSION['user'])) jsonResponse(['error' => 'Unauthorized'], 401);
     }
 
@@ -288,6 +288,41 @@ if (isset($_GET['ajax'])) {
         // Admin can see all; Pegawai only themselves (but for face recognition we need all for presensi). We'll return all but only safe fields
         $stmt = $pdo->query("SELECT id, role, email, nim, nama, prodi, startup, foto_base64 FROM users WHERE role='pegawai'");
         $rows = $stmt->fetchAll();
+        jsonResponse(['ok' => true, 'data' => $rows]);
+    }
+
+    if ($action === 'get_today_attendance') {
+        $type = $_POST['type'] ?? 'masuk';
+        $today = date('Y-m-d');
+        
+        if ($type === 'masuk') {
+            $stmt = $pdo->prepare("
+                SELECT a.jam_masuk, a.jam_masuk_iso, a.screenshot_masuk, u.nama, u.startup 
+                FROM attendance a 
+                JOIN users u ON u.id = a.user_id 
+                WHERE DATE(a.jam_masuk_iso) = :today 
+                AND a.jam_masuk IS NOT NULL 
+                AND a.jam_masuk != ''
+                ORDER BY a.jam_masuk_iso DESC
+            ");
+        } else {
+            $stmt = $pdo->prepare("
+                SELECT a.jam_pulang, a.jam_pulang_iso, a.screenshot_pulang, u.nama, u.startup 
+                FROM attendance a 
+                JOIN users u ON u.id = a.user_id 
+                WHERE DATE(a.jam_pulang_iso) = :today 
+                AND a.jam_pulang IS NOT NULL 
+                AND a.jam_pulang != ''
+                ORDER BY a.jam_pulang_iso DESC
+            ");
+        }
+        
+        $stmt->execute([':today' => $today]);
+        $rows = $stmt->fetchAll();
+        
+        // Debug log
+        error_log("get_today_attendance: type=$type, today=$today, count=" . count($rows));
+        
         jsonResponse(['ok' => true, 'data' => $rows]);
     }
 
@@ -455,7 +490,7 @@ if (isset($_GET['ajax'])) {
         } else {
             // Check if within check-out time window (after 5 PM) - Allow pulang from 5 PM onwards
             if ($currentHour < 17) {
-                $statusText = "Hei Jangan kabur, ini masih jam kerja";
+                $statusText = "Hei {$u['nama']}, Jangan kabur! ini masih jam kerja";
                 jsonResponse(['ok' => false, 'message' => $statusText, 'statusClass' => 'bg-red-100 text-red-700'], 400);
             }
     
@@ -942,6 +977,46 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                     </div>
                 </div>
                 <div id="presensi-status" class="mt-4 text-center font-medium text-lg p-3 rounded-md hidden"></div>
+                
+                <!-- Log Table untuk Presensi Masuk -->
+                <div id="log-masuk-container" class="mt-6 hidden">
+                    <h3 class="text-lg font-semibold mb-3 text-center">Log Presensi Masuk Hari Ini</h3>
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full bg-white bordered">
+                            <thead class="bg-blue-100">
+                                <tr>
+                                    <th class="py-2 px-4">No</th>
+                                    <th class="py-2 px-4">Tanggal</th>
+                                    <th class="py-2 px-4">Nama</th>
+                                    <th class="py-2 px-4">Startup</th>
+                                    <th class="py-2 px-4">Jam Masuk</th>
+                                    <th class="py-2 px-4">Screenshot</th>
+                                </tr>
+                            </thead>
+                            <tbody id="log-masuk-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+                
+                <!-- Log Table untuk Presensi Pulang -->
+                <div id="log-pulang-container" class="mt-6 hidden">
+                    <h3 class="text-lg font-semibold mb-3 text-center">Log Presensi Pulang Hari Ini</h3>
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full bg-white bordered">
+                            <thead class="bg-red-100">
+                                <tr>
+                                    <th class="py-2 px-4">No</th>
+                                    <th class="py-2 px-4">Tanggal</th>
+                                    <th class="py-2 px-4">Nama</th>
+                                    <th class="py-2 px-4">Startup</th>
+                                    <th class="py-2 px-4">Jam Keluar</th>
+                                    <th class="py-2 px-4">Screenshot</th>
+                                </tr>
+                            </thead>
+                            <tbody id="log-pulang-body"></tbody>
+                        </table>
+                    </div>
+                </div>
             </div>
         </div>
     </main>
@@ -1382,7 +1457,11 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                     </div>
                     <canvas id="modal-canvas" class="hidden"></canvas>
                     <img id="foto-preview" class="mt-2 h-32 w-32 object-cover rounded-lg hidden mx-auto mb-2">
-                    <button type="button" id="btn-start-camera" class="w-full bg-indigo-500 hover:bg-indigo-600 text-white font-bold py-2 px-4 rounded-lg mb-2 transition">Buka Kamera untuk Foto</button>
+                    <div class="grid grid-cols-2 gap-2 mb-2">
+                        <button type="button" id="btn-start-camera" class="bg-indigo-500 hover:bg-indigo-600 text-white font-bold py-2 px-4 rounded-lg transition">Buka Kamera</button>
+                        <button type="button" id="btn-upload-photo" class="bg-purple-500 hover:bg-purple-600 text-white font-bold py-2 px-4 rounded-lg transition">Upload Foto</button>
+                    </div>
+                    <input type="file" id="photo-file-input" accept="image/*" class="hidden">
                     <button type="button" id="btn-take-photo" class="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded-lg hidden transition">Ambil Foto</button>
                 </div>
                 <div id="password-admin-wrapper" class="grid grid-cols-2 gap-2 hidden">
@@ -1778,6 +1857,8 @@ let videoInterval = null;
 let scanMode = '';
 let lastSpokenMessage = '';
 let videoPlayListenerAdded = false;
+let logMasukData = [];
+let logPulangData = [];
 
 // Initialize face recognition system
 async function initializeFaceRecognition() {
@@ -1896,6 +1977,18 @@ function startScan(mode){
     scanButtonsContainer.classList.add('hidden');
     videoContainer.classList.remove('hidden');
     btnBackScan.classList.remove('hidden');
+    
+    // Show appropriate log table
+    if (mode === 'masuk') {
+        qs('#log-masuk-container').classList.remove('hidden');
+        qs('#log-pulang-container').classList.add('hidden');
+        loadLogMasuk();
+    } else {
+        qs('#log-pulang-container').classList.remove('hidden');
+        qs('#log-masuk-container').classList.add('hidden');
+        loadLogPulang();
+    }
+    
     startVideo();
 }
 
@@ -1914,6 +2007,8 @@ function resetPresensiPage(){
     scanButtonsContainer.classList.remove('hidden');
     videoContainer.classList.add('hidden');
     btnBackScan.classList.add('hidden');
+    qs('#log-masuk-container').classList.add('hidden');
+    qs('#log-pulang-container').classList.add('hidden');
     if (presensiStatus) {
         presensiStatus.classList.add('hidden');
         presensiStatus.textContent='';
@@ -1980,7 +2075,7 @@ function startVideoInterval(){
             if (resized.length > 0) {
                 faceapi.draw.drawDetections(canvas, resized);
                 if (labeledFaceDescriptors && labeledFaceDescriptors.length > 0) {
-                    const faceMatcher = new faceapi.FaceMatcher(labeledFaceDescriptors, 0.6);
+                    const faceMatcher = new faceapi.FaceMatcher(labeledFaceDescriptors, 0.45);
                     const results = resized.map(d => faceMatcher.findBestMatch(d.descriptor));
                     results.forEach((result, i) => {
                         const box = resized[i].detection.box;
@@ -1990,7 +2085,7 @@ function startVideoInterval(){
                             label: `${result.toString()} (${topExpression})`
                         });
                         drawBox.draw(canvas);
-                        if (result.label !== 'unknown') {
+                        if (result.label !== 'unknown' && result.distance < 0.45) {
                             handleRecognition(result.label, topExpression);
                         }
                     });
@@ -2010,7 +2105,7 @@ function startVideoInterval(){
                 statusMessage('Error deteksi wajah. Coba refresh halaman.', 'bg-red-100 text-red-700');
             }
         }
-    }, 1000);
+    }, 500);
 }
 
 if (video) {
@@ -2073,6 +2168,8 @@ async function handleRecognition(nim, topExpression){
         
         if(r.ok){
             statusMessage(r.message, r.statusClass || 'bg-green-100 text-green-700');
+            // Update log after successful attendance
+            updateLogAfterAttendance(nim, scanMode);
             //stopVideoAfterRecognition();
         } else {
             statusMessage(r.message || 'Gagal menyimpan presensi', r.statusClass || 'bg-yellow-100 text-yellow-700');
@@ -2112,7 +2209,165 @@ function stopVideoAfterRecognition(){
 // Initialize face recognition when page loads
 document.addEventListener('DOMContentLoaded', () => {
     initializeFaceRecognition();
+    // Reset log data daily
+    checkAndResetLogDaily();
 });
+
+// Load log presensi masuk
+async function loadLogMasuk() {
+    try {
+        const formData = new FormData();
+        formData.append('type', 'masuk');
+        const response = await fetch('?ajax=get_today_attendance', {
+            method: 'POST',
+            body: formData
+        });
+        
+        if (!response.ok) {
+            console.error('HTTP Error:', response.status, response.statusText);
+            return;
+        }
+        
+        const result = await response.json();
+        console.log('Log masuk response:', result);
+        
+        if (result.ok) {
+            logMasukData = result.data || [];
+            console.log('Log masuk data:', logMasukData);
+            renderLogMasuk();
+        } else {
+            console.error('API Error:', result.error || 'Unknown error');
+        }
+    } catch (error) {
+        console.error('Error loading log masuk:', error);
+    }
+}
+
+// Load log presensi pulang
+async function loadLogPulang() {
+    try {
+        const formData = new FormData();
+        formData.append('type', 'pulang');
+        const response = await fetch('?ajax=get_today_attendance', {
+            method: 'POST',
+            body: formData
+        });
+        
+        if (!response.ok) {
+            console.error('HTTP Error:', response.status, response.statusText);
+            return;
+        }
+        
+        const result = await response.json();
+        console.log('Log pulang response:', result);
+        
+        if (result.ok) {
+            logPulangData = result.data || [];
+            console.log('Log pulang data:', logPulangData);
+            renderLogPulang();
+        } else {
+            console.error('API Error:', result.error || 'Unknown error');
+        }
+    } catch (error) {
+        console.error('Error loading log pulang:', error);
+    }
+}
+
+// Render log presensi masuk
+function renderLogMasuk() {
+    const body = qs('#log-masuk-body');
+    if (!body) return;
+    
+    console.log('Rendering log masuk with data:', logMasukData);
+    
+    body.innerHTML = '';
+    if (logMasukData.length === 0) {
+        body.innerHTML = '<tr><td colspan="6" class="text-center py-4 text-gray-500">Belum ada presensi masuk hari ini</td></tr>';
+        return;
+    }
+    
+    logMasukData.forEach((item, index) => {
+        const tr = document.createElement('tr');
+        tr.className = 'border-b hover:bg-gray-50';
+        
+        const screenshot = item.screenshot_masuk ? 
+            `<img src="${item.screenshot_masuk}" alt="Screenshot" class="w-16 h-12 object-cover rounded cursor-pointer hover:scale-150 transition-transform mx-auto" onclick="showScreenshotModal('${item.screenshot_masuk}', 'Screenshot Masuk')" title="Klik untuk memperbesar">` :
+            '<span class="text-gray-400">-</span>';
+        
+        const jamMasuk = item.jam_masuk ? item.jam_masuk.substring(0, 5) : '-';
+        const tanggal = item.jam_masuk_iso ? new Date(item.jam_masuk_iso).toLocaleDateString('id-ID') : '-';
+        
+        tr.innerHTML = `
+            <td class="py-2 px-4 text-center">${index + 1}</td>
+            <td class="py-2 px-4 text-center">${tanggal}</td>
+            <td class="py-2 px-4">${item.nama || '-'}</td>
+            <td class="py-2 px-4 text-center">${item.startup || '-'}</td>
+            <td class="py-2 px-4 text-center">${jamMasuk}</td>
+            <td class="py-2 px-4 text-center">${screenshot}</td>
+        `;
+        body.appendChild(tr);
+    });
+}
+
+// Render log presensi pulang
+function renderLogPulang() {
+    const body = qs('#log-pulang-body');
+    if (!body) return;
+    
+    console.log('Rendering log pulang with data:', logPulangData);
+    
+    body.innerHTML = '';
+    if (logPulangData.length === 0) {
+        body.innerHTML = '<tr><td colspan="6" class="text-center py-4 text-gray-500">Belum ada presensi pulang hari ini</td></tr>';
+        return;
+    }
+    
+    logPulangData.forEach((item, index) => {
+        const tr = document.createElement('tr');
+        tr.className = 'border-b hover:bg-gray-50';
+        
+        const screenshot = item.screenshot_pulang ? 
+            `<img src="${item.screenshot_pulang}" alt="Screenshot" class="w-16 h-12 object-cover rounded cursor-pointer hover:scale-150 transition-transform mx-auto" onclick="showScreenshotModal('${item.screenshot_pulang}', 'Screenshot Pulang')" title="Klik untuk memperbesar">` :
+            '<span class="text-gray-400">-</span>';
+        
+        const jamPulang = item.jam_pulang ? item.jam_pulang.substring(0, 5) : '-';
+        const tanggal = item.jam_pulang_iso ? new Date(item.jam_pulang_iso).toLocaleDateString('id-ID') : '-';
+        
+        tr.innerHTML = `
+            <td class="py-2 px-4 text-center">${index + 1}</td>
+            <td class="py-2 px-4 text-center">${tanggal}</td>
+            <td class="py-2 px-4">${item.nama || '-'}</td>
+            <td class="py-2 px-4 text-center">${item.startup || '-'}</td>
+            <td class="py-2 px-4 text-center">${jamPulang}</td>
+            <td class="py-2 px-4 text-center">${screenshot}</td>
+        `;
+        body.appendChild(tr);
+    });
+}
+
+// Update log after successful attendance
+function updateLogAfterAttendance(nim, mode) {
+    // Delay sedikit untuk memastikan data sudah tersimpan di database
+    setTimeout(() => {
+        if (mode === 'masuk') {
+            loadLogMasuk();
+        } else {
+            loadLogPulang();
+        }
+    }, 1000);
+}
+
+// Check and reset log daily
+function checkAndResetLogDaily() {
+    const today = new Date().toDateString();
+    const lastReset = localStorage.getItem('lastLogReset');
+    
+    if (lastReset !== today) {
+        logMasukData = [];
+        logPulangData = [];
+        localStorage.setItem('lastLogReset', today);
+    }
+}
 
 <?php else: ?>
 // App (logged in)
@@ -2204,11 +2459,13 @@ const modalVideo = qs('#modal-video');
 const modalCanvas = qs('#modal-canvas');
 const btnStartCamera = qs('#btn-start-camera');
 const btnTakePhoto = qs('#btn-take-photo');
+const btnUploadPhoto = qs('#btn-upload-photo');
+const photoFileInput = qs('#photo-file-input');
 const fotoPreview = qs('#foto-preview');
 const fotoDataUrlInput = qs('#foto-data-url');
 let modalStream = null;
 
-function resetModalCamera(){ stopModalCamera(); modalVideoContainer.classList.add('hidden'); btnTakePhoto.classList.add('hidden'); btnStartCamera.classList.remove('hidden'); fotoPreview.classList.add('hidden'); fotoDataUrlInput.value=''; }
+function resetModalCamera(){ stopModalCamera(); modalVideoContainer.classList.add('hidden'); btnTakePhoto.classList.add('hidden'); btnStartCamera.classList.remove('hidden'); btnStartCamera.textContent='Buka Kamera untuk Foto'; fotoPreview.classList.add('hidden'); fotoDataUrlInput.value=''; }
 function stopModalCamera(){ if(modalStream){ modalStream.getTracks().forEach(t=>t.stop()); modalStream=null; } }
 
 btnStartCamera && btnStartCamera.addEventListener('click', async ()=>{
@@ -2218,6 +2475,29 @@ btnStartCamera && btnStartCamera.addEventListener('click', async ()=>{
 btnTakePhoto && btnTakePhoto.addEventListener('click', ()=>{
     const ctx = modalCanvas.getContext('2d'); modalCanvas.width = modalVideo.videoWidth; modalCanvas.height = modalVideo.videoHeight; ctx.drawImage(modalVideo,0,0,modalCanvas.width,modalCanvas.height);
     const dataUrl = modalCanvas.toDataURL('image/jpeg'); fotoPreview.src = dataUrl; fotoDataUrlInput.value = dataUrl; fotoPreview.classList.remove('hidden'); stopModalCamera(); modalVideoContainer.classList.add('hidden'); btnTakePhoto.classList.add('hidden'); btnStartCamera.classList.remove('hidden'); btnStartCamera.textContent='Ambil Ulang Foto';
+});
+
+btnUploadPhoto && btnUploadPhoto.addEventListener('click', ()=>{
+    photoFileInput.click();
+});
+
+photoFileInput && photoFileInput.addEventListener('change', (e)=>{
+    const file = e.target.files[0];
+    if (file) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            const dataUrl = e.target.result;
+            fotoPreview.src = dataUrl;
+            fotoDataUrlInput.value = dataUrl;
+            fotoPreview.classList.remove('hidden');
+            stopModalCamera();
+            modalVideoContainer.classList.add('hidden');
+            btnTakePhoto.classList.add('hidden');
+            btnStartCamera.classList.remove('hidden');
+            btnStartCamera.textContent='Ambil Ulang Foto';
+        };
+        reader.readAsDataURL(file);
+    }
 });
 
 btnAddMember && btnAddMember.addEventListener('click', ()=>{
