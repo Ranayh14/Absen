@@ -74,7 +74,7 @@ function ensureSchema(PDO $pdo): void {
             ekspresi_pulang VARCHAR(50) NULL,
             screenshot_pulang LONGTEXT NULL,
             status ENUM('ontime','terlambat') DEFAULT 'ontime',
-            ket ENUM('hadir','izin','sakit','alpha') DEFAULT 'hadir',
+            ket ENUM('hadir','izin','sakit','alpha','wfh') DEFAULT 'hadir',
             daily_report_id INT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             INDEX(user_id),
@@ -89,7 +89,7 @@ function ensureSchema(PDO $pdo): void {
         'screenshot_masuk' => "ALTER TABLE attendance ADD COLUMN screenshot_masuk LONGTEXT NULL AFTER ekspresi_masuk",
         'screenshot_pulang' => "ALTER TABLE attendance ADD COLUMN screenshot_pulang LONGTEXT NULL AFTER ekspresi_pulang",
         'status' => "ALTER TABLE attendance ADD COLUMN status ENUM('ontime','terlambat') DEFAULT 'ontime' AFTER ekspresi_pulang",
-        'ket' => "ALTER TABLE attendance ADD COLUMN ket ENUM('hadir','izin','sakit','alpha') DEFAULT 'hadir' AFTER status",
+        'ket' => "ALTER TABLE attendance ADD COLUMN ket ENUM('hadir','izin','sakit','alpha','wfh') DEFAULT 'hadir' AFTER status",
         'daily_report_id' => "ALTER TABLE attendance ADD COLUMN daily_report_id INT NULL AFTER ket"
     ];
     
@@ -236,6 +236,13 @@ function checkImageSize($dataUrl, $maxSizeMB = 1) {
     $sizeInMB = $sizeInBytes / (1024 * 1024);
     
     return $sizeInMB <= $maxSizeMB;
+}
+
+// Function to get first name (first word) from full name
+function getFirstName($fullName) {
+    if (empty($fullName)) return '';
+    $nameParts = explode(' ', trim($fullName));
+    return $nameParts[0];
 }
 
 // ----- AJAX ENDPOINTS -----
@@ -467,6 +474,9 @@ if (isset($_GET['ajax'])) {
         $jamSekarang = $now->format('H:i:s'); // Tetap simpan dengan detik untuk database
         $iso = $now->format('Y-m-d H:i:s');
         $today = $now->format('Y-m-d');
+        
+        // Debug logging after variables are defined
+        error_log("Current date: $today, User ID: " . $u['id']);
         $currentHour = (int)$now->format('H');
         $currentMinute = (int)$now->format('i');
         $todayStart = $today . ' 00:00:00';
@@ -479,20 +489,28 @@ if (isset($_GET['ajax'])) {
                 jsonResponse(['ok' => false, 'message' => $statusText, 'statusClass' => 'bg-red-100 text-red-700'], 400);
             }
     
-            // Check if already checked in today (any record for today, regardless of check-out status)
+            // Check if already checked in today and hasn't checked out yet
             $todayCheck = $pdo->prepare("
                 SELECT * FROM attendance 
                 WHERE user_id = :uid 
-                AND jam_masuk_iso BETWEEN :start AND :end 
+                AND DATE(jam_masuk_iso) = :today 
+                AND jam_masuk_iso IS NOT NULL
+                AND jam_pulang_iso IS NULL
                 ORDER BY jam_masuk_iso DESC 
                 LIMIT 1
             ");
             $todayCheck->execute([
                 ':uid' => $u['id'],
-                ':start' => $todayStart,
-                ':end' => $todayEnd
+                ':today' => $today
             ]);
             $todayRow = $todayCheck->fetch();
+            
+            // Debug logging for attendance check
+            if ($todayRow) {
+                error_log("Found existing attendance record: ID=" . $todayRow['id'] . ", jam_masuk_iso=" . $todayRow['jam_masuk_iso'] . ", jam_pulang_iso=" . $todayRow['jam_pulang_iso']);
+            } else {
+                error_log("No existing attendance record found for user " . $u['id'] . " on date " . $today);
+            }
             
             if (!$todayRow) {
                 // Calculate if late (after 8 AM)
@@ -525,11 +543,13 @@ if (isset($_GET['ajax'])) {
                 
                 if ($isLate) {
                     $jamMasukFormat = substr($jamSekarang, 0, 5); // Ambil hanya jam:menit
-                    $statusText = "Selamat datang, {$u['nama']}! Anda terlihat {$ekspresi}. Jam masuk tercatat pukul {$jamMasukFormat}. Anda telat masuk{$lateMessage}";
+                    $firstName = getFirstName($u['nama']);
+                    $statusText = "Selamat datang, {$firstName}! Anda terlihat {$ekspresi}. Jam masuk tercatat pukul {$jamMasukFormat}. Anda telat masuk{$lateMessage}";
                     jsonResponse(['ok' => true, 'message' => $statusText, 'nama' => $u['nama'], 'jam' => $jamMasukFormat, 'statusClass' => 'bg-yellow-100 text-yellow-700']);
                 } else {
                     $jamMasukFormat = substr($jamSekarang, 0, 5); // Ambil hanya jam:menit
-                    $statusText = "Selamat datang, {$u['nama']}! Anda terlihat {$ekspresi}. Jam masuk tercatat pukul {$jamMasukFormat}. On time!";
+                    $firstName = getFirstName($u['nama']);
+                    $statusText = "Selamat datang, {$firstName}! Anda terlihat {$ekspresi}. Jam masuk tercatat pukul {$jamMasukFormat}. On time!";
                     jsonResponse(['ok' => true, 'message' => $statusText, 'nama' => $u['nama'], 'jam' => $jamMasukFormat, 'statusClass' => 'bg-green-100 text-green-700']);
                 }
             } else {
@@ -540,7 +560,8 @@ if (isset($_GET['ajax'])) {
         } else {
             // Check if within check-out time window (after 5 PM) - Allow pulang from 5 PM onwards
             if ($currentHour < 17) {
-                $statusText = "Hei {$u['nama']}, Jangan kabur! ini masih jam kerja";
+                $firstName = getFirstName($u['nama']);
+                $statusText = "Hei {$firstName}, Jangan kabur! ini masih jam kerja";
                 jsonResponse(['ok' => false, 'message' => $statusText, 'statusClass' => 'bg-red-100 text-red-700'], 400);
             }
     
@@ -556,7 +577,8 @@ if (isset($_GET['ajax'])) {
                 $upd = $pdo->prepare("UPDATE attendance SET jam_pulang=:jam, jam_pulang_iso=:iso, ekspresi_pulang=:exp, screenshot_pulang=:screenshot WHERE id=:id");
                 $upd->execute([':jam' => $jamSekarang, ':iso' => $iso, ':exp' => $ekspresi, ':screenshot' => $screenshot, ':id' => $todayRow['id']]);
                 $jamPulangFormat = substr($jamSekarang, 0, 5); // Ambil hanya jam:menit
-                $statusText = "Selamat jalan, {$u['nama']}! Anda terlihat {$ekspresi}. Jam pulang tercatat pukul {$jamPulangFormat}.";
+                $firstName = getFirstName($u['nama']);
+                $statusText = "Selamat jalan, {$firstName}! Anda terlihat {$ekspresi}. Jam pulang tercatat pukul {$jamPulangFormat}.";
                 jsonResponse(['ok' => true, 'message' => $statusText, 'nama' => $u['nama'], 'jam' => $jamPulangFormat, 'statusClass' => 'bg-green-100 text-green-700']);
             }
         }
@@ -981,12 +1003,18 @@ if ($page === 'logout') {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Aplikasi Presensi Wajah</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link rel="stylesheet" href="https://rsms.me/inter/inter.css">
-    <link rel='stylesheet' href='https://cdn-uicons.flaticon.com/3.0.0/uicons-solid-rounded/css/uicons-solid-rounded.css'>
-    <link rel='stylesheet' href='https://cdn-uicons.flaticon.com/3.0.0/uicons-solid-straight/css/uicons-solid-straight.css'>
+    <script src="assets/js/tailwind.js"></script>
+
+    <script src="assets/js/face-api.min.js"></script>
+    <script src="assets/js/chart.min.js"></script>
+    <link rel="stylesheet" href="assets/css/inter.css">
+    <link rel='stylesheet' href='assets/css/uicons-solid-rounded.css'>
+    <link rel='stylesheet' href='assets/css/uicons-solid-straight.css'>
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#6366f1">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="apple-mobile-web-app-title" content="Presensi App">
     <style>
         body { font-family: 'Inter', sans-serif; }
         .loader {
@@ -1028,7 +1056,7 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
             <div class="relative">
                 <button id="btn-profile" class="flex items-center gap-3 px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg">
                     <span class="text-sm text-gray-700">Akun</span>
-                    <img src="https://ui-avatars.com/api/?background=6366f1&color=fff&name=A" class="w-8 h-8 rounded-full" alt="profile">
+                    <img src="generate-avatar.php?background=6366f1&color=fff&name=A&size=32" class="w-8 h-8 rounded-full" alt="profile">
                 </button>
                 <div id="dropdown-profile" class="absolute right-0 mt-2 bg-white rounded-lg shadow-lg border hidden min-w-max">
                     <a href="?page=login" class="block px-4 py-2 text-sm text-indigo-600 hover:bg-indigo-50 whitespace-nowrap">Login</a>
@@ -1180,7 +1208,7 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
             <div class="relative">
                 <button id="btn-profile" class="flex items-center gap-3 px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg">
                     <span class="text-sm text-gray-700"><?php echo htmlspecialchars($_SESSION['user']['nama'] ?? 'Akun'); ?></span>
-                    <img src="https://ui-avatars.com/api/?background=6366f1&color=fff&name=<?php echo urlencode($_SESSION['user']['nama'] ?? 'A'); ?>" class="w-8 h-8 rounded-full" alt="profile">
+                    <img src="generate-avatar.php?background=6366f1&color=fff&name=<?php echo urlencode($_SESSION['user']['nama'] ?? 'A'); ?>&size=32" class="w-8 h-8 rounded-full" alt="profile">
                 </button>
                 <div id="dropdown-profile" class="absolute right-0 mt-2 bg-white rounded-lg shadow-lg border hidden min-w-max">
                     <?php if(isset($_SESSION['user'])): ?>
@@ -1788,54 +1816,111 @@ document.addEventListener('click', (e) => {
 let currentSpeech = null;
 
 function speak(text) {
-    try {
-        // Cancel any ongoing speech before starting a new one
-        speechSynthesis.cancel();
+    try {
+        // Check if speech synthesis is available
+        if (!('speechSynthesis' in window)) {
+            console.warn('Speech synthesis not supported');
+            return;
+        }
 
-        // If there's a pending timeout, clear it to avoid conflicts
-        if (window.speechTimeout) {
-            clearTimeout(window.speechTimeout);
-            window.speechTimeout = null;
-        }
+        // Cancel any ongoing speech before starting a new one
+        speechSynthesis.cancel();
 
-        const u = new SpeechSynthesisUtterance(text);
-        u.lang = 'id-ID';
-        u.rate = 0.9;
-        u.pitch = 1.0;
-        u.volume = 1.0;
+        // If there's a pending timeout, clear it to avoid conflicts
+        if (window.speechTimeout) {
+            clearTimeout(window.speechTimeout);
+            window.speechTimeout = null;
+        }
 
-        u.onstart = () => {
-            console.log('Speech started:', text);
-            // Clear the video scanning interval while the speech is active
-            if (videoInterval) {
-                clearInterval(videoInterval);
-                videoInterval = null;
-            }
-        };
+        // Wait for voices to be loaded (important for offline)
+        const speakWithVoice = () => {
+            const u = new SpeechSynthesisUtterance(text);
+            u.lang = 'id-ID';
+            u.rate = 0.8; // Slightly slower for better offline performance
+            u.pitch = 1.0;
+            u.volume = 1.0;
 
-        u.onend = () => {
-            console.log('Speech ended:', text);
-            // Speech has finished, now reset the message and restart scanning
-            lastSpokenMessage = '';
-            if (isCameraActive && !videoInterval) {
-                startVideoInterval();
-            }
-        };
+            // Try to use a local voice if available
+            const voices = speechSynthesis.getVoices();
+            const indonesianVoice = voices.find(voice => 
+                voice.lang.startsWith('id') || 
+                voice.lang.includes('Indonesian') ||
+                voice.name.includes('Indonesian')
+            );
+            
+            if (indonesianVoice) {
+                u.voice = indonesianVoice;
+            } else if (voices.length > 0) {
+                // Use any available voice as fallback
+                u.voice = voices[0];
+            }
 
-        u.onerror = (e) => {
-            console.error('Speech error:', e);
-            // In case of an error, also reset and restart
-            lastSpokenMessage = '';
-            if (isCameraActive && !videoInterval) {
-                startVideoInterval();
-            }
-        };
+            u.onstart = () => {
+                console.log('Speech started:', text);
+                // Clear the video scanning interval while the speech is active
+                if (videoInterval) {
+                    clearInterval(videoInterval);
+                    videoInterval = null;
+                }
+            };
 
-        speechSynthesis.speak(u);
-        currentSpeech = u;
-    } catch (e) {
-        console.error('Speech synthesis error:', e);
-    }
+            u.onend = () => {
+                console.log('Speech ended:', text);
+                // Speech has finished, now reset the message and restart scanning
+                lastSpokenMessage = '';
+                if (isCameraActive && !videoInterval) {
+                    startVideoInterval();
+                }
+            };
+
+            u.onerror = (e) => {
+                console.error('Speech error:', e);
+                // Handle different error types
+                if (e.error === 'interrupted') {
+                    console.log('Speech was interrupted, retrying...');
+                    // Retry once after a short delay
+                    setTimeout(() => {
+                        if (text === lastSpokenMessage) {
+                            speechSynthesis.speak(u);
+                        }
+                    }, 100);
+                } else {
+                    // For other errors, just reset and continue
+                    lastSpokenMessage = '';
+                    if (isCameraActive && !videoInterval) {
+                        startVideoInterval();
+                    }
+                }
+            };
+
+            speechSynthesis.speak(u);
+            currentSpeech = u;
+        };
+
+        // If voices are already loaded, speak immediately
+        if (speechSynthesis.getVoices().length > 0) {
+            speakWithVoice();
+        } else {
+            // Wait for voices to load (especially important offline)
+            speechSynthesis.addEventListener('voiceschanged', speakWithVoice, { once: true });
+            
+            // Fallback timeout in case voices don't load
+            setTimeout(() => {
+                if (speechSynthesis.getVoices().length === 0) {
+                    console.warn('No voices available, speaking with default settings');
+                    speakWithVoice();
+                }
+            }, 1000);
+        }
+
+    } catch (e) {
+        console.error('Speech synthesis error:', e);
+        // Reset and continue even if speech fails
+        lastSpokenMessage = '';
+        if (isCameraActive && !videoInterval) {
+            startVideoInterval();
+        }
+    }
 }
 
 // Modify the `statusMessage` function to use the improved `speak` function
@@ -1987,6 +2072,46 @@ let videoPlayListenerAdded = false;
 let logMasukData = [];
 let logPulangData = [];
 
+// Initialize speech synthesis for offline use
+function initializeSpeechSynthesis() {
+    try {
+        if ('speechSynthesis' in window) {
+            // Pre-load voices for offline use
+            const loadVoices = () => {
+                const voices = speechSynthesis.getVoices();
+                console.log('Available voices:', voices.length);
+                
+                // Log available Indonesian voices
+                const indonesianVoices = voices.filter(voice => 
+                    voice.lang.startsWith('id') || 
+                    voice.lang.includes('Indonesian') ||
+                    voice.name.includes('Indonesian')
+                );
+                
+                if (indonesianVoices.length > 0) {
+                    console.log('Indonesian voices found:', indonesianVoices.map(v => v.name));
+                } else {
+                    console.log('No Indonesian voices found, will use default voice');
+                }
+            };
+
+            // Load voices immediately if available
+            if (speechSynthesis.getVoices().length > 0) {
+                loadVoices();
+            } else {
+                // Wait for voices to load
+                speechSynthesis.addEventListener('voiceschanged', loadVoices, { once: true });
+            }
+            
+            console.log('Speech synthesis initialized for offline use');
+        } else {
+            console.warn('Speech synthesis not supported in this browser');
+        }
+    } catch (error) {
+        console.error('Failed to initialize speech synthesis:', error);
+    }
+}
+
 // Initialize face recognition system
 async function initializeFaceRecognition() {
     try {
@@ -1999,32 +2124,6 @@ async function initializeFaceRecognition() {
     }
 }
 
-function statusMessage(text, cls){
-    if (!presensiStatus) return;
-    presensiStatus.textContent = text;
-    presensiStatus.className = 'mt-4 text-center font-medium text-lg p-3 rounded-md '+cls;
-    presensiStatus.classList.remove('hidden');
-
-    if(text!==lastSpokenMessage){
-        speak(text);
-        lastSpokenMessage=text;
-
-        if(videoInterval) {
-            clearInterval(videoInterval);
-            videoInterval = null;
-        }
-
-        const wordCount = text.split(' ').length;
-        const estimatedSpeechDuration = Math.max(5000, wordCount * 350);
-
-        window.speechTimeout = setTimeout(()=>{
-            lastSpokenMessage='';
-            if(isCameraActive && !videoInterval) {
-                startVideoInterval();
-            }
-        }, estimatedSpeechDuration);
-    }
-}
 
 async function loadFaceApiModels(){
     if (!loadingOverlay) return;
@@ -2032,7 +2131,7 @@ async function loadFaceApiModels(){
     const loadingProgress = qs('#loading-progress');
     loadingOverlay.classList.remove('hidden');
 
-    const MODEL_URL = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights';
+    const MODEL_URL = 'assets/js/face-api-models';
 
     try {
         loadingProgress.textContent = 'Memuat model deteksi wajah...';
@@ -2335,6 +2434,7 @@ function stopVideoAfterRecognition(){
 
 // Initialize face recognition when page loads
 document.addEventListener('DOMContentLoaded', () => {
+    initializeSpeechSynthesis();
     initializeFaceRecognition();
     // Reset log data daily
     checkAndResetLogDaily();
@@ -3928,7 +4028,7 @@ function renderTodayLateChart(todayLateData) {
                     <div class="bg-white border border-red-200 rounded-lg p-4 shadow-sm">
                         <div class="flex items-center space-x-4">
                             <div class="relative">
-                                <img src="${item.foto_base64 || 'https://ui-avatars.com/api/?background=ef4444&color=fff&name=' + encodeURIComponent(item.nama)}" 
+                                <img src="${item.foto_base64 || 'generate-avatar.php?background=ef4444&color=fff&name=' + encodeURIComponent(item.nama) + '&size=64'}" 
                                      alt="${item.nama}" 
                                      class="w-16 h-16 rounded-full object-cover border-2 border-red-300">
                                 <div class="absolute -top-2 -right-2 bg-red-500 text-white text-xs rounded-full w-6 h-6 flex items-center justify-center font-bold">
@@ -3980,7 +4080,7 @@ function renderMonthlyPerformanceCharts(monthlyStats) {
                             <div class="bg-white border border-red-200 rounded-lg p-4 shadow-sm">
                                 <div class="flex items-center space-x-4 mb-3">
                                     <div class="relative">
-                                        <img src="${item.foto_base64 || 'https://ui-avatars.com/api/?background=ef4444&color=fff&name=' + encodeURIComponent(item.nama)}" 
+                                        <img src="${item.foto_base64 || 'generate-avatar.php?background=ef4444&color=fff&name=' + encodeURIComponent(item.nama) + '&size=48'}" 
                                              alt="${item.nama}" 
                                              class="w-12 h-12 rounded-full object-cover border-2 border-red-300">
                                         <div class="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center font-bold">
@@ -4042,7 +4142,7 @@ function renderMonthlyPerformanceCharts(monthlyStats) {
                                     <div class="relative">
                                         <div class="w-16 h-16 rounded-full flex items-center justify-center" 
                                              style="background: conic-gradient(${colors[index]} 0deg ${percentage * 3.6}deg, #e5e7eb ${percentage * 3.6}deg 360deg)">
-                                            <img src="${item.foto_base64 || 'https://ui-avatars.com/api/?background=22c55e&color=fff&name=' + encodeURIComponent(item.nama)}" 
+                                            <img src="${item.foto_base64 || 'generate-avatar.php?background=22c55e&color=fff&name=' + encodeURIComponent(item.nama) + '&size=48'}" 
                                                  alt="${item.nama}" 
                                                  class="w-12 h-12 rounded-full object-cover border-2 border-white">
                                         </div>
@@ -4269,6 +4369,19 @@ document.addEventListener('click', async (e) => {
     qs('#btn-save-draft').style.display = isViewOnly ? 'none' : 'inline-block';
     qs('button[type="submit"]', qs('#form-monthly-report')).style.display = isViewOnly ? 'none' : 'inline-block';
 });
+
+// Register Service Worker for offline functionality
+if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js')
+            .then(registration => {
+                console.log('SW registered: ', registration);
+            })
+            .catch(registrationError => {
+                console.log('SW registration failed: ', registrationError);
+            });
+    });
+}
 </script>
 </body>
 </html>

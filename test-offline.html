@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test Offline Functionality</title>
+    <link rel="stylesheet" href="assets/css/tailwind.min.css">
+    <link rel="stylesheet" href="assets/css/inter.css">
+    <link rel="stylesheet" href="assets/css/uicons-solid-rounded.css">
+    <link rel="stylesheet" href="assets/css/uicons-solid-straight.css">
+</head>
+<body class="bg-gray-100 p-8">
+    <div class="max-w-4xl mx-auto">
+        <h1 class="text-3xl font-bold text-gray-800 mb-8">Test Offline Functionality</h1>
+        
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <!-- Test 1: CSS Loading -->
+            <div class="bg-white p-6 rounded-lg shadow">
+                <h2 class="text-xl font-semibold mb-4 text-green-600">✅ CSS Test</h2>
+                <p class="text-gray-600 mb-4">Testing Tailwind CSS and custom styles:</p>
+                <div class="bg-blue-500 text-white p-4 rounded-lg">
+                    <i class="fi fi-sr-user text-2xl"></i>
+                    <span class="ml-2">This should be blue with white text</span>
+                </div>
+            </div>
+            
+            <!-- Test 2: Avatar Generator -->
+            <div class="bg-white p-6 rounded-lg shadow">
+                <h2 class="text-xl font-semibold mb-4 text-green-600">✅ Avatar Test</h2>
+                <p class="text-gray-600 mb-4">Testing local avatar generator:</p>
+                <div class="flex space-x-4">
+                    <img src="generate-avatar.php?name=John Doe&size=64" alt="Avatar 1" class="w-16 h-16 rounded-full">
+                    <img src="generate-avatar.php?name=Jane Smith&background=ef4444&size=64" alt="Avatar 2" class="w-16 h-16 rounded-full">
+                    <img src="generate-avatar.php?name=Test User&background=22c55e&size=64" alt="Avatar 3" class="w-16 h-16 rounded-full">
+                </div>
+            </div>
+            
+            <!-- Test 3: Icon Generator -->
+            <div class="bg-white p-6 rounded-lg shadow">
+                <h2 class="text-xl font-semibold mb-4 text-green-600">✅ Icon Test</h2>
+                <p class="text-gray-600 mb-4">Testing PWA icon generator:</p>
+                <div class="flex space-x-4">
+                    <img src="create-icon.php?size=64" alt="Icon 64" class="w-16 h-16">
+                    <img src="create-icon.php?size=128" alt="Icon 128" class="w-32 h-32">
+                </div>
+            </div>
+            
+            <!-- Test 4: Service Worker -->
+            <div class="bg-white p-6 rounded-lg shadow">
+                <h2 class="text-xl font-semibold mb-4 text-green-600">✅ Service Worker Test</h2>
+                <p class="text-gray-600 mb-4">Service Worker Status:</p>
+                <div id="sw-status" class="text-sm">
+                    <span class="text-yellow-600">Checking...</span>
+                </div>
+                <button onclick="testServiceWorker()" class="mt-4 bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600">
+                    Test Service Worker
+                </button>
+            </div>
+            
+            <!-- Test 5: JavaScript Libraries -->
+            <div class="bg-white p-6 rounded-lg shadow">
+                <h2 class="text-xl font-semibold mb-4 text-green-600">✅ JS Libraries Test</h2>
+                <p class="text-gray-600 mb-4">Testing loaded libraries:</p>
+                <div id="js-status" class="text-sm space-y-2">
+                    <div>Chart.js: <span id="chart-status" class="text-yellow-600">Checking...</span></div>
+                    <div>Face API: <span id="faceapi-status" class="text-yellow-600">Checking...</span></div>
+                </div>
+            </div>
+            
+            <!-- Test 6: Network Status -->
+            <div class="bg-white p-6 rounded-lg shadow">
+                <h2 class="text-xl font-semibold mb-4 text-green-600">✅ Network Test</h2>
+                <p class="text-gray-600 mb-4">Current network status:</p>
+                <div id="network-status" class="text-sm">
+                    <span class="text-yellow-600">Checking...</span>
+                </div>
+                <button onclick="testNetwork()" class="mt-4 bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600">
+                    Test Network
+                </button>
+            </div>
+        </div>
+        
+        <div class="mt-8 bg-white p-6 rounded-lg shadow">
+            <h2 class="text-xl font-semibold mb-4 text-blue-600">📋 Test Instructions</h2>
+            <ol class="list-decimal list-inside space-y-2 text-gray-600">
+                <li>Open this page while online to cache all resources</li>
+                <li>Open Developer Tools (F12) and check Application > Service Workers</li>
+                <li>Turn off your internet connection</li>
+                <li>Refresh this page - everything should still work!</li>
+                <li>Check that all tests show green checkmarks</li>
+            </ol>
+        </div>
+    </div>
+
+    <script src="assets/js/chart.min.js"></script>
+    <script src="assets/js/face-api.min.js"></script>
+    <script>
+        // Test Service Worker
+        function testServiceWorker() {
+            if ('serviceWorker' in navigator) {
+                navigator.serviceWorker.getRegistration().then(registration => {
+                    const statusEl = document.getElementById('sw-status');
+                    if (registration) {
+                        statusEl.innerHTML = '<span class="text-green-600">✅ Service Worker is registered and active</span>';
+                    } else {
+                        statusEl.innerHTML = '<span class="text-red-600">❌ Service Worker not registered</span>';
+                    }
+                });
+            } else {
+                document.getElementById('sw-status').innerHTML = '<span class="text-red-600">❌ Service Worker not supported</span>';
+            }
+        }
+        
+        // Test JavaScript Libraries
+        function testLibraries() {
+            // Test Chart.js
+            const chartStatus = document.getElementById('chart-status');
+            if (typeof Chart !== 'undefined') {
+                chartStatus.innerHTML = '<span class="text-green-600">✅ Loaded</span>';
+            } else {
+                chartStatus.innerHTML = '<span class="text-red-600">❌ Not loaded</span>';
+            }
+            
+            // Test Face API
+            const faceapiStatus = document.getElementById('faceapi-status');
+            if (typeof faceapi !== 'undefined') {
+                faceapiStatus.innerHTML = '<span class="text-green-600">✅ Loaded</span>';
+            } else {
+                faceapiStatus.innerHTML = '<span class="text-red-600">❌ Not loaded</span>';
+            }
+        }
+        
+        // Test Network
+        function testNetwork() {
+            const statusEl = document.getElementById('network-status');
+            if (navigator.onLine) {
+                statusEl.innerHTML = '<span class="text-green-600">✅ Online</span>';
+            } else {
+                statusEl.innerHTML = '<span class="text-orange-600">⚠️ Offline</span>';
+            }
+        }
+        
+        // Run tests on page load
+        window.addEventListener('load', () => {
+            testServiceWorker();
+            testLibraries();
+            testNetwork();
+            
+            // Register service worker
+            if ('serviceWorker' in navigator) {
+                navigator.serviceWorker.register('/sw.js')
+                    .then(registration => console.log('SW registered'))
+                    .catch(error => console.log('SW registration failed'));
+            }
+        });
+        
+        // Listen for network changes
+        window.addEventListener('online', testNetwork);
+        window.addEventListener('offline', testNetwork);
+    </script>
+</body>
+</html>

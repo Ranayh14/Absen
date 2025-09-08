@@ -1,0 +1,27 @@
+{
+  "name": "Aplikasi Presensi Wajah",
+  "short_name": "Presensi App",
+  "description": "Aplikasi presensi menggunakan face recognition",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#6366f1",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "create-icon.php?size=192",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "create-icon.php?size=512",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["productivity", "business"],
+  "lang": "id",
+  "dir": "ltr"
+}
