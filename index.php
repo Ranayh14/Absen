@@ -215,6 +215,29 @@ function requireAuth(): void {
 function isAdmin(): bool { return isset($_SESSION['user']) && $_SESSION['user']['role'] === 'admin'; }
 function isPegawai(): bool { return isset($_SESSION['user']) && $_SESSION['user']['role'] === 'pegawai'; }
 
+// Function to check if base64 image data is too large
+function checkImageSize($dataUrl, $maxSizeMB = 1) {
+    if (!$dataUrl || strpos($dataUrl, 'data:image/') !== 0) {
+        return true; // Not a valid image data URL, skip check
+    }
+    
+    // Extract base64 data from data URL
+    $data = explode(',', $dataUrl, 2);
+    if (count($data) !== 2) {
+        return true; // Invalid format, skip check
+    }
+    
+    $imageData = base64_decode($data[1]);
+    if ($imageData === false) {
+        return true; // Failed to decode, skip check
+    }
+    
+    $sizeInBytes = strlen($imageData);
+    $sizeInMB = $sizeInBytes / (1024 * 1024);
+    
+    return $sizeInMB <= $maxSizeMB;
+}
+
 // ----- AJAX ENDPOINTS -----
 if (isset($_GET['ajax'])) {
     $action = $_GET['ajax'];
@@ -260,6 +283,11 @@ if (isset($_GET['ajax'])) {
 
         if ($password !== $password2) jsonResponse(['ok' => false, 'message' => 'Konfirmasi password tidak cocok'], 400);
         if (!$email || !$nim || !$nama || !$prodi || !$password || !$foto) jsonResponse(['ok' => false, 'message' => 'Semua field wajib diisi (termasuk foto)'], 400);
+        
+        // Check image size (max 1MB)
+        if (!checkImageSize($foto, 1)) {
+            jsonResponse(['ok' => false, 'message' => 'Ukuran foto terlalu besar. Maksimal 1MB. Silakan kompres foto atau gunakan foto dengan resolusi lebih kecil.'], 400);
+        }
         // Disallow duplicate email or nim
         $check = $pdo->prepare("SELECT id FROM users WHERE email=:email OR nim=:nim LIMIT 1");
         $check->execute([':email' => $email, ':nim' => $nim]);
@@ -289,6 +317,12 @@ if (isset($_GET['ajax'])) {
         $stmt = $pdo->query("SELECT id, role, email, nim, nama, prodi, startup, foto_base64 FROM users WHERE role='pegawai'");
         $rows = $stmt->fetchAll();
         jsonResponse(['ok' => true, 'data' => $rows]);
+    }
+
+    if ($action === 'get_startups') {
+        $stmt = $pdo->query("SELECT DISTINCT startup FROM users WHERE role='pegawai' AND startup IS NOT NULL AND startup != '' ORDER BY startup");
+        $rows = $stmt->fetchAll();
+        jsonResponse(['ok' => true, 'data' => array_column($rows, 'startup')]);
     }
 
     if ($action === 'get_today_attendance') {
@@ -340,6 +374,12 @@ if (isset($_GET['ajax'])) {
             $user = $pdo->prepare("SELECT id FROM users WHERE id=:id AND role='pegawai'");
             $user->execute([':id' => $id]);
             if (!$user->fetch()) jsonResponse(['ok' => false, 'message' => 'Member tidak ditemukan'], 404);
+            
+            // Check image size if updating photo (max 1MB)
+            if ($foto && !checkImageSize($foto, 1)) {
+                jsonResponse(['ok' => false, 'message' => 'Ukuran foto terlalu besar. Maksimal 1MB. Silakan kompres foto atau gunakan foto dengan resolusi lebih kecil.'], 400);
+            }
+            
             $params = [':nama' => $nama, ':prodi' => $prodi, ':startup' => $startup ?: null, ':id' => $id];
             $sql = "UPDATE users SET nama=:nama, prodi=:prodi, startup=:startup" . ($foto ? ", foto_base64=:foto" : "") . " WHERE id=:id";
             if ($foto) $params[':foto'] = $foto;
@@ -348,6 +388,11 @@ if (isset($_GET['ajax'])) {
         } else {
             // Create new
             if (!$nim || !$nama || !$prodi || !$foto) jsonResponse(['ok' => false, 'message' => 'Field wajib belum lengkap'], 400);
+            
+            // Check image size (max 1MB)
+            if (!checkImageSize($foto, 1)) {
+                jsonResponse(['ok' => false, 'message' => 'Ukuran foto terlalu besar. Maksimal 1MB. Silakan kompres foto atau gunakan foto dengan resolusi lebih kecil.'], 400);
+            }
             $check = $pdo->prepare("SELECT id FROM users WHERE email=:email OR nim=:nim LIMIT 1");
             $email = trim($_POST['email'] ?? '');
             $check->execute([':email' => $email, ':nim' => $nim]);
@@ -379,12 +424,12 @@ if (isset($_GET['ajax'])) {
     if ($action === 'get_attendance') {
         // Admin: all; Pegawai: only their records
         if (isAdmin()) {
-            $stmt = $pdo->query("SELECT a.*, u.nim, u.nama,
+            $stmt = $pdo->query("SELECT a.*, u.nim, u.nama, u.startup,
                 (SELECT dr.status FROM daily_reports dr WHERE dr.user_id=a.user_id AND dr.report_date=DATE(a.jam_masuk_iso) LIMIT 1) AS daily_report_status
                 FROM attendance a JOIN users u ON u.id=a.user_id ORDER BY a.jam_masuk_iso DESC");
         } else {
             $uid = (int)$_SESSION['user']['id'];
-            $stmt = $pdo->prepare("SELECT a.*, u.nim, u.nama,
+            $stmt = $pdo->prepare("SELECT a.*, u.nim, u.nama, u.startup,
                 (SELECT dr.status FROM daily_reports dr WHERE dr.user_id=a.user_id AND dr.report_date=DATE(a.jam_masuk_iso) LIMIT 1) AS daily_report_status
                 FROM attendance a JOIN users u ON u.id=a.user_id WHERE a.user_id=:uid ORDER BY a.jam_masuk_iso DESC");
             $stmt->execute([':uid' => $uid]);
@@ -397,6 +442,11 @@ if (isset($_GET['ajax'])) {
         $mode = $_POST['mode'] ?? ''; // masuk/pulang
         $ekspresi = $_POST['ekspresi'] ?? null;
         $screenshot = $_POST['screenshot'] ?? null; // base64 screenshot data
+        
+        // Check screenshot size (max 1MB)
+        if ($screenshot && !checkImageSize($screenshot, 1)) {
+            jsonResponse(['ok' => false, 'message' => 'Ukuran screenshot terlalu besar. Maksimal 1MB. Silakan coba lagi.'], 400);
+        }
         
         // Debug logging
         error_log("Attendance request: NIM=$nim, Mode=$mode, Expression=$ekspresi, Screenshot=" . ($screenshot ? 'YES' : 'NO'));
@@ -629,11 +679,13 @@ if (isset($_GET['ajax'])) {
     if ($action === 'admin_get_monthly_reports') {
         if (!isAdmin()) jsonResponse(['error'=>'Forbidden'],403);
         $term = strtolower(trim($_POST['term'] ?? ''));
+        $startup = trim($_POST['startup'] ?? '');
         $year = (int)($_POST['year'] ?? 0);
         $month = (int)($_POST['month'] ?? 0);
-        $sql = "SELECT mr.*, u.nim, u.nama FROM monthly_reports mr JOIN users u ON u.id=mr.user_id WHERE 1=1";
+        $sql = "SELECT mr.*, u.nim, u.nama, u.startup FROM monthly_reports mr JOIN users u ON u.id=mr.user_id WHERE 1=1";
         $params = [];
         if($term){ $sql.=" AND (LOWER(u.nama) LIKE :t OR LOWER(u.nim) LIKE :t)"; $params[':t']='%'.$term.'%'; }
+        if($startup){ $sql.=" AND u.startup=:s"; $params[':s']=$startup; }
         if($year){ $sql.=" AND mr.year=:y"; $params[':y']=$year; }
         if($month){ $sql.=" AND mr.month=:m"; $params[':m']=$month; }
         $sql .= " ORDER BY mr.year DESC, mr.month DESC";
@@ -1302,10 +1354,16 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
             <div id="page-laporan" class="hidden">
                 <div class="bg-white p-6 rounded-lg shadow-lg">
                     <h2 class="text-xl font-bold mb-4">Laporan Kehadiran</h2>
-                    <div class="grid md:grid-cols-4 gap-4 mb-4">
+                    <div class="grid md:grid-cols-5 gap-4 mb-4">
                         <label class="text-sm text-gray-600 flex flex-col">
                             <span class="mb-1">Cari (Nama/NIM)</span>
                             <input type="text" id="search-laporan" placeholder="Cari..." class="p-2 border rounded-lg">
+                        </label>
+                        <label class="text-sm text-gray-600 flex flex-col">
+                            <span class="mb-1">Startup</span>
+                            <select id="filter-startup" class="p-2 border rounded-lg">
+                                <option value="">Semua Startup</option>
+                            </select>
                         </label>
                         <label class="text-sm text-gray-600 flex flex-col">
                             <span class="mb-1">Tanggal Mulai</span>
@@ -1317,6 +1375,22 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                         </label>
                         <div class="flex items-end"><button id="btn-show-all" class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded-lg transition">Reset</button></div>
                     </div>
+                    <div class="grid md:grid-cols-4 gap-4 mb-4">
+                        <label class="text-sm text-gray-600 flex flex-col">
+                            <span class="mb-1">Sorting</span>
+                            <select id="sort-presensi" class="p-2 border rounded-lg">
+                                <option value="tanggal-desc">Tanggal (Terbaru)</option>
+                                <option value="tanggal-asc">Tanggal (Terlama)</option>
+                                <option value="jam-masuk-desc">Jam Masuk (Terlambat)</option>
+                                <option value="jam-masuk-asc">Jam Masuk (Tepat Waktu)</option>
+                                <option value="nama-asc">Nama (A-Z)</option>
+                                <option value="nama-desc">Nama (Z-A)</option>
+                            </select>
+                        </label>
+                        <div></div>
+                        <div></div>
+                        <div></div>
+                    </div>
                     <div class="mb-4">
                         <button id="btn-open-absence" class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-lg">Input Keterangan Manual</button>
                     </div>
@@ -1327,6 +1401,7 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                                     <th class="py-2 px-4">Tanggal</th>
                                     <th class="py-2 px-4">NIM</th>
                                     <th class="py-2 px-4">Nama</th>
+                                    <th class="py-2 px-4">Startup</th>
                                     <th class="py-2 px-4">Jam Masuk</th>
                                     <th class="py-2 px-4">Bukti Masuk</th>
                                     <th class="py-2 px-4">Status</th>
@@ -1348,10 +1423,14 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
         <div id="page-admin-monthly" class="hidden">
             <div class="bg-white p-6 rounded-lg shadow-lg">
                 <h2 class="text-xl font-bold mb-4">Laporan Bulanan (Admin)</h2>
-                <div class="grid md:grid-cols-5 gap-3 mb-4">
+                <div class="grid md:grid-cols-6 gap-3 mb-4">
                     <label class="text-sm text-gray-600 flex flex-col">
                         <span class="mb-1">Cari (Nama/NIM)</span>
                         <input type="text" id="am-search" class="p-2 border rounded-lg" placeholder="Cari...">
+                    </label>
+                    <label class="text-sm text-gray-600 flex flex-col">
+                        <span class="mb-1">Startup</span>
+                        <select id="am-startup" class="p-2 border rounded-lg"><option value="">Semua Startup</option></select>
                     </label>
                     <label class="text-sm text-gray-600 flex flex-col">
                         <span class="mb-1">Bulan</span>
@@ -1370,6 +1449,7 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                             <tr>
                                 <th class="py-2 px-4">Bulan</th>
                                 <th class="py-2 px-4">Nama</th>
+                                <th class="py-2 px-4">Startup</th>
                                 <th class="py-2 px-4">Detail</th>
                                 <th class="py-2 px-4">Status</th>
                                 <th class="py-2 px-4">Aksi</th>
@@ -2422,7 +2502,7 @@ const pages = { rekap: qs('#page-rekap'), 'laporan-bulanan': qs('#page-laporan-b
 qsa('.tab-link').forEach(btn=>{
     btn.addEventListener('click', ()=> showPage(btn.dataset.tab));
 });
-function showPage(name){ Object.values(pages).forEach(p=> p && (p.style.display='none')); if(pages[name]) pages[name].style.display='block'; if(name==='members') renderMembers(); if(name==='laporan') renderLaporan(); if(name==='rekap') initRekapPage(); if(name==='laporan-bulanan') renderMonthly(); if(name==='admin-monthly') renderAdminMonthly(); if(name==='dashboard') renderDashboard(); }
+function showPage(name){ Object.values(pages).forEach(p=> p && (p.style.display='none')); if(pages[name]) pages[name].style.display='block'; if(name==='members') renderMembers(); if(name==='laporan') { loadStartupOptions(); renderLaporan(); } if(name==='rekap') initRekapPage(); if(name==='laporan-bulanan') renderMonthly(); if(name==='admin-monthly') renderAdminMonthly(); if(name==='dashboard') renderDashboard(); }
 
 // Ensure initial page sets after variables exist
 <?php if (isAdmin()): ?>
@@ -2787,21 +2867,63 @@ memberForm && memberForm.addEventListener('submit', async (e)=>{
     if(r.ok){ renderMembers(); loadLabeledFaceDescriptors(); stopModalCamera(); memberModal.classList.add('hidden'); } else { showNotif(r.message||'Gagal menyimpan'); }
 });
 
+// Load startup options for filter
+async function loadStartupOptions() {
+    const filterStartup = qs('#filter-startup');
+    if (filterStartup && filterStartup.options.length <= 1) {
+        const res = await fetch('?ajax=get_startups');
+        const j = await res.json();
+        if (j.ok && j.data) {
+            j.data.forEach(startup => {
+                const o = document.createElement('option');
+                o.value = startup;
+                o.textContent = startup;
+                filterStartup.appendChild(o);
+            });
+        }
+    }
+}
+
 // Laporan
 async function renderLaporan(){
     const res = await fetch('?ajax=get_attendance'); const j = await res.json(); const list = (j.data||[]);
     const term = (qs('#search-laporan')?.value||'').toLowerCase();
+    const startupFilter = qs('#filter-startup')?.value || '';
     const tglMulai = qs('#filter-tanggal-mulai')?.value || '';
     const tglSelesai = qs('#filter-tanggal-selesai')?.value || '';
+    const sortBy = qs('#sort-presensi')?.value || 'tanggal-desc';
+    
     const filtered = list.filter(a=>{
         const nameMatch = (a.nama||'').toLowerCase().includes(term);
         const nimMatch = (a.nim||'').toLowerCase().includes(term);
+        const startupMatch = !startupFilter || (a.startup||'') === startupFilter;
         const recordDate = a.jam_masuk_iso ? a.jam_masuk_iso.slice(0,10) : '';
         const dateMatch = (!tglMulai || recordDate>=tglMulai) && (!tglSelesai || recordDate<=tglSelesai);
-        return (nameMatch||nimMatch) && dateMatch;
-    }).sort((a,b)=> new Date(b.jam_masuk_iso||0) - new Date(a.jam_masuk_iso||0));
+        return (nameMatch||nimMatch) && startupMatch && dateMatch;
+    });
+    
+    // Sorting
+    filtered.sort((a,b) => {
+        switch(sortBy) {
+            case 'tanggal-asc':
+                return new Date(a.jam_masuk_iso||0) - new Date(b.jam_masuk_iso||0);
+            case 'tanggal-desc':
+                return new Date(b.jam_masuk_iso||0) - new Date(a.jam_masuk_iso||0);
+            case 'jam-masuk-asc':
+                return (a.jam_masuk||'').localeCompare(b.jam_masuk||'');
+            case 'jam-masuk-desc':
+                return (b.jam_masuk||'').localeCompare(a.jam_masuk||'');
+            case 'nama-asc':
+                return (a.nama||'').localeCompare(b.nama||'');
+            case 'nama-desc':
+                return (b.nama||'').localeCompare(a.nama||'');
+            default:
+                return new Date(b.jam_masuk_iso||0) - new Date(a.jam_masuk_iso||0);
+        }
+    });
+    
     const body = qs('#table-laporan-body'); if(!body) return; body.innerHTML='';
-    if(filtered.length===0){ body.innerHTML = `<tr><td colspan="11" class="text-center py-4">Tidak ada data kehadiran.</td></tr>`; return; }
+    if(filtered.length===0){ body.innerHTML = `<tr><td colspan="12" class="text-center py-4">Tidak ada data kehadiran.</td></tr>`; return; }
     filtered.forEach(att=>{
         const d = new Date(att.jam_masuk_iso);
         const tanggal = isNaN(d.getTime()) ? '-' : d.toLocaleDateString('id-ID', { year:'numeric', month:'long', day:'numeric'});
@@ -2847,6 +2969,7 @@ async function renderLaporan(){
             <td class="py-2 px-4">${tanggal}</td>
             <td class="py-2 px-4">${att.nim||''}</td>
             <td class="py-2 px-4">${att.nama||''}</td>
+            <td class="py-2 px-4">${att.startup||'-'}</td>
             <td class="py-2 px-4">${jamMasuk}</td>
             <td class="py-2 px-4">${buktiMasuk}</td>
             <td class="py-2 px-4"><span class="badge ${statusClass}">${statusText}</span></td>
@@ -2863,12 +2986,14 @@ async function renderLaporan(){
     });
 }
 
-[qs('#search-laporan'), qs('#filter-tanggal-mulai'), qs('#filter-tanggal-selesai')].forEach(el=>{ if(el) el.addEventListener('input', renderLaporan); });
+[qs('#search-laporan'), qs('#filter-startup'), qs('#filter-tanggal-mulai'), qs('#filter-tanggal-selesai'), qs('#sort-presensi')].forEach(el=>{ if(el) el.addEventListener('input', renderLaporan); });
 
 qs('#btn-show-all') && qs('#btn-show-all').addEventListener('click', ()=>{
     if(qs('#search-laporan')) qs('#search-laporan').value = '';
+    if(qs('#filter-startup')) qs('#filter-startup').value = '';
     if(qs('#filter-tanggal-mulai')) qs('#filter-tanggal-mulai').value = '';
     if(qs('#filter-tanggal-selesai')) qs('#filter-tanggal-selesai').value = '';
+    if(qs('#sort-presensi')) qs('#sort-presensi').value = 'tanggal-desc';
     renderLaporan();
 });
 
@@ -3694,17 +3819,29 @@ async function renderMonthly() {
 
 
 async function renderAdminMonthly(){
-    const mSel = qs('#am-month'); const ySel = qs('#am-year');
+    const mSel = qs('#am-month'); const ySel = qs('#am-year'); const sSel = qs('#am-startup');
     if(mSel && mSel.options.length<=2){
         const months=['Januari','Februari','Maret','April','Mei','Juni','Juli','Agustus','September','Oktober','November','Desember'];
         months.forEach((m,i)=>{ const o=document.createElement('option'); o.value=String(i+1); o.textContent=m; mSel.appendChild(o); });
         const yNow=new Date().getFullYear(); for(let y=yNow-2;y<=yNow+1;y++){ const o=document.createElement('option'); o.value=String(y); o.textContent=String(y); ySel.appendChild(o);}
     }
+    if(sSel && sSel.options.length<=1){
+        const res = await fetch('?ajax=get_startups');
+        const j = await res.json();
+        if(j.ok && j.data){
+            j.data.forEach(startup => {
+                const o = document.createElement('option');
+                o.value = startup;
+                o.textContent = startup;
+                sSel.appendChild(o);
+            });
+        }
+    }
     const body = qs('#am-body'); if(!body) return; body.innerHTML='';
-    const payload = { term: qs('#am-search')?.value||'', month: qs('#am-month')?.value||'', year: qs('#am-year')?.value||'' };
+    const payload = { term: qs('#am-search')?.value||'', startup: qs('#am-startup')?.value||'', month: qs('#am-month')?.value||'', year: qs('#am-year')?.value||'' };
     const r = await api('?ajax=admin_get_monthly_reports', payload);
     const j = r.data||[];
-    if(j.length===0){ body.innerHTML = `<tr><td colspan="5" class="text-center py-4">Tidak ada data.</td></tr>`; return; }
+    if(j.length===0){ body.innerHTML = `<tr><td colspan="6" class="text-center py-4">Tidak ada data.</td></tr>`; return; }
     const monthName=(m)=>['Januari','Februari','Maret','April','Mei','Juni','Juli','Agustus','September','Oktober','November','Desember'][m-1];
     j.forEach(it=>{
         const tr=document.createElement('tr'); tr.className='border-b hover:bg-gray-50';
@@ -3718,6 +3855,7 @@ async function renderAdminMonthly(){
         tr.innerHTML = `
             <td class="py-2 px-4">${label}</td>
             <td class="py-2 px-4">${it.nama||''}</td>
+            <td class="py-2 px-4">${it.startup||'-'}</td>
             <td class="py-2 px-4">${detailBtn}</td>
             <td class="py-2 px-4">${statusBadge}</td>
             <td class="py-2 px-4">${actions}</td>`;
@@ -3725,8 +3863,8 @@ async function renderAdminMonthly(){
     });
 }
 
-['#am-search','#am-month','#am-year'].forEach(sel=>{ if(qs(sel)) qs(sel).addEventListener('input', renderAdminMonthly); });
-qs('#am-reset') && qs('#am-reset').addEventListener('click', ()=>{ if(qs('#am-search')) qs('#am-search').value=''; if(qs('#am-month')) qs('#am-month').value=''; if(qs('#am-year')) qs('#am-year').value=''; renderAdminMonthly(); });
+['#am-search','#am-startup','#am-month','#am-year'].forEach(sel=>{ if(qs(sel)) qs(sel).addEventListener('input', renderAdminMonthly); });
+qs('#am-reset') && qs('#am-reset').addEventListener('click', ()=>{ if(qs('#am-search')) qs('#am-search').value=''; if(qs('#am-startup')) qs('#am-startup').value=''; if(qs('#am-month')) qs('#am-month').value=''; if(qs('#am-year')) qs('#am-year').value=''; renderAdminMonthly(); });
 
 // Dashboard functions
 let dashboardCharts = {};
