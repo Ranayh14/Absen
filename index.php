@@ -602,7 +602,7 @@ if (isset($_GET['ajax'])) {
             } else {
                 $masukTime = new DateTime($todayRow['jam_masuk_iso']);
                 $statusText = "Anda sudah presensi masuk pada " . $masukTime->format('d/m/Y H:i') . " dan belum pulang.";
-                jsonResponse(['ok' => false, 'message' => $statusText, 'statusClass' => 'bg-yellow-100 text-yellow-700'], 400);
+                jsonResponse(['ok' => false, 'message' => $statusText, 'statusClass' => 'bg-yellow-100 text-yellow-700']);
             }
         } else {
             // Check if within check-out time window using settings
@@ -610,7 +610,7 @@ if (isset($_GET['ajax'])) {
             if ($currentHour < $minCheckoutHour) {
                 $firstName = getFirstName($u['nama']);
                 $statusText = "Hei {$firstName}, Jangan kabur! ini masih jam kerja";
-                jsonResponse(['ok' => false, 'message' => $statusText, 'statusClass' => 'bg-red-100 text-red-700'], 400);
+                jsonResponse(['ok' => false, 'message' => $statusText, 'statusClass' => 'bg-red-100 text-red-700']);
             }
     
             // Check if checked in today and not yet checked out
@@ -620,7 +620,7 @@ if (isset($_GET['ajax'])) {
             
             if (!$todayRow) {
                 $statusText = "Anda belum melakukan presensi masuk hari ini atau sudah pulang.";
-                jsonResponse(['ok' => false, 'message' => $statusText, 'statusClass' => 'bg-yellow-100 text-yellow-700'], 400);
+                jsonResponse(['ok' => false, 'message' => $statusText, 'statusClass' => 'bg-yellow-100 text-yellow-700']);
             } else {
                 $upd = $pdo->prepare("UPDATE attendance SET jam_pulang=:jam, jam_pulang_iso=:iso, ekspresi_pulang=:exp, screenshot_pulang=:screenshot WHERE id=:id");
                 $upd->execute([':jam' => $jamSekarang, ':iso' => $iso, ':exp' => $ekspresi, ':screenshot' => $screenshot, ':id' => $todayRow['id']]);
