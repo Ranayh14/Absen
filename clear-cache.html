@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Clear Cache - Absen App</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        button {
+            background: #4f46e5;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 10px 5px;
+        }
+        button:hover {
+            background: #4338ca;
+        }
+        .success {
+            color: #059669;
+            background: #d1fae5;
+            padding: 10px;
+            border-radius: 6px;
+            margin: 10px 0;
+        }
+        .error {
+            color: #dc2626;
+            background: #fee2e2;
+            padding: 10px;
+            border-radius: 6px;
+            margin: 10px 0;
+        }
+        .info {
+            color: #1d4ed8;
+            background: #dbeafe;
+            padding: 10px;
+            border-radius: 6px;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Clear Cache - Absen App</h1>
+        <p>Gunakan tools ini untuk membersihkan cache dan memperbaiki masalah login.</p>
+        
+        <div id="status"></div>
+        
+        <button onclick="clearAllCaches()">Clear All Caches</button>
+        <button onclick="unregisterServiceWorker()">Unregister Service Worker</button>
+        <button onclick="reloadPage()">Reload Page</button>
+        
+        <div class="info">
+            <h3>Langkah-langkah:</h3>
+            <ol>
+                <li>Klik "Clear All Caches" untuk membersihkan semua cache</li>
+                <li>Klik "Unregister Service Worker" untuk menghapus service worker lama</li>
+                <li>Klik "Reload Page" untuk memuat ulang halaman</li>
+                <li>Buka aplikasi utama di <a href="index.php">index.php</a></li>
+            </ol>
+        </div>
+    </div>
+
+    <script>
+        function showStatus(message, type = 'info') {
+            const status = document.getElementById('status');
+            status.innerHTML = `<div class="${type}">${message}</div>`;
+        }
+
+        async function clearAllCaches() {
+            try {
+                if ('caches' in window) {
+                    const cacheNames = await caches.keys();
+                    await Promise.all(
+                        cacheNames.map(cacheName => caches.delete(cacheName))
+                    );
+                    showStatus(`Berhasil menghapus ${cacheNames.length} cache(s)`, 'success');
+                } else {
+                    showStatus('Browser tidak mendukung cache API', 'error');
+                }
+            } catch (error) {
+                showStatus(`Error clearing caches: ${error.message}`, 'error');
+            }
+        }
+
+        async function unregisterServiceWorker() {
+            try {
+                if ('serviceWorker' in navigator) {
+                    const registrations = await navigator.serviceWorker.getRegistrations();
+                    await Promise.all(
+                        registrations.map(registration => registration.unregister())
+                    );
+                    showStatus(`Berhasil menghapus ${registrations.length} service worker(s)`, 'success');
+                } else {
+                    showStatus('Browser tidak mendukung service worker', 'error');
+                }
+            } catch (error) {
+                showStatus(`Error unregistering service worker: ${error.message}`, 'error');
+            }
+        }
+
+        function reloadPage() {
+            window.location.reload(true);
+        }
+
+        // Auto-check service worker status
+        window.addEventListener('load', async () => {
+            if ('serviceWorker' in navigator) {
+                const registrations = await navigator.serviceWorker.getRegistrations();
+                if (registrations.length > 0) {
+                    showStatus(`Ditemukan ${registrations.length} service worker(s) yang terdaftar`, 'info');
+                } else {
+                    showStatus('Tidak ada service worker yang terdaftar', 'success');
+                }
+            }
+        });
+    </script>
+</body>
+</html>

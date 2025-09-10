@@ -1,94 +1,14 @@
-const CACHE_NAME = 'absen-app-v1';
-const urlsToCache = [
-  '/',
-  '/index.php',
-  '/manifest.json',
-  '/generate-avatar.php',
-  '/create-icon.php',
-  '/assets/css/tailwind.min.css',
-  '/assets/css/inter.css',
-  '/assets/css/uicons-solid-rounded.css',
-  '/assets/css/uicons-solid-straight.css',
-  '/assets/js/face-api.min.js',
-  '/assets/js/chart.min.js',
-  '/assets/fonts/font-files/Inter-Regular.woff2',
-  '/assets/fonts/font-files/Inter-Medium.woff2',
-  '/assets/fonts/font-files/Inter-SemiBold.woff2',
-  '/assets/fonts/font-files/Inter-Bold.woff2',
-  '/assets/fonts/font-files/InterVariable.woff2',
-  '/assets/js/face-api-models/tiny_face_detector_model-shard1',
-  '/assets/js/face-api-models/face_landmark_68_model-shard1',
-  '/assets/js/face-api-models/face_recognition_model-shard1',
-  '/assets/js/face-api-models/face_recognition_model-shard2',
-  '/assets/js/face-api-models/face_expression_model-shard1',
-  '/assets/js/face-api-models/tiny_face_detector_model-weights_manifest.json',
-  '/assets/js/face-api-models/face_landmark_68_model-weights_manifest.json',
-  '/assets/js/face-api-models/face_recognition_model-weights_manifest.json',
-  '/assets/js/face-api-models/face_expression_model-weights_manifest.json'
-];
+const CACHE_NAME = 'absen-app-v2';
 
 // Install event - cache resources
 self.addEventListener('install', event => {
-  event.waitUntil(
-    caches.open(CACHE_NAME)
-      .then(cache => {
-        console.log('Opened cache');
-        return cache.addAll(urlsToCache);
-      })
-      .catch(err => {
-        console.log('Cache install failed:', err);
-      })
-  );
-});
-
-// Fetch event - serve from cache when offline
-self.addEventListener('fetch', event => {
-  // Skip service worker for speech synthesis and other browser APIs
-  if (event.request.url.includes('speech') || 
-      event.request.url.includes('tts') ||
-      event.request.destination === 'audio' ||
-      event.request.destination === 'media') {
-    return;
-  }
-  
-  event.respondWith(
-    caches.match(event.request)
-      .then(response => {
-        // Return cached version or fetch from network
-        if (response) {
-          return response;
-        }
-        
-        // Clone the request
-        const fetchRequest = event.request.clone();
-        
-        return fetch(fetchRequest).then(response => {
-          // Check if we received a valid response
-          if (!response || response.status !== 200 || response.type !== 'basic') {
-            return response;
-          }
-          
-          // Clone the response
-          const responseToCache = response.clone();
-          
-          caches.open(CACHE_NAME)
-            .then(cache => {
-              cache.put(event.request, responseToCache);
-            });
-          
-          return response;
-        }).catch(() => {
-          // If both cache and network fail, show offline page
-          if (event.request.destination === 'document') {
-            return caches.match('/index.php');
-          }
-        });
-      })
-  );
+  console.log('Service Worker installing...');
+  self.skipWaiting();
 });
 
 // Activate event - clean up old caches
 self.addEventListener('activate', event => {
+  console.log('Service Worker activating...');
   event.waitUntil(
     caches.keys().then(cacheNames => {
       return Promise.all(
@@ -99,6 +19,70 @@ self.addEventListener('activate', event => {
           }
         })
       );
+    }).then(() => {
+      return self.clients.claim();
     })
   );
+});
+
+// Fetch event - minimal caching for static assets only
+self.addEventListener('fetch', event => {
+  const url = new URL(event.request.url);
+  
+  // Skip all non-GET requests
+  if (event.request.method !== 'GET') {
+    return;
+  }
+  
+  // Skip all AJAX requests and API calls
+  if (url.searchParams.has('ajax') || 
+      url.pathname.includes('ajax') ||
+      event.request.headers.get('X-Requested-With') === 'XMLHttpRequest') {
+    return;
+  }
+  
+  // Skip service worker for speech synthesis and other browser APIs
+  if (event.request.url.includes('speech') || 
+      event.request.url.includes('tts') ||
+      event.request.destination === 'audio' ||
+      event.request.destination === 'media') {
+    return;
+  }
+  
+  // Only cache static assets
+  if (url.pathname.startsWith('/assets/') || 
+      url.pathname.endsWith('.css') ||
+      url.pathname.endsWith('.js') ||
+      url.pathname.endsWith('.woff2') ||
+      url.pathname.endsWith('.woff') ||
+      url.pathname.endsWith('.ttf') ||
+      url.pathname.endsWith('.png') ||
+      url.pathname.endsWith('.jpg') ||
+      url.pathname.endsWith('.jpeg') ||
+      url.pathname.endsWith('.gif') ||
+      url.pathname.endsWith('.svg')) {
+    
+    event.respondWith(
+      caches.match(event.request)
+        .then(response => {
+          if (response) {
+            return response;
+          }
+          
+          return fetch(event.request).then(response => {
+            if (!response || response.status !== 200 || response.type !== 'basic') {
+              return response;
+            }
+            
+            const responseToCache = response.clone();
+            caches.open(CACHE_NAME)
+              .then(cache => {
+                cache.put(event.request, responseToCache);
+              });
+            
+            return response;
+          });
+        })
+    );
+  }
 });

@@ -82,6 +82,18 @@ function ensureSchema(PDO $pdo): void {
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
     );
     
+    // settings table for admin configuration
+    $pdo->exec(
+        "CREATE TABLE IF NOT EXISTS settings (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            setting_key VARCHAR(100) NOT NULL UNIQUE,
+            setting_value TEXT NULL,
+            description TEXT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+    );
+    
     // Add missing columns if they don't exist (for existing databases)
     $requiredColumns = [
         'ekspresi_masuk' => "ALTER TABLE attendance ADD COLUMN ekspresi_masuk VARCHAR(50) NULL AFTER jam_masuk_iso",
@@ -175,6 +187,36 @@ function seedAdmin(PDO $pdo, string $email, string $password): void {
     }
 }
 
+function seedDefaultSettings(PDO $pdo): void {
+    $defaultSettings = [
+        ['max_ontime_hour', '08', 'Jam maksimal untuk dianggap ontime (format 24 jam)'],
+        ['min_checkout_hour', '17', 'Jam minimal untuk bisa presensi pulang (format 24 jam)']
+    ];
+    
+    foreach ($defaultSettings as $setting) {
+        $stmt = $pdo->prepare("SELECT id FROM settings WHERE setting_key = :key LIMIT 1");
+        $stmt->execute([':key' => $setting[0]]);
+        $existing = $stmt->fetch();
+        
+        if (!$existing) {
+            $stmt = $pdo->prepare("INSERT INTO settings (setting_key, setting_value, description) VALUES (:key, :value, :desc)");
+            $stmt->execute([':key' => $setting[0], ':value' => $setting[1], ':desc' => $setting[2]]);
+        }
+    }
+}
+
+function getSetting(PDO $pdo, string $key, string $default = ''): string {
+    $stmt = $pdo->prepare("SELECT setting_value FROM settings WHERE setting_key = :key LIMIT 1");
+    $stmt->execute([':key' => $key]);
+    $result = $stmt->fetch();
+    return $result ? $result['setting_value'] : $default;
+}
+
+function setSetting(PDO $pdo, string $key, string $value): void {
+    $stmt = $pdo->prepare("INSERT INTO settings (setting_key, setting_value) VALUES (:key, :value) ON DUPLICATE KEY UPDATE setting_value = :value, updated_at = CURRENT_TIMESTAMP");
+    $stmt->execute([':key' => $key, ':value' => $value]);
+}
+
 try {
     $pdo = getPdo();
     ensureSchema($pdo);
@@ -189,6 +231,7 @@ try {
     }
     
     seedAdmin($pdo, $DEFAULT_ADMIN_EMAIL, $DEFAULT_ADMIN_PASSWORD);
+    seedDefaultSettings($pdo);
 } catch (Exception $e) {
     error_log("Database initialization failed: " . $e->getMessage());
     if (isset($_GET['ajax'])) {
@@ -450,7 +493,10 @@ if (isset($_GET['ajax'])) {
         $ekspresi = $_POST['ekspresi'] ?? null;
         $screenshot = $_POST['screenshot'] ?? null; // base64 screenshot data
         
-        // Check screenshot size (max 1MB)
+        // Check screenshot size (max 1MB) and validate screenshot exists
+        if (!$screenshot || empty($screenshot)) {
+            jsonResponse(['ok' => false, 'message' => 'Screenshot tidak berhasil diambil. Silakan coba lagi dengan posisi yang lebih baik.'], 400);
+        }
         if ($screenshot && !checkImageSize($screenshot, 1)) {
             jsonResponse(['ok' => false, 'message' => 'Ukuran screenshot terlalu besar. Maksimal 1MB. Silakan coba lagi.'], 400);
         }
@@ -513,17 +559,18 @@ if (isset($_GET['ajax'])) {
             }
             
             if (!$todayRow) {
-                // Calculate if late (after 8 AM)
+                // Calculate if late using settings
+                $maxOntimeHour = (int)getSetting($pdo, 'max_ontime_hour', '8');
                 $isLate = false;
                 $lateMessage = '';
                 $status = 'ontime';
                 
-                if ($currentHour > 8 || ($currentHour === 8 && $currentMinute > 0)) {
+                if ($currentHour > $maxOntimeHour || ($currentHour === $maxOntimeHour && $currentMinute > 0)) {
                     $isLate = true;
                     $status = 'terlambat';
                     
                     // Calculate delay time
-                    $deadline = new DateTime($today . ' 08:00:00', new DateTimeZone('Asia/Jakarta'));
+                    $deadline = new DateTime($today . ' ' . sprintf('%02d:00:00', $maxOntimeHour), new DateTimeZone('Asia/Jakarta'));
                     $delay = $now->getTimestamp() - $deadline->getTimestamp();
                     
                     if ($delay >= 3600) { // More than 1 hour
@@ -558,8 +605,9 @@ if (isset($_GET['ajax'])) {
                 jsonResponse(['ok' => false, 'message' => $statusText, 'statusClass' => 'bg-yellow-100 text-yellow-700'], 400);
             }
         } else {
-            // Check if within check-out time window (after 5 PM) - Allow pulang from 5 PM onwards
-            if ($currentHour < 17) {
+            // Check if within check-out time window using settings
+            $minCheckoutHour = (int)getSetting($pdo, 'min_checkout_hour', '17');
+            if ($currentHour < $minCheckoutHour) {
                 $firstName = getFirstName($u['nama']);
                 $statusText = "Hei {$firstName}, Jangan kabur! ini masih jam kerja";
                 jsonResponse(['ok' => false, 'message' => $statusText, 'statusClass' => 'bg-red-100 text-red-700'], 400);
@@ -643,7 +691,7 @@ if (isset($_GET['ajax'])) {
         if (!isAdmin()) jsonResponse(['error' => 'Forbidden'], 403);
         $id = (int)($_POST['id'] ?? 0);
         if(!$id) jsonResponse(['ok'=>false,'message'=>'ID tidak valid'],400);
-        $fields = ['jam_masuk','jam_pulang','ekspresi_masuk','ekspresi_pulang','status','ket'];
+        $fields = ['jam_masuk','jam_pulang','ekspresi_masuk','ekspresi_pulang','status','ket','screenshot_masuk','screenshot_pulang'];
         $set=[]; $params=[':id'=>$id];
         foreach($fields as $f){ if(isset($_POST[$f])){ $set[] = "$f = :$f"; $params[":$f"] = $_POST[$f]!==''? $_POST[$f] : null; } }
         if(isset($_POST['jam_masuk_iso'])){ $set[]='jam_masuk_iso=:jmiso'; $params[':jmiso']= $_POST['jam_masuk_iso'] ?: null; }
@@ -652,6 +700,40 @@ if (isset($_GET['ajax'])) {
         $sql="UPDATE attendance SET ".implode(',', $set)." WHERE id=:id";
         $pdo->prepare($sql)->execute($params);
         jsonResponse(['ok'=>true]);
+    }
+
+    // Admin: get settings
+    if ($action === 'get_settings' && $_SERVER['REQUEST_METHOD'] === 'GET') {
+        if (!isAdmin()) jsonResponse(['error' => 'Forbidden'], 403);
+        $stmt = $pdo->prepare("SELECT setting_key, setting_value, description FROM settings ORDER BY setting_key");
+        $stmt->execute();
+        $settings = [];
+        while ($row = $stmt->fetch()) {
+            $settings[$row['setting_key']] = [
+                'value' => $row['setting_value'],
+                'description' => $row['description']
+            ];
+        }
+        jsonResponse(['ok' => true, 'data' => $settings]);
+    }
+
+    // Admin: update settings
+    if ($action === 'update_settings' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        if (!isAdmin()) jsonResponse(['error' => 'Forbidden'], 403);
+        $maxOntimeHour = trim($_POST['max_ontime_hour'] ?? '');
+        $minCheckoutHour = trim($_POST['min_checkout_hour'] ?? '');
+        
+        if (!is_numeric($maxOntimeHour) || $maxOntimeHour < 0 || $maxOntimeHour > 23) {
+            jsonResponse(['ok' => false, 'message' => 'Jam maksimal ontime harus berupa angka 0-23'], 400);
+        }
+        if (!is_numeric($minCheckoutHour) || $minCheckoutHour < 0 || $minCheckoutHour > 23) {
+            jsonResponse(['ok' => false, 'message' => 'Jam minimal checkout harus berupa angka 0-23'], 400);
+        }
+        
+        setSetting($pdo, 'max_ontime_hour', $maxOntimeHour);
+        setSetting($pdo, 'min_checkout_hour', $minCheckoutHour);
+        
+        jsonResponse(['ok' => true, 'message' => 'Settings berhasil disimpan']);
     }
 
     // Admin: daily report detail and approval
@@ -1235,6 +1317,7 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                     <button data-tab="members" class="tab-link py-3 px-4 font-semibold hover:bg-indigo-700 focus:outline-none focus:bg-indigo-700 transition duration-300">Kelola Member</button>
                     <button data-tab="laporan" class="tab-link py-3 px-4 font-semibold hover:bg-indigo-700 focus:outline-none focus:bg-indigo-700 transition duration-300">Data Presensi</button>
                     <button data-tab="admin-monthly" class="tab-link py-3 px-4 font-semibold hover:bg-indigo-700 focus:outline-none focus:bg-indigo-700 transition duration-300">Laporan Bulanan</button>
+                    <button data-tab="settings" class="tab-link py-3 px-4 font-semibold hover:bg-indigo-700 focus:outline-none focus:bg-indigo-700 transition duration-300">Settings</button>
                 <?php endif; ?>
             </div>
         </div>
@@ -1491,6 +1574,82 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
         <?php endif; ?>
         <?php endif; ?>
 
+        <!-- Admin Settings -->
+        <?php if (isAdmin()): ?>
+        <div id="page-settings" class="hidden">
+            <div class="bg-white p-6 rounded-lg shadow-lg">
+                <h2 class="text-xl font-bold mb-6">Pengaturan Sistem</h2>
+                
+                <form id="settings-form" class="space-y-6">
+                    <div class="grid md:grid-cols-2 gap-6">
+                        <div class="bg-gray-50 p-4 rounded-lg">
+                            <h3 class="text-lg font-semibold mb-4 text-gray-800">Pengaturan Jam Presensi</h3>
+                            
+                            <div class="space-y-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">
+                                        Jam Maksimal On Time
+                                    </label>
+                                    <div class="flex items-center space-x-2">
+                                        <input type="number" id="max-ontime-hour" min="0" max="23" 
+                                               class="w-20 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+                                        <span class="text-sm text-gray-600">:00 (24 jam format)</span>
+                                    </div>
+                                    <p class="text-xs text-gray-500 mt-1">
+                                        Pegawai yang masuk setelah jam ini akan dianggap terlambat
+                                    </p>
+                                </div>
+                                
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">
+                                        Jam Minimal Check Out
+                                    </label>
+                                    <div class="flex items-center space-x-2">
+                                        <input type="number" id="min-checkout-hour" min="0" max="23" 
+                                               class="w-20 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+                                        <span class="text-sm text-gray-600">:00 (24 jam format)</span>
+                                    </div>
+                                    <p class="text-xs text-gray-500 mt-1">
+                                        Pegawai baru bisa presensi pulang setelah jam ini
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="bg-blue-50 p-4 rounded-lg">
+                            <h3 class="text-lg font-semibold mb-4 text-blue-800">Informasi</h3>
+                            <div class="space-y-3 text-sm text-blue-700">
+                                <div class="flex items-start space-x-2">
+                                    <span class="text-blue-500 mt-1">•</span>
+                                    <span>Pengaturan ini akan mempengaruhi semua presensi yang akan datang</span>
+                                </div>
+                                <div class="flex items-start space-x-2">
+                                    <span class="text-blue-500 mt-1">•</span>
+                                    <span>Data presensi yang sudah ada tidak akan berubah</span>
+                                </div>
+                                <div class="flex items-start space-x-2">
+                                    <span class="text-blue-500 mt-1">•</span>
+                                    <span>Format jam menggunakan 24 jam (0-23)</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="flex justify-end space-x-4 pt-4 border-t">
+                        <button type="button" id="reset-settings" 
+                                class="px-4 py-2 text-gray-600 hover:text-gray-800 border border-gray-300 rounded-lg hover:bg-gray-50 transition">
+                            Reset ke Default
+                        </button>
+                        <button type="submit" 
+                                class="px-6 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition">
+                            Simpan Pengaturan
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+        <?php endif; ?>
+
         <!-- Admin Dashboard -->
         <?php if (isAdmin()): ?>
         <div id="page-dashboard" class="hidden">
@@ -1615,6 +1774,8 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
             <form id="edit-att-form">
                 <input type="hidden" id="edit-att-id">
                 <input type="hidden" id="edit-att-user-id">
+                <input type="hidden" id="edit-att-screenshot-masuk-data">
+                <input type="hidden" id="edit-att-screenshot-pulang-data">
                 <div class="mb-3">
                     <label class="block text-sm text-gray-600 mb-1">Tanggal</label>
                     <input type="date" id="edit-att-date" class="w-full p-2 border rounded-lg" disabled>
@@ -1625,11 +1786,25 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                 </div>
                 <div class="mb-3">
                     <label class="block text-sm text-gray-600 mb-1">Jam Masuk</label>
-                    <input type="time" id="edit-att-jam-masuk" class="w-full p-2 border rounded-lg">
+                    <div class="flex gap-2">
+                        <input type="time" id="edit-att-jam-masuk" class="flex-1 p-2 border rounded-lg">
+                        <button type="button" id="edit-att-upload-masuk" class="bg-blue-500 hover:bg-blue-600 text-white px-3 py-2 rounded text-sm">Upload Bukti</button>
+                    </div>
+                    <div id="edit-att-screenshot-masuk-preview" class="mt-2 hidden">
+                        <img id="edit-att-screenshot-masuk-img" src="" alt="Screenshot Masuk" class="w-full h-32 object-cover rounded border">
+                        <button type="button" id="edit-att-remove-masuk" class="mt-1 text-red-600 text-sm hover:underline">Hapus</button>
+                    </div>
                 </div>
                 <div class="mb-3">
                     <label class="block text-sm text-gray-600 mb-1">Jam Pulang</label>
-                    <input type="time" id="edit-att-jam-pulang" class="w-full p-2 border rounded-lg">
+                    <div class="flex gap-2">
+                        <input type="time" id="edit-att-jam-pulang" class="flex-1 p-2 border rounded-lg">
+                        <button type="button" id="edit-att-upload-pulang" class="bg-blue-500 hover:bg-blue-600 text-white px-3 py-2 rounded text-sm">Upload Bukti</button>
+                    </div>
+                    <div id="edit-att-screenshot-pulang-preview" class="mt-2 hidden">
+                        <img id="edit-att-screenshot-pulang-img" src="" alt="Screenshot Pulang" class="w-full h-32 object-cover rounded border">
+                        <button type="button" id="edit-att-remove-pulang" class="mt-1 text-red-600 text-sm hover:underline">Hapus</button>
+                    </div>
                 </div>
                 <div class="mb-3">
                     <label class="block text-sm text-gray-600 mb-1">Keterangan</label>
@@ -1948,7 +2123,32 @@ async function api(url, data){
         }
         console.log('API call data:', logData);
         
-        const res = await fetch(url, { method: 'POST', body: data instanceof FormData ? data : new URLSearchParams(data) });
+        // Ensure URL is correct - use relative URL to avoid port issues
+        if (url.startsWith('http')) {
+            // If it's already a full URL, use it as is
+        } else if (url.startsWith('/')) {
+            // If it starts with /, it's already a proper relative URL
+        } else if (url.startsWith('?')) {
+            // If it starts with ?, it's a query string, prepend current path
+            const currentPath = window.location.pathname;
+            url = currentPath + url;
+        } else {
+            // If it's a relative URL, make it start with /
+            url = '/' + url;
+        }
+        
+        const res = await fetch(url, { 
+            method: 'POST', 
+            body: data instanceof FormData ? data : new URLSearchParams(data),
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest'
+            }
+        });
+        
+        // Check if response is ok
+        if (!res.ok) {
+            throw new Error(`HTTP error! status: ${res.status}`);
+        }
         
         // Get response text first to check if it's valid JSON
         const responseText = await res.text();
@@ -1967,8 +2167,59 @@ async function api(url, data){
         return json;
     } catch (error) {
         console.error('API call failed:', error);
+        
+        // Provide more specific error messages
+        if (error.name === 'TypeError' && error.message.includes('Failed to fetch')) {
+            throw new Error('Tidak dapat terhubung ke server. Pastikan XAMPP sudah berjalan.');
+        }
+        
         throw error;
     }
+}
+
+// Port Detection and Fix
+(function() {
+    // Check if we're on the wrong port
+    if (window.location.port === '3000') {
+        console.warn('Detected port 3000, redirecting to correct XAMPP port...');
+        // Try common XAMPP ports
+        const xamppPorts = ['80', '8080', '8000'];
+        let redirectAttempted = false;
+        
+        for (const port of xamppPorts) {
+            if (!redirectAttempted) {
+                const testUrl = `http://localhost:${port}${window.location.pathname}${window.location.search}`;
+                fetch(testUrl, { method: 'HEAD' })
+                    .then(response => {
+                        if (response.ok && !redirectAttempted) {
+                            redirectAttempted = true;
+                            console.log(`Redirecting to port ${port}`);
+                            window.location.href = testUrl;
+                        }
+                    })
+                    .catch(() => {
+                        // Port not available, try next
+                    });
+            }
+        }
+    }
+})();
+
+// Service Worker Registration
+if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js')
+            .then(registration => {
+                console.log('SW registered: ', registration);
+                // Force update if there's a new service worker
+                if (registration.waiting) {
+                    registration.waiting.postMessage({ action: 'skipWaiting' });
+                }
+            })
+            .catch(registrationError => {
+                console.log('SW registration failed: ', registrationError);
+            });
+    });
 }
 
 // Profile dropdown
@@ -2383,6 +2634,13 @@ async function handleRecognition(nim, topExpression){
         console.warn('Failed to take screenshot:', screenshotError);
     }
     
+    // Validate screenshot before proceeding
+    if (!screenshot || screenshot.length < 1000) {
+        statusMessage('Gagal mengambil screenshot. Silakan coba lagi dengan posisi yang lebih baik.', 'bg-red-100 text-red-700');
+        isProcessingRecognition = false;
+        return;
+    }
+    
     try{
         const r = await api('?ajax=save_attendance', { 
             nim, 
@@ -2598,11 +2856,11 @@ function checkAndResetLogDaily() {
 
 <?php else: ?>
 // App (logged in)
-const pages = { rekap: qs('#page-rekap'), 'laporan-bulanan': qs('#page-laporan-bulanan'), members: qs('#page-members'), laporan: qs('#page-laporan'), 'admin-monthly': qs('#page-admin-monthly'), dashboard: qs('#page-dashboard') };
+const pages = { rekap: qs('#page-rekap'), 'laporan-bulanan': qs('#page-laporan-bulanan'), members: qs('#page-members'), laporan: qs('#page-laporan'), 'admin-monthly': qs('#page-admin-monthly'), dashboard: qs('#page-dashboard'), settings: qs('#page-settings') };
 qsa('.tab-link').forEach(btn=>{
     btn.addEventListener('click', ()=> showPage(btn.dataset.tab));
 });
-function showPage(name){ Object.values(pages).forEach(p=> p && (p.style.display='none')); if(pages[name]) pages[name].style.display='block'; if(name==='members') renderMembers(); if(name==='laporan') { loadStartupOptions(); renderLaporan(); } if(name==='rekap') initRekapPage(); if(name==='laporan-bulanan') renderMonthly(); if(name==='admin-monthly') renderAdminMonthly(); if(name==='dashboard') renderDashboard(); }
+function showPage(name){ Object.values(pages).forEach(p=> p && (p.style.display='none')); if(pages[name]) pages[name].style.display='block'; if(name==='members') renderMembers(); if(name==='laporan') { loadStartupOptions(); renderLaporan(); } if(name==='rekap') initRekapPage(); if(name==='laporan-bulanan') renderMonthly(); if(name==='admin-monthly') renderAdminMonthly(); if(name==='dashboard') renderDashboard(); if(name==='settings') renderSettings(); }
 
 // Ensure initial page sets after variables exist
 <?php if (isAdmin()): ?>
@@ -2766,7 +3024,10 @@ document.addEventListener('click', async (e)=>{
         const id = btnDelete.getAttribute('data-id');
         showConfirmModal('Apakah Anda yakin ingin menghapus member ini?', async ()=>{
             await api('?ajax=delete_member', { id });
-            renderMembers(); loadLabeledFaceDescriptors();
+            renderMembers(); 
+            if (typeof loadLabeledFaceDescriptors === 'function') {
+                loadLabeledFaceDescriptors();
+            }
         });
     }
 
@@ -2785,6 +3046,30 @@ document.addEventListener('click', async (e)=>{
         qs('#edit-att-jam-pulang').value = att.jam_pulang ? att.jam_pulang.substring(0, 5) : '';
         qs('#edit-att-ket').value = att.ket || 'hadir';
         qs('#edit-att-status').value = att.status || 'ontime';
+        
+        // Handle existing screenshots
+        if (att.screenshot_masuk) {
+            editAttScreenshotMasuk = att.screenshot_masuk;
+            qs('#edit-att-screenshot-masuk-data').value = att.screenshot_masuk;
+            qs('#edit-att-screenshot-masuk-img').src = att.screenshot_masuk;
+            qs('#edit-att-screenshot-masuk-preview').classList.remove('hidden');
+        } else {
+            editAttScreenshotMasuk = null;
+            qs('#edit-att-screenshot-masuk-data').value = '';
+            qs('#edit-att-screenshot-masuk-preview').classList.add('hidden');
+        }
+        
+        if (att.screenshot_pulang) {
+            editAttScreenshotPulang = att.screenshot_pulang;
+            qs('#edit-att-screenshot-pulang-data').value = att.screenshot_pulang;
+            qs('#edit-att-screenshot-pulang-img').src = att.screenshot_pulang;
+            qs('#edit-att-screenshot-pulang-preview').classList.remove('hidden');
+        } else {
+            editAttScreenshotPulang = null;
+            qs('#edit-att-screenshot-pulang-data').value = '';
+            qs('#edit-att-screenshot-pulang-preview').classList.add('hidden');
+        }
+        
         editAttModal.classList.remove('hidden');
     }
 
@@ -2964,7 +3249,16 @@ memberForm && memberForm.addEventListener('submit', async (e)=>{
     };
     if(!id){ payload.password = qs('#password-new').value; const confirm = qs('#password-confirm').value; if(!payload.password || payload.password!==confirm){ showNotif('Password admin untuk member baru wajib dan harus cocok'); return; } }
     const r = await api('?ajax=save_member', payload);
-    if(r.ok){ renderMembers(); loadLabeledFaceDescriptors(); stopModalCamera(); memberModal.classList.add('hidden'); } else { showNotif(r.message||'Gagal menyimpan'); }
+    if(r.ok){ 
+        renderMembers(); 
+        if (typeof loadLabeledFaceDescriptors === 'function') {
+            loadLabeledFaceDescriptors(); 
+        }
+        stopModalCamera(); 
+        memberModal.classList.add('hidden'); 
+    } else { 
+        showNotif(r.message||'Gagal menyimpan'); 
+    }
 });
 
 // Load startup options for filter
@@ -3150,6 +3444,66 @@ async function handleDrApproveDisapprove(status){
 
 const editAttModal = qs('#edit-att-modal');
 qs('#edit-att-cancel') && qs('#edit-att-cancel').addEventListener('click', ()=> editAttModal.classList.add('hidden'));
+
+// Handle screenshot upload for edit attendance modal
+let editAttScreenshotMasuk = null;
+let editAttScreenshotPulang = null;
+
+// Upload screenshot masuk
+qs('#edit-att-upload-masuk') && qs('#edit-att-upload-masuk').addEventListener('click', () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.onchange = (e) => {
+        const file = e.target.files[0];
+        if (file) {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                editAttScreenshotMasuk = e.target.result;
+                qs('#edit-att-screenshot-masuk-data').value = editAttScreenshotMasuk;
+                qs('#edit-att-screenshot-masuk-img').src = editAttScreenshotMasuk;
+                qs('#edit-att-screenshot-masuk-preview').classList.remove('hidden');
+            };
+            reader.readAsDataURL(file);
+        }
+    };
+    input.click();
+});
+
+// Upload screenshot pulang
+qs('#edit-att-upload-pulang') && qs('#edit-att-upload-pulang').addEventListener('click', () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.onchange = (e) => {
+        const file = e.target.files[0];
+        if (file) {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                editAttScreenshotPulang = e.target.result;
+                qs('#edit-att-screenshot-pulang-data').value = editAttScreenshotPulang;
+                qs('#edit-att-screenshot-pulang-img').src = editAttScreenshotPulang;
+                qs('#edit-att-screenshot-pulang-preview').classList.remove('hidden');
+            };
+            reader.readAsDataURL(file);
+        }
+    };
+    input.click();
+});
+
+// Remove screenshot masuk
+qs('#edit-att-remove-masuk') && qs('#edit-att-remove-masuk').addEventListener('click', () => {
+    editAttScreenshotMasuk = null;
+    qs('#edit-att-screenshot-masuk-data').value = '';
+    qs('#edit-att-screenshot-masuk-preview').classList.add('hidden');
+});
+
+// Remove screenshot pulang
+qs('#edit-att-remove-pulang') && qs('#edit-att-remove-pulang').addEventListener('click', () => {
+    editAttScreenshotPulang = null;
+    qs('#edit-att-screenshot-pulang-data').value = '';
+    qs('#edit-att-screenshot-pulang-preview').classList.add('hidden');
+});
 qs('#edit-att-form') && qs('#edit-att-form').addEventListener('submit', async (e)=>{
     e.preventDefault();
     const id = qs('#edit-att-id').value;
@@ -3157,6 +3511,8 @@ qs('#edit-att-form') && qs('#edit-att-form').addEventListener('submit', async (e
     const jam_pulang = qs('#edit-att-jam-pulang').value || '';
     const ket = qs('#edit-att-ket').value || '';
     const status = qs('#edit-att-status').value || '';
+    const screenshot_masuk = qs('#edit-att-screenshot-masuk-data').value || '';
+    const screenshot_pulang = qs('#edit-att-screenshot-pulang-data').value || '';
     
     // Add seconds to time values
     const jam_masuk_with_seconds = jam_masuk ? jam_masuk + ':00' : '';
@@ -3167,7 +3523,9 @@ qs('#edit-att-form') && qs('#edit-att-form').addEventListener('submit', async (e
         jam_masuk: jam_masuk_with_seconds, 
         jam_pulang: jam_pulang_with_seconds, 
         ket, 
-        status 
+        status,
+        screenshot_masuk,
+        screenshot_pulang
     });
     showNotif(r.ok ? 'Berhasil disimpan.' : (r.message || 'Gagal menyimpan'), r.ok);
     if(r.ok){ editAttModal.classList.add('hidden'); renderLaporan(); }
@@ -3334,6 +3692,30 @@ document.addEventListener('click', async (e)=>{
         qs('#edit-att-jam-pulang').value = att.jam_pulang ? att.jam_pulang.substring(0, 5) : '';
         qs('#edit-att-ket').value = att.ket || 'hadir';
         qs('#edit-att-status').value = att.status || 'ontime';
+        
+        // Handle existing screenshots
+        if (att.screenshot_masuk) {
+            editAttScreenshotMasuk = att.screenshot_masuk;
+            qs('#edit-att-screenshot-masuk-data').value = att.screenshot_masuk;
+            qs('#edit-att-screenshot-masuk-img').src = att.screenshot_masuk;
+            qs('#edit-att-screenshot-masuk-preview').classList.remove('hidden');
+        } else {
+            editAttScreenshotMasuk = null;
+            qs('#edit-att-screenshot-masuk-data').value = '';
+            qs('#edit-att-screenshot-masuk-preview').classList.add('hidden');
+        }
+        
+        if (att.screenshot_pulang) {
+            editAttScreenshotPulang = att.screenshot_pulang;
+            qs('#edit-att-screenshot-pulang-data').value = att.screenshot_pulang;
+            qs('#edit-att-screenshot-pulang-img').src = att.screenshot_pulang;
+            qs('#edit-att-screenshot-pulang-preview').classList.remove('hidden');
+        } else {
+            editAttScreenshotPulang = null;
+            qs('#edit-att-screenshot-pulang-data').value = '';
+            qs('#edit-att-screenshot-pulang-preview').classList.add('hidden');
+        }
+        
         editAttModal.classList.remove('hidden');
     }
     if(e.target.classList.contains('btn-view-dr-admin')){
@@ -3965,6 +4347,68 @@ async function renderAdminMonthly(){
 
 ['#am-search','#am-startup','#am-month','#am-year'].forEach(sel=>{ if(qs(sel)) qs(sel).addEventListener('input', renderAdminMonthly); });
 qs('#am-reset') && qs('#am-reset').addEventListener('click', ()=>{ if(qs('#am-search')) qs('#am-search').value=''; if(qs('#am-startup')) qs('#am-startup').value=''; if(qs('#am-month')) qs('#am-month').value=''; if(qs('#am-year')) qs('#am-year').value=''; renderAdminMonthly(); });
+
+// Settings functions
+async function renderSettings() {
+    try {
+        const response = await fetch('?ajax=get_settings');
+        const result = await response.json();
+        
+        if (result.ok && result.data) {
+            const settings = result.data;
+            qs('#max-ontime-hour').value = settings.max_ontime_hour?.value || '8';
+            qs('#min-checkout-hour').value = settings.min_checkout_hour?.value || '17';
+        }
+    } catch (error) {
+        console.error('Error loading settings:', error);
+        showNotif('Gagal memuat pengaturan', false);
+    }
+}
+
+// Settings form handlers
+qs('#settings-form') && qs('#settings-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    
+    const maxOntimeHour = qs('#max-ontime-hour').value;
+    const minCheckoutHour = qs('#min-checkout-hour').value;
+    
+    if (!maxOntimeHour || !minCheckoutHour) {
+        showNotif('Semua field harus diisi', false);
+        return;
+    }
+    
+    if (parseInt(maxOntimeHour) < 0 || parseInt(maxOntimeHour) > 23) {
+        showNotif('Jam maksimal ontime harus antara 0-23', false);
+        return;
+    }
+    
+    if (parseInt(minCheckoutHour) < 0 || parseInt(minCheckoutHour) > 23) {
+        showNotif('Jam minimal checkout harus antara 0-23', false);
+        return;
+    }
+    
+    try {
+        const response = await api('?ajax=update_settings', {
+            max_ontime_hour: maxOntimeHour,
+            min_checkout_hour: minCheckoutHour
+        });
+        
+        if (response.ok) {
+            showNotif('Pengaturan berhasil disimpan', true);
+        } else {
+            showNotif(response.message || 'Gagal menyimpan pengaturan', false);
+        }
+    } catch (error) {
+        console.error('Error saving settings:', error);
+        showNotif('Terjadi kesalahan saat menyimpan', false);
+    }
+});
+
+qs('#reset-settings') && qs('#reset-settings').addEventListener('click', () => {
+    qs('#max-ontime-hour').value = '8';
+    qs('#min-checkout-hour').value = '17';
+    showNotif('Pengaturan direset ke default', true);
+});
 
 // Dashboard functions
 let dashboardCharts = {};
