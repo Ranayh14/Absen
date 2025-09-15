@@ -8,6 +8,9 @@ $DB_USER = 'root';
 $DB_PASS = '';
 $DB_NAME = 'absen_db';
 
+// Include database backup functions
+require_once 'database_backup.php';
+
 // Default admin (seeded if not exists)
 $DEFAULT_ADMIN_EMAIL = 'admin@example.com';
 $DEFAULT_ADMIN_PASSWORD = 'admin123';
@@ -217,6 +220,20 @@ function setSetting(PDO $pdo, string $key, string $value): void {
     $stmt->execute([':key' => $key, ':value' => $value]);
 }
 
+/**
+ * Helper function untuk memanggil backup database setelah operasi yang mengubah data
+ */
+function triggerDatabaseBackup(): void {
+    try {
+        $backupResult = backupDatabase();
+        if (!$backupResult['success']) {
+            error_log("Backup gagal: " . $backupResult['message']);
+        }
+    } catch (Exception $e) {
+        error_log("Error dalam backup: " . $e->getMessage());
+    }
+}
+
 try {
     $pdo = getPdo();
     ensureSchema($pdo);
@@ -354,6 +371,10 @@ if (isset($_GET['ajax'])) {
             ':foto' => $foto,
             ':hash' => $hash,
         ]);
+        
+        // Trigger backup setelah menambah user baru
+        triggerDatabaseBackup();
+        
         jsonResponse(['ok' => true]);
     }
 
@@ -434,6 +455,10 @@ if (isset($_GET['ajax'])) {
             $sql = "UPDATE users SET nama=:nama, prodi=:prodi, startup=:startup" . ($foto ? ", foto_base64=:foto" : "") . " WHERE id=:id";
             if ($foto) $params[':foto'] = $foto;
             $pdo->prepare($sql)->execute($params);
+            
+            // Trigger backup setelah update user
+            triggerDatabaseBackup();
+            
             jsonResponse(['ok' => true]);
         } else {
             // Create new
@@ -460,6 +485,10 @@ if (isset($_GET['ajax'])) {
                 ':foto' => $foto,
                 ':hash' => $hash,
             ]);
+            
+            // Trigger backup setelah menambah user baru
+            triggerDatabaseBackup();
+            
             jsonResponse(['ok' => true]);
         }
     }
@@ -468,6 +497,10 @@ if (isset($_GET['ajax'])) {
         if (!isAdmin()) jsonResponse(['error' => 'Forbidden'], 403);
         $id = (int)($_POST['id'] ?? 0);
         $pdo->prepare("DELETE FROM users WHERE id=:id AND role='pegawai'")->execute([':id' => $id]);
+        
+        // Trigger backup setelah menghapus user
+        triggerDatabaseBackup();
+        
         jsonResponse(['ok' => true]);
     }
 
@@ -588,6 +621,9 @@ if (isset($_GET['ajax'])) {
                 $ins = $pdo->prepare("INSERT INTO attendance (user_id, jam_masuk, jam_masuk_iso, ekspresi_masuk, screenshot_masuk, status) VALUES (:uid, :jam, :iso, :exp, :screenshot, :status)");
                 $ins->execute([':uid' => $u['id'], ':jam' => $jamSekarang, ':iso' => $iso, ':exp' => $ekspresi, ':screenshot' => $screenshot, ':status' => $status]);
                 
+                // Trigger backup setelah presensi masuk
+                triggerDatabaseBackup();
+                
                 if ($isLate) {
                     $jamMasukFormat = substr($jamSekarang, 0, 5); // Ambil hanya jam:menit
                     $firstName = getFirstName($u['nama']);
@@ -624,6 +660,9 @@ if (isset($_GET['ajax'])) {
             } else {
                 $upd = $pdo->prepare("UPDATE attendance SET jam_pulang=:jam, jam_pulang_iso=:iso, ekspresi_pulang=:exp, screenshot_pulang=:screenshot WHERE id=:id");
                 $upd->execute([':jam' => $jamSekarang, ':iso' => $iso, ':exp' => $ekspresi, ':screenshot' => $screenshot, ':id' => $todayRow['id']]);
+                
+                // Trigger backup setelah presensi pulang
+                triggerDatabaseBackup();
                 $jamPulangFormat = substr($jamSekarang, 0, 5); // Ambil hanya jam:menit
                 $firstName = getFirstName($u['nama']);
                 $statusText = "Selamat jalan, {$firstName}! Anda terlihat {$ekspresi}. Jam pulang tercatat pukul {$jamPulangFormat}.";
@@ -636,6 +675,10 @@ if (isset($_GET['ajax'])) {
         if (!isAdmin()) jsonResponse(['error' => 'Forbidden'], 403);
         $id = (int)($_POST['id'] ?? 0);
         $pdo->prepare("DELETE FROM attendance WHERE id=:id")->execute([':id' => $id]);
+        
+        // Trigger backup setelah menghapus attendance
+        triggerDatabaseBackup();
+        
         jsonResponse(['ok' => true]);
     }
 
@@ -683,6 +726,10 @@ if (isset($_GET['ajax'])) {
             ':s' => $status,
             ':ket' => $type
         ]);
+        
+        // Trigger backup setelah menambah data absence
+        triggerDatabaseBackup();
+        
         jsonResponse(['ok' => true]);
     }
 
@@ -699,6 +746,10 @@ if (isset($_GET['ajax'])) {
         if(!$set) jsonResponse(['ok'=>false,'message'=>'Tidak ada perubahan'],400);
         $sql="UPDATE attendance SET ".implode(',', $set)." WHERE id=:id";
         $pdo->prepare($sql)->execute($params);
+        
+        // Trigger backup setelah update attendance
+        triggerDatabaseBackup();
+        
         jsonResponse(['ok'=>true]);
     }
 
@@ -733,6 +784,9 @@ if (isset($_GET['ajax'])) {
         setSetting($pdo, 'max_ontime_hour', $maxOntimeHour);
         setSetting($pdo, 'min_checkout_hour', $minCheckoutHour);
         
+        // Trigger backup setelah update settings
+        triggerDatabaseBackup();
+        
         jsonResponse(['ok' => true, 'message' => 'Settings berhasil disimpan']);
     }
 
@@ -752,6 +806,10 @@ if (isset($_GET['ajax'])) {
         if(!$id || !in_array($status, ['approved','disapproved'], true)) jsonResponse(['ok'=>false,'message'=>'Param tidak valid'],400);
         $upd=$pdo->prepare("UPDATE daily_reports SET status=:s, evaluation=:e, updated_at=NOW() WHERE id=:id");
         $upd->execute([':s'=>$status, ':e'=>$evaluation, ':id'=>$id]);
+        
+        // Trigger backup setelah update daily report status
+        triggerDatabaseBackup();
+        
         jsonResponse(['ok'=>true]);
     }
 
@@ -770,11 +828,19 @@ if (isset($_GET['ajax'])) {
             // Update existing report
             $upd = $pdo->prepare("UPDATE daily_reports SET content=:c, updated_at=NOW() WHERE id=:id");
             $upd->execute([':c'=>$content, ':id'=>$row['id']]);
+            
+            // Trigger backup setelah update daily report
+            triggerDatabaseBackup();
+            
             jsonResponse(['ok'=>true, 'id'=>$row['id']]);
         } else {
             // Create new report
             $ins = $pdo->prepare("INSERT INTO daily_reports (user_id, report_date, content) VALUES (:u, :d, :c)");
             $ins->execute([':u'=>$user_id, ':d'=>$date, ':c'=>$content]);
+            
+            // Trigger backup setelah insert daily report
+            triggerDatabaseBackup();
+            
             jsonResponse(['ok'=>true, 'id'=>$pdo->lastInsertId()]);
         }
     }
@@ -813,6 +879,10 @@ if (isset($_GET['ajax'])) {
         $id=(int)($_POST['id']??0); $status=$_POST['status']??'';
         if(!$id || !in_array($status, ['approved','disapproved'], true)) jsonResponse(['ok'=>false,'message'=>'Param tidak valid'],400);
         $pdo->prepare("UPDATE monthly_reports SET status=:s, updated_at=NOW() WHERE id=:id")->execute([':s'=>$status, ':id'=>$id]);
+        
+        // Trigger backup setelah update monthly report status
+        triggerDatabaseBackup();
+        
         jsonResponse(['ok'=>true]);
     }
 
@@ -1011,10 +1081,18 @@ if (isset($_GET['ajax'])) {
         if($row){
             $upd=$pdo->prepare("UPDATE daily_reports SET content=:c, updated_at=NOW() WHERE id=:id");
             $upd->execute([':c'=>$content, ':id'=>$row['id']]);
+            
+            // Trigger backup setelah update daily report
+            triggerDatabaseBackup();
+            
             jsonResponse(['ok'=>true,'id'=>$row['id']]);
         } else {
             $ins=$pdo->prepare("INSERT INTO daily_reports (user_id, report_date, content) VALUES (:u,:d,:c)");
             $ins->execute([':u'=>$uid, ':d'=>$date, ':c'=>$content]);
+            
+            // Trigger backup setelah insert daily report
+            triggerDatabaseBackup();
+            
             jsonResponse(['ok'=>true,'id'=>$pdo->lastInsertId()]);
         }
     }
@@ -1033,6 +1111,10 @@ if (isset($_GET['ajax'])) {
         if (!isAdmin()) jsonResponse(['error'=>'Forbidden'],403);
         $stmt = $pdo->prepare("UPDATE monthly_reports SET year=2025, month=8 WHERE year=0 OR month=0");
         $stmt->execute();
+        
+        // Trigger backup setelah fix monthly reports
+        triggerDatabaseBackup();
+        
         jsonResponse(['ok'=>true,'message'=>'Data berhasil diperbaiki']);
     }
 
@@ -1059,10 +1141,18 @@ if (isset($_GET['ajax'])) {
         if($row){
             $upd=$pdo->prepare("UPDATE monthly_reports SET summary=:s, achievements=:a, obstacles=:o, status=:st, updated_at=NOW() WHERE id=:id");
             $upd->execute([':s'=>$summary, ':a'=>$achievements, ':o'=>$obstacles, ':st'=>$newStatus, ':id'=>$row['id']]);
+            
+            // Trigger backup setelah update monthly report
+            triggerDatabaseBackup();
+            
             jsonResponse(['ok'=>true,'id'=>$row['id']]);
         }else{
             $ins=$pdo->prepare("INSERT INTO monthly_reports (user_id, year, month, summary, achievements, obstacles, status) VALUES (:u,:y,:m,:s,:a,:o,:st)");
             $ins->execute([':u'=>$uid, ':y'=>$year, ':m'=>$month, ':s'=>$summary, ':a'=>$achievements, ':o'=>$obstacles, ':st'=>$newStatus]);
+            
+            // Trigger backup setelah insert monthly report
+            triggerDatabaseBackup();
+            
             jsonResponse(['ok'=>true,'id'=>$pdo->lastInsertId()]);
         }
     }
