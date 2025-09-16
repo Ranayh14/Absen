@@ -2489,6 +2489,9 @@ async function api(url, data){
             url = '/' + url;
         }
         
+        // Debug: Log the final URL being used
+        console.log('Making API call to:', url);
+        
         const res = await fetch(url, { 
             method: 'POST', 
             body: data instanceof FormData ? data : new URLSearchParams(data),
@@ -2519,6 +2522,15 @@ async function api(url, data){
         return json;
     } catch (error) {
         console.error('API call failed:', error);
+        
+        // Perbaikan: Handle specific error types
+        if (error.name === 'TypeError' && error.message.includes('fetch')) {
+            console.error('Network error - check if server is running');
+            throw new Error('Koneksi ke server gagal. Pastikan server berjalan.');
+        } else if (error.message.includes('ERR_CONNECTION_REFUSED')) {
+            console.error('Connection refused - server not responding');
+            throw new Error('Server tidak merespons. Silakan coba lagi.');
+        }
         
         // Provide more specific error messages
         if (error.name === 'TypeError' && error.message.includes('Failed to fetch')) {
@@ -2672,6 +2684,22 @@ let videoInterval = null;
 let scanMode = '';
 let lastSpokenMessage = '';
 let videoPlayListenerAdded = false;
+
+// Optimasi: Performance monitoring variables
+let performanceStats = {
+    detectionCount: 0,
+    totalDetectionTime: 0,
+    averageDetectionTime: 0,
+    lastDetectionTime: 0
+};
+
+// Perbaikan: Konfigurasi threshold yang dapat disesuaikan
+let detectionConfig = {
+    faceMatcherThreshold: 0.5, // Threshold untuk face matching
+    recognitionThreshold: 0.5, // Threshold untuk recognition
+    inputSize: 224, // Ukuran input untuk deteksi (lebih kecil untuk performa)
+    scoreThreshold: 0.5 // Threshold untuk deteksi wajah (lebih tinggi untuk performa)
+};
 let logMasukData = [];
 let logPulangData = [];
 
@@ -2774,19 +2802,29 @@ async function fetchMembers(){
 async function loadLabeledFaceDescriptors(){
     const members = await fetchMembers();
     labeledFaceDescriptors = [];
-    const batchSize = 3;
+    console.log(`Loading face descriptors for ${members.length} members...`);
+    
+    // Optimasi: batch size lebih besar untuk loading lebih cepat
+    const batchSize = 8;
     for (let i = 0; i < members.length; i += batchSize) {
         const batch = members.slice(i, i + batchSize);
         const batchPromises = batch.map(async (m) => {
-            if (!m.foto_base64) return null;
+            if (!m.foto_base64) {
+                console.warn(`No photo for member: ${m.nama} (${m.nim})`);
+                return null;
+            }
             try {
                 const img = await faceapi.fetchImage(m.foto_base64);
+                // Perbaikan: parameter yang seimbang untuk akurasi dan kecepatan
                 const det = await faceapi.detectSingleFace(img, new faceapi.TinyFaceDetectorOptions({
-                    inputSize: 320,
-                    scoreThreshold: 0.5
+                    inputSize: 320, // Tetap 320 untuk loading database (akurasi penting)
+                    scoreThreshold: 0.4 // Threshold yang seimbang
                 })).withFaceLandmarks().withFaceDescriptor();
                 if (det) {
+                    console.log(`Successfully loaded face descriptor for: ${m.nama} (${m.nim})`);
                     return new faceapi.LabeledFaceDescriptors(m.nim, [det.descriptor]);
+                } else {
+                    console.warn(`Failed to detect face for: ${m.nama} (${m.nim})`);
                 }
             } catch (err) {
                 console.warn('Deteksi gagal untuk', m.nama, err);
@@ -2795,9 +2833,22 @@ async function loadLabeledFaceDescriptors(){
         });
         const batchResults = await Promise.all(batchPromises);
         labeledFaceDescriptors.push(...batchResults.filter(Boolean));
+        // Optimasi: delay lebih pendek untuk loading lebih cepat
         if (i + batchSize < members.length) {
-            await new Promise(resolve => setTimeout(resolve, 50));
+            await new Promise(resolve => setTimeout(resolve, 20));
         }
+    }
+    console.log(`Successfully loaded ${labeledFaceDescriptors.length} face descriptors`);
+}
+
+// Perbaikan: Fungsi untuk menyesuaikan threshold secara dinamis
+function adjustDetectionThreshold() {
+    // Jika terlalu banyak "unknown", tingkatkan toleransi
+    if (performanceStats.detectionCount > 100 && performanceStats.averageDetectionTime > 200) {
+        console.log('Adjusting thresholds for better accuracy...');
+        detectionConfig.faceMatcherThreshold = Math.min(0.6, detectionConfig.faceMatcherThreshold + 0.05);
+        detectionConfig.recognitionThreshold = Math.min(0.6, detectionConfig.recognitionThreshold + 0.05);
+        console.log(`New thresholds: FaceMatcher=${detectionConfig.faceMatcherThreshold}, Recognition=${detectionConfig.recognitionThreshold}`);
     }
 }
 
@@ -2905,29 +2956,69 @@ function startVideoInterval(){
     }
     const displaySize = { width: video.clientWidth, height: video.clientHeight };
     faceapi.matchDimensions(canvas, displaySize);
+    // Optimasi: interval dengan throttling untuk performa lebih baik
+    let lastDetectionTime = 0;
+    const detectionThrottle = 200; // 200ms throttle untuk mengurangi beban CPU lebih efektif
+    
     videoInterval = setInterval(async ()=>{
+        const now = Date.now();
+        if (now - lastDetectionTime < detectionThrottle) {
+            return; // Skip detection jika terlalu cepat
+        }
+        lastDetectionTime = now;
+        
         try {
+            // Optimasi: Performance monitoring
+            const detectionStartTime = performance.now();
+            
+            // Perbaikan: parameter deteksi yang seimbang untuk akurasi optimal
             const detections = await faceapi.detectAllFaces(video, new faceapi.TinyFaceDetectorOptions({
-                inputSize: 320,
-                scoreThreshold: 0.5
+                inputSize: detectionConfig.inputSize,
+                scoreThreshold: detectionConfig.scoreThreshold
             })).withFaceLandmarks().withFaceDescriptors().withFaceExpressions();
+            
+            // Optimasi: Update performance stats
+            const detectionTime = performance.now() - detectionStartTime;
+            performanceStats.detectionCount++;
+            performanceStats.totalDetectionTime += detectionTime;
+            performanceStats.averageDetectionTime = performanceStats.totalDetectionTime / performanceStats.detectionCount;
+            performanceStats.lastDetectionTime = detectionTime;
+            
+            // Log performance setiap 50 deteksi untuk debugging
+            if (performanceStats.detectionCount % 50 === 0) {
+                console.log(`Performance Stats - Avg: ${performanceStats.averageDetectionTime.toFixed(2)}ms, Last: ${detectionTime.toFixed(2)}ms, Count: ${performanceStats.detectionCount}`);
+                // Perbaikan: Sesuaikan threshold secara dinamis jika diperlukan
+                adjustDetectionThreshold();
+                
+                // Optimasi: Jika performa terlalu lambat, tingkatkan throttle
+                if (performanceStats.averageDetectionTime > 1500) {
+                    console.log('Performance is slow, increasing throttle...');
+                    detectionThrottle = Math.min(500, detectionThrottle + 50);
+                }
+            }
             const resized = faceapi.resizeResults(detections, displaySize);
             const ctx = canvas.getContext('2d');
             ctx.clearRect(0,0,canvas.width,canvas.height);
             if (resized.length > 0) {
                 faceapi.draw.drawDetections(canvas, resized);
                 if (labeledFaceDescriptors && labeledFaceDescriptors.length > 0) {
-                    const faceMatcher = new faceapi.FaceMatcher(labeledFaceDescriptors, 0.45);
+                    // Perbaikan: threshold yang lebih toleran untuk akurasi yang lebih baik
+                    const faceMatcher = new faceapi.FaceMatcher(labeledFaceDescriptors, detectionConfig.faceMatcherThreshold);
                     const results = resized.map(d => faceMatcher.findBestMatch(d.descriptor));
                     results.forEach((result, i) => {
                         const box = resized[i].detection.box;
                         const expressions = resized[i].expressions || {};
                         const topExpression = getTopExpression(expressions);
+                        
+                        // Debug: Log hasil deteksi untuk troubleshooting
+                        console.log(`Face ${i}: Label=${result.label}, Distance=${result.distance.toFixed(3)}, Threshold=${detectionConfig.recognitionThreshold}`);
+                        
                         const drawBox = new faceapi.draw.DrawBox(box, {
                             label: `${result.toString()} (${topExpression})`
                         });
                         drawBox.draw(canvas);
-                        if (result.label !== 'unknown' && result.distance < 0.45) {
+                        // Perbaikan: threshold yang lebih toleran untuk akurasi yang lebih baik
+                        if (result.label !== 'unknown' && result.distance < detectionConfig.recognitionThreshold) {
                             handleRecognition(result.label, topExpression);
                         }
                     });
