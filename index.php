@@ -1210,9 +1210,156 @@ if ($page === 'logout') {
         .z-60 { z-index: 60; }
         .z-70 { z-index: 70; }
         .max-w-7xl { max-width: 80rem; }
+        
+        /* Landing page custom styles */
+        .landing-panel {
+            background: linear-gradient(135deg, #ffffff 0%, #f8fafc 50%, #f1f5f9 100%);
+            border: 1px solid #e2e8f0;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+        }
+        
+        .feature-check {
+            background: linear-gradient(135deg, #64748b 0%, #475569 100%);
+            box-shadow: 0 2px 4px rgba(100, 116, 139, 0.2);
+        }
+        
+        .attendance-section {
+            background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+            border: 1px solid #cbd5e1;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+        }
+        
+        .illustration-panel {
+            background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+            border: 1px solid #e2e8f0;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+        }
+        
+        .camera-overlay {
+            background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+            border: 2px solid #94a3b8;
+        }
+        
+        .btn-attendance {
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        
+        .btn-attendance:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 12px rgba(0, 0, 0, 0.15);
+        }
+        
+        .btn-attendance.blue {
+            background: linear-gradient(135deg, #64748b 0%, #475569 100%);
+        }
+        
+        .btn-attendance.red {
+            background: linear-gradient(135deg, #94a3b8 0%, #64748b 100%);
+        }
+        
+        /* Full height image adjustments */
+        .full-height-image {
+            height: calc(100vh - 80px); /* Subtract header height */
+            min-height: 600px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .image-container {
+            width: auto;
+            height: 100%;
+            max-width: 100%;
+        }
+        
+        .image-container img {
+            width: auto;
+            height: 100%;
+            object-fit: contain;
+        }
+        
+        .text-panel-middle {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            height: 60vh; /* Reduced height to match the red box */
+            min-height: 400px;
+            max-height: 500px;
+            margin-top: 8vh; /* Move section down to match red box position */
+        }
+        
+        .text-panel-container {
+            margin-left: 2rem; /* Same margin as right panel */
+        }
+        
+        .image-panel-container {
+            margin-right: 2rem; /* Same margin as left panel */
+        }
+        
+        /* Responsive adjustments */
+        @media (max-width: 1024px) {
+            .landing-panel, .illustration-panel {
+                padding: 1.5rem;
+            }
+            
+            .landing-panel h2 {
+                font-size: 2rem;
+            }
+            
+            .full-height-image {
+                height: calc(100vh - 70px);
+            }
+            
+            .text-panel-middle {
+                height: 50vh;
+                min-height: 350px;
+                max-height: 450px;
+                margin-top: 6vh; /* Adjust for tablet */
+            }
+            
+            .text-panel-container {
+                margin-left: 1rem;
+            }
+            
+            .image-panel-container {
+                margin-right: 1rem;
+            }
+        }
+        
+        @media (max-width: 768px) {
+            .landing-panel h2 {
+                font-size: 1.75rem;
+            }
+            
+            .btn-attendance {
+                padding: 0.75rem 1.5rem;
+                font-size: 1rem;
+            }
+            
+            .full-height-image {
+                height: calc(100vh - 60px);
+            }
+            
+            .text-panel-middle {
+                height: auto;
+                min-height: 300px;
+                max-height: none;
+                margin-top: 4vh; /* Adjust for mobile */
+            }
+            
+            .text-panel-container {
+                margin-left: 0.5rem;
+            }
+            
+            .image-panel-container {
+                margin-right: 0.5rem;
+            }
+        }
     </style>
 </head>
-<body class="bg-gray-100 text-gray-800">
+<body class="bg-gradient-to-br from-slate-50 via-gray-50 to-slate-100 text-gray-800">
 
 <?php 
 // Public landing page: presensi can be accessed without login
@@ -1222,80 +1369,193 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
 ?>
 
 <?php if ($page === 'landing'): ?>
-    <header class="bg-white shadow-md">
+    <header class="bg-white shadow-sm border-b border-gray-200">
         <div class="container mx-auto px-4 py-4 flex items-center justify-between">
-            <h1 class="text-2xl font-bold text-gray-700">Sistem Presensi Berbasis Wajah</h1>
+            <h1 class="text-2xl font-bold text-gray-800">Sistem Presensi Berbasis Wajah</h1>
             <div class="relative">
-                <button id="btn-profile" class="flex items-center gap-3 px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg">
+                <button id="btn-profile" class="flex items-center gap-3 px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors">
                     <span class="text-sm text-gray-700">Akun</span>
-                    <img src="generate-avatar.php?background=6366f1&color=fff&name=A&size=32" class="w-8 h-8 rounded-full" alt="profile">
+                    <img src="generate-avatar.php?background=64748b&color=ffffff&name=A&size=32" class="w-8 h-8 rounded-full" alt="profile">
                 </button>
-                <div id="dropdown-profile" class="absolute right-0 mt-2 bg-white rounded-lg shadow-lg border hidden min-w-max">
-                    <a href="?page=login" class="block px-4 py-2 text-sm text-indigo-600 hover:bg-indigo-50 whitespace-nowrap">Login</a>
-                    <a href="?page=register" class="block px-4 py-2 text-sm text-emerald-600 hover:bg-emerald-50 whitespace-nowrap">Register</a>
+                <div id="dropdown-profile" class="absolute right-0 mt-2 bg-white rounded-lg shadow-lg border border-gray-200 hidden min-w-max">
+                    <a href="?page=login" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 whitespace-nowrap">Login</a>
+                    <a href="?page=register" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 whitespace-nowrap">Register</a>
                 </div>
             </div>
         </div>
     </header>
     <main class="mx-auto p-4">
         <div id="page-presensi" class="">
-            <div class="bg-white p-6 rounded-lg shadow-lg text-center">
-                <h2 class="text-xl font-bold mb-4">Pilih Jenis Presensi</h2>
-                <div id="scan-buttons-container" class="flex justify-center gap-4">
-                    <button id="btn-scan-masuk" class="bg-blue-500 hover:bg-blue-600 text-white btn-pill transition duration-300 text-lg">Presensi Masuk</button>
-                    <button id="btn-scan-pulang" class="bg-red-500 hover:bg-red-600 text-white btn-pill transition duration-300 text-lg">Presensi Pulang</button>
+            <!-- Video Container (hidden by default) -->
+            <div id="video-container" class="bg-gray-900 rounded-lg overflow-hidden aspect-video mt-4 max-w-4xl mx-auto hidden">
+                <video id="video" autoplay muted playsinline></video>
+                <canvas id="canvas"></canvas>
+                <div class="absolute top-3 left-3">
+                    <button id="btn-back-scan" class="bg-white/90 hover:bg-white text-gray-800 font-semibold py-1.5 px-3 rounded-lg hidden">Kembali</button>
                 </div>
-                <div id="video-container" class="bg-gray-900 rounded-lg overflow-hidden aspect-video mt-4 hidden">
-                    <video id="video" autoplay muted playsinline></video>
-                    <canvas id="canvas"></canvas>
-                    <div class="absolute top-3 left-3">
-                        <button id="btn-back-scan" class="bg-white/90 hover:bg-white text-gray-800 font-semibold py-1.5 px-3 rounded-lg hidden">Kembali</button>
+            </div>
+            <div id="presensi-status" class="mt-4 text-center font-medium text-lg p-3 rounded-md hidden"></div>
+                
+            <!-- Log Table untuk Presensi Masuk -->
+            <div id="log-masuk-container" class="mt-6 hidden">
+                <h3 class="text-lg font-semibold mb-3 text-center">Log Presensi Masuk Hari Ini</h3>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full bg-white bordered">
+                        <thead class="bg-blue-100">
+                            <tr>
+                                <th class="py-2 px-4">No</th>
+                                <th class="py-2 px-4">Tanggal</th>
+                                <th class="py-2 px-4">Nama</th>
+                                <th class="py-2 px-4">Startup</th>
+                                <th class="py-2 px-4">Jam Masuk</th>
+                                <th class="py-2 px-4">Screenshot</th>
+                            </tr>
+                        </thead>
+                        <tbody id="log-masuk-body"></tbody>
+                    </table>
+                </div>
+            </div>
+            
+            <!-- Log Table untuk Presensi Pulang -->
+            <div id="log-pulang-container" class="mt-6 hidden">
+                <h3 class="text-lg font-semibold mb-3 text-center">Log Presensi Pulang Hari Ini</h3>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full bg-white bordered">
+                        <thead class="bg-red-100">
+                            <tr>
+                                <th class="py-2 px-4">No</th>
+                                <th class="py-2 px-4">Tanggal</th>
+                                <th class="py-2 px-4">Nama</th>
+                                <th class="py-2 px-4">Startup</th>
+                                <th class="py-2 px-4">Jam Keluar</th>
+                                <th class="py-2 px-4">Screenshot</th>
+                            </tr>
+                        </thead>
+                        <tbody id="log-pulang-body"></tbody>
+                    </table>
+                </div>
+            </div>
+            
+            <!-- Two Panel Layout -->
+            <div id="two-panel-layout" class="grid grid-cols-1 lg:grid-cols-3 gap-8 w-full px-4">
+                <!-- Left Panel - Text Content -->
+                <div class="landing-panel p-8 rounded-2xl shadow-lg text-panel-middle lg:col-span-1 text-panel-container mt-[160px] ml-[100px] mr-0">
+                    <div class="mb-6">
+                        <h2 class="text-2xl font-bold text-gray-800 mb-3">PRESENSI MUDAH, CEPAT & AKURAT.</h2>
+                        <p class="text-base text-gray-600 mb-4">Selamat datang di solusi presensi wajah terdepan.</p>
+                        
+                        <!-- Feature List -->
+                        <div class="space-y-2 mb-6">
+                            <div class="flex items-center gap-2">
+                                <div class="w-4 h-4 feature-check rounded-full flex items-center justify-center">
+                                    <svg class="w-2.5 h-2.5 text-white" fill="currentColor" viewBox="0 0 20 20">
+                                        <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"></path>
+                                    </svg>
+                                </div>
+                                <span class="text-gray-700 text-sm">Anti-curang</span>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <div class="w-4 h-4 feature-check rounded-full flex items-center justify-center">
+                                    <svg class="w-2.5 h-2.5 text-white" fill="currentColor" viewBox="0 0 20 20">
+                                        <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"></path>
+                                    </svg>
+                                </div>
+                                <span class="text-gray-700 text-sm">Integrasi mudah</span>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <div class="w-4 h-4 feature-check rounded-full flex items-center justify-center">
+                                    <svg class="w-2.5 h-2.5 text-white" fill="currentColor" viewBox="0 0 20 20">
+                                        <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"></path>
+                                    </svg>
+                                </div>
+                                <span class="text-gray-700 text-sm">Laporan otomatis</span>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <div class="w-4 h-4 feature-check rounded-full flex items-center justify-center">
+                                    <svg class="w-2.5 h-2.5 text-white" fill="currentColor" viewBox="0 0 20 20">
+                                        <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"></path>
+                                    </svg>
+                                </div>
+                                <span class="text-gray-700 text-sm">Akses real-time</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Attendance Selection moved here -->
+                    <div class="attendance-section p-4 rounded-xl">
+                        <h3 class="text-lg font-bold mb-3 text-center text-gray-800">Pilih Jenis Presensi</h3>
+                        <div id="scan-buttons-container" class="flex flex-col gap-2">
+                            <button id="btn-scan-masuk" class="btn-attendance blue text-white font-semibold py-2 px-4 rounded-lg text-base">Presensi Masuk</button>
+                            <button id="btn-scan-pulang" class="btn-attendance red text-white font-semibold py-2 px-4 rounded-lg text-base">Presensi Pulang</button>
+                        </div>
                     </div>
                 </div>
-                <div id="presensi-status" class="mt-4 text-center font-medium text-lg p-3 rounded-md hidden"></div>
                 
-                <!-- Log Table untuk Presensi Masuk -->
-                <div id="log-masuk-container" class="mt-6 hidden">
-                    <h3 class="text-lg font-semibold mb-3 text-center">Log Presensi Masuk Hari Ini</h3>
-                    <div class="overflow-x-auto">
-                        <table class="min-w-full bg-white bordered">
-                            <thead class="bg-blue-100">
-                                <tr>
-                                    <th class="py-2 px-4">No</th>
-                                    <th class="py-2 px-4">Tanggal</th>
-                                    <th class="py-2 px-4">Nama</th>
-                                    <th class="py-2 px-4">Startup</th>
-                                    <th class="py-2 px-4">Jam Masuk</th>
-                                    <th class="py-2 px-4">Screenshot</th>
-                                </tr>
-                            </thead>
-                            <tbody id="log-masuk-body"></tbody>
-                        </table>
-                    </div>
-                </div>
-                
-                <!-- Log Table untuk Presensi Pulang -->
-                <div id="log-pulang-container" class="mt-6 hidden">
-                    <h3 class="text-lg font-semibold mb-3 text-center">Log Presensi Pulang Hari Ini</h3>
-                    <div class="overflow-x-auto">
-                        <table class="min-w-full bg-white bordered">
-                            <thead class="bg-red-100">
-                                <tr>
-                                    <th class="py-2 px-4">No</th>
-                                    <th class="py-2 px-4">Tanggal</th>
-                                    <th class="py-2 px-4">Nama</th>
-                                    <th class="py-2 px-4">Startup</th>
-                                    <th class="py-2 px-4">Jam Keluar</th>
-                                    <th class="py-2 px-4">Screenshot</th>
-                                </tr>
-                            </thead>
-                            <tbody id="log-pulang-body"></tbody>
-                        </table>
+                <!-- Right Panel - Illustration -->
+                <div class="full-height-image lg:col-span-2 image-panel-container">
+                    <div class="image-container">
+                        <img src="assets/photo/craiyon_110731_image.png" alt="Facial Recognition Illustration">
                     </div>
                 </div>
             </div>
         </div>
     </main>
+    
+    <!-- Footer -->
+    <footer class="bg-gray-800 text-gray-300 py-12">
+        <div class="container mx-auto px-4">
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+                <!-- Company Info -->
+                <div>
+                    <h3 class="text-xl font-bold mb-4 text-gray-200">Sistem Presensi Berbasis Wajah</h3>
+                    <p class="text-gray-400 mb-4">Solusi presensi modern dengan teknologi pengenalan wajah untuk kemudahan dan keakuratan yang optimal.</p>
+                    <div class="flex space-x-4">
+                        <div class="w-8 h-8 bg-gray-700 rounded-full flex items-center justify-center hover:bg-gray-600 transition-colors">
+                            <svg class="w-4 h-4 text-gray-300" fill="currentColor" viewBox="0 0 20 20">
+                                <path d="M2.003 5.884L10 9.882l7.997-3.998A2 2 0 0016 4H4a2 2 0 00-1.997 1.884z"></path>
+                                <path d="M18 8.118l-8 4-8-4V14a2 2 0 002 2h12a2 2 0 002-2V8.118z"></path>
+                            </svg>
+                        </div>
+                        <div class="w-8 h-8 bg-gray-700 rounded-full flex items-center justify-center hover:bg-gray-600 transition-colors">
+                            <svg class="w-4 h-4 text-gray-300" fill="currentColor" viewBox="0 0 20 20">
+                                <path fill-rule="evenodd" d="M3 5a2 2 0 012-2h10a2 2 0 012 2v8a2 2 0 01-2 2h-2.22l.123.666.804.804A1 1 0 0113 18H7a1 1 0 01-.707-1.707l.804-.804L7.22 15H5a2 2 0 01-2-2V5zm5.771 7H5V5h10v7H8.771z" clip-rule="evenodd"></path>
+                            </svg>
+                        </div>
+                        <div class="w-8 h-8 bg-gray-700 rounded-full flex items-center justify-center hover:bg-gray-600 transition-colors">
+                            <svg class="w-4 h-4 text-gray-300" fill="currentColor" viewBox="0 0 20 20">
+                                <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-6-3a2 2 0 11-4 0 2 2 0 014 0zm-2 4a5 5 0 00-4.546 2.916A5.986 5.986 0 0010 16a5.986 5.986 0 004.546-2.084A5 5 0 0010 11z" clip-rule="evenodd"></path>
+                            </svg>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Quick Links -->
+                <div>
+                    <h3 class="text-lg font-semibold mb-4 text-gray-200">Menu Cepat</h3>
+                    <ul class="space-y-2">
+                        <li><a href="?page=login" class="text-gray-400 hover:text-gray-200 transition-colors">Login</a></li>
+                        <li><a href="?page=register" class="text-gray-400 hover:text-gray-200 transition-colors">Daftar</a></li>
+                        <li><a href="#" class="text-gray-400 hover:text-gray-200 transition-colors">Tentang Kami</a></li>
+                        <li><a href="#" class="text-gray-400 hover:text-gray-200 transition-colors">Bantuan</a></li>
+                    </ul>
+                </div>
+                
+                <!-- Contact Info -->
+                <div>
+                    <h3 class="text-lg font-semibold mb-4 text-gray-200">Kontak</h3>
+                    <div class="space-y-2 text-gray-400">
+                        <p>📧 info@presensi.com</p>
+                        <p>📞 +62 123 456 7890</p>
+                        <p>📍 Jakarta, Indonesia</p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="border-t border-gray-700 mt-8 pt-8 text-center">
+                <p class="text-gray-500">&copy; 2024 Sistem Presensi Berbasis Wajah. All rights reserved.</p>
+            </div>
+        </div>
+    </footer>
 <?php elseif ($page === 'login'): ?>
     <div class="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-sky-50 to-indigo-50">
         <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-8">
@@ -2190,16 +2450,18 @@ function speak(text) {
 
 // Modify the `statusMessage` function to use the improved `speak` function
 function statusMessage(text, cls) {
-    if (!presensiStatus) return;
-    presensiStatus.textContent = text;
-    presensiStatus.className = 'mt-4 text-center font-medium text-lg p-3 rounded-md ' + cls;
-    presensiStatus.classList.remove('hidden');
+    if (!presensiStatus) return;
+    
+    // Show the text notification
+    presensiStatus.textContent = text;
+    presensiStatus.className = 'mt-4 text-center font-medium text-lg p-3 rounded-md ' + cls;
+    presensiStatus.classList.remove('hidden');
 
-    // Only speak if the message is different from the last one
-    if (text !== lastSpokenMessage) {
-        lastSpokenMessage = text;
-        speak(text);
-    }
+    // Only speak if the message is different from the last one
+    if (text !== lastSpokenMessage) {
+        lastSpokenMessage = text;
+        speak(text);
+    }
 }
 
 
@@ -2545,6 +2807,12 @@ function startScan(mode){
     videoContainer.classList.remove('hidden');
     btnBackScan.classList.remove('hidden');
     
+    // Hide the two panel layout (text and image sections)
+    const twoPanelLayout = qs('#two-panel-layout');
+    if (twoPanelLayout) {
+        twoPanelLayout.classList.add('hidden');
+    }
+    
     // Show appropriate log table
     if (mode === 'masuk') {
         qs('#log-masuk-container').classList.remove('hidden');
@@ -2574,6 +2842,13 @@ function resetPresensiPage(){
     scanButtonsContainer.classList.remove('hidden');
     videoContainer.classList.add('hidden');
     btnBackScan.classList.add('hidden');
+    
+    // Show the two panel layout (text and image sections) again
+    const twoPanelLayout = qs('#two-panel-layout');
+    if (twoPanelLayout) {
+        twoPanelLayout.classList.remove('hidden');
+    }
+    
     qs('#log-masuk-container').classList.add('hidden');
     qs('#log-pulang-container').classList.add('hidden');
     if (presensiStatus) {
