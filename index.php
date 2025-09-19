@@ -1,6 +1,14 @@
 <?php
 session_start();
 
+ini_set('log_errors', '1');
+ini_set('error_log', __DIR__ . DIRECTORY_SEPARATOR . 'php-error.log');
+error_reporting(E_ALL);
+// Optional: keep errors off the screen in prod
+ini_set('display_errors', '0');
+
+error_log('bootstrap: index.php started');
+
 // ----- CONFIG -----
 // Change if needed for your XAMPP/MySQL setup
 $DB_HOST = '127.0.0.1';
@@ -72,12 +80,21 @@ function ensureSchema(PDO $pdo): void {
             jam_masuk_iso DATETIME NULL,
             ekspresi_masuk VARCHAR(50) NULL,
             screenshot_masuk LONGTEXT NULL,
+            lokasi_masuk VARCHAR(255) NULL,
+            lat_masuk DECIMAL(10,7) NULL,
+            lng_masuk DECIMAL(10,7) NULL,
             jam_pulang VARCHAR(20) NULL,
             jam_pulang_iso DATETIME NULL,
             ekspresi_pulang VARCHAR(50) NULL,
             screenshot_pulang LONGTEXT NULL,
+            lokasi_pulang VARCHAR(255) NULL,
+            lat_pulang DECIMAL(10,7) NULL,
+            lng_pulang DECIMAL(10,7) NULL,
             status ENUM('ontime','terlambat') DEFAULT 'ontime',
-            ket ENUM('hadir','izin','sakit','alpha','wfh') DEFAULT 'hadir',
+            ket ENUM('wfo','izin','sakit','alpha','wfa') DEFAULT 'wfo',
+            alasan_wfa TEXT NULL,
+            alasan_izin_sakit TEXT NULL,
+            bukti_izin_sakit LONGTEXT NULL,
             daily_report_id INT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             INDEX(user_id),
@@ -104,7 +121,16 @@ function ensureSchema(PDO $pdo): void {
         'screenshot_masuk' => "ALTER TABLE attendance ADD COLUMN screenshot_masuk LONGTEXT NULL AFTER ekspresi_masuk",
         'screenshot_pulang' => "ALTER TABLE attendance ADD COLUMN screenshot_pulang LONGTEXT NULL AFTER ekspresi_pulang",
         'status' => "ALTER TABLE attendance ADD COLUMN status ENUM('ontime','terlambat') DEFAULT 'ontime' AFTER ekspresi_pulang",
-        'ket' => "ALTER TABLE attendance ADD COLUMN ket ENUM('hadir','izin','sakit','alpha','wfh') DEFAULT 'hadir' AFTER status",
+        'ket' => "ALTER TABLE attendance ADD COLUMN ket ENUM('wfo','izin','sakit','alpha','wfa') DEFAULT 'wfo' AFTER status",
+        'lokasi_masuk' => "ALTER TABLE attendance ADD COLUMN lokasi_masuk VARCHAR(255) NULL AFTER screenshot_masuk",
+        'lat_masuk' => "ALTER TABLE attendance ADD COLUMN lat_masuk DECIMAL(10,7) NULL AFTER lokasi_masuk",
+        'lng_masuk' => "ALTER TABLE attendance ADD COLUMN lng_masuk DECIMAL(10,7) NULL AFTER lat_masuk",
+        'lokasi_pulang' => "ALTER TABLE attendance ADD COLUMN lokasi_pulang VARCHAR(255) NULL AFTER screenshot_pulang",
+        'lat_pulang' => "ALTER TABLE attendance ADD COLUMN lat_pulang DECIMAL(10,7) NULL AFTER lokasi_pulang",
+        'lng_pulang' => "ALTER TABLE attendance ADD COLUMN lng_pulang DECIMAL(10,7) NULL AFTER lat_pulang",
+        'alasan_wfa' => "ALTER TABLE attendance ADD COLUMN alasan_wfa TEXT NULL AFTER ket",
+        'alasan_izin_sakit' => "ALTER TABLE attendance ADD COLUMN alasan_izin_sakit TEXT NULL AFTER alasan_wfa",
+        'bukti_izin_sakit' => "ALTER TABLE attendance ADD COLUMN bukti_izin_sakit LONGTEXT NULL AFTER alasan_izin_sakit",
         'daily_report_id' => "ALTER TABLE attendance ADD COLUMN daily_report_id INT NULL AFTER ket"
     ];
     
@@ -116,9 +142,9 @@ function ensureSchema(PDO $pdo): void {
         }
     }
     
-    // Update ket column enum to include wfh
+    // Update ket column enum to use WFO/WFA
     try { 
-        $pdo->exec("ALTER TABLE attendance MODIFY ket ENUM('hadir', 'izin', 'sakit', 'alpha', 'wfh') DEFAULT 'hadir'"); 
+        $pdo->exec("ALTER TABLE attendance MODIFY ket ENUM('wfo', 'izin', 'sakit', 'alpha', 'wfa') DEFAULT 'wfo'"); 
     } catch (PDOException $e) {
         // Ignore error if column doesn't exist or enum is already correct
     }
@@ -136,6 +162,22 @@ function ensureSchema(PDO $pdo): void {
             updated_at TIMESTAMP NULL DEFAULT NULL,
             UNIQUE KEY uniq_user_date (user_id, report_date),
             CONSTRAINT fk_dr_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+    );
+
+    // Attendance notes table
+    $pdo->exec(
+        "CREATE TABLE IF NOT EXISTS attendance_notes (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id INT NOT NULL,
+            date DATE NOT NULL,
+            type ENUM('izin','sakit') NOT NULL,
+            keterangan TEXT NOT NULL,
+            bukti LONGTEXT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX(user_id),
+            UNIQUE KEY unique_user_date (user_id, date),
+            CONSTRAINT fk_an_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
     );
 
@@ -276,26 +318,33 @@ function isAdmin(): bool { return isset($_SESSION['user']) && $_SESSION['user'][
 function isPegawai(): bool { return isset($_SESSION['user']) && $_SESSION['user']['role'] === 'pegawai'; }
 
 // Function to check if base64 image data is too large
-function checkImageSize($dataUrl, $maxSizeMB = 1) {
+function checkImageSize($dataUrl, $maxSizeMB = 5) {
     if (!$dataUrl || strpos($dataUrl, 'data:image/') !== 0) {
-        return true; // Not a valid image data URL, skip check
+        return ['valid' => true, 'message' => '']; // Not a valid image data URL, skip check
     }
     
     // Extract base64 data from data URL
     $data = explode(',', $dataUrl, 2);
     if (count($data) !== 2) {
-        return true; // Invalid format, skip check
+        return ['valid' => true, 'message' => '']; // Invalid format, skip check
     }
     
     $imageData = base64_decode($data[1]);
     if ($imageData === false) {
-        return true; // Failed to decode, skip check
+        return ['valid' => true, 'message' => '']; // Failed to decode, skip check
     }
     
     $sizeInBytes = strlen($imageData);
     $sizeInMB = $sizeInBytes / (1024 * 1024);
     
-    return $sizeInMB <= $maxSizeMB;
+    if ($sizeInMB > $maxSizeMB) {
+        return [
+            'valid' => false, 
+            'message' => "Ukuran file terlalu besar. Maksimal {$maxSizeMB}MB. Ukuran saat ini: " . number_format($sizeInMB, 2) . "MB"
+        ];
+    }
+    
+    return ['valid' => true, 'message' => ''];
 }
 
 // Function to get first name (first word) from full name
@@ -402,7 +451,7 @@ if (isset($_GET['ajax'])) {
         
         if ($type === 'masuk') {
             $stmt = $pdo->prepare("
-                SELECT a.jam_masuk, a.jam_masuk_iso, a.screenshot_masuk, u.nama, u.startup 
+                SELECT a.jam_masuk, a.jam_masuk_iso, a.screenshot_masuk, a.lokasi_masuk, u.nama, u.startup 
                 FROM attendance a 
                 JOIN users u ON u.id = a.user_id 
                 WHERE DATE(a.jam_masuk_iso) = :today 
@@ -412,7 +461,7 @@ if (isset($_GET['ajax'])) {
             ");
         } else {
             $stmt = $pdo->prepare("
-                SELECT a.jam_pulang, a.jam_pulang_iso, a.screenshot_pulang, u.nama, u.startup 
+                SELECT a.jam_pulang, a.jam_pulang_iso, a.screenshot_pulang, a.lokasi_pulang, u.nama, u.startup 
                 FROM attendance a 
                 JOIN users u ON u.id = a.user_id 
                 WHERE DATE(a.jam_pulang_iso) = :today 
@@ -507,17 +556,113 @@ if (isset($_GET['ajax'])) {
     if ($action === 'get_attendance') {
         // Admin: all; Pegawai: only their records
         if (isAdmin()) {
+            // Get regular attendance records
             $stmt = $pdo->query("SELECT a.*, u.nim, u.nama, u.startup,
                 (SELECT dr.status FROM daily_reports dr WHERE dr.user_id=a.user_id AND dr.report_date=DATE(a.jam_masuk_iso) LIMIT 1) AS daily_report_status
                 FROM attendance a JOIN users u ON u.id=a.user_id ORDER BY a.jam_masuk_iso DESC");
+            $attendanceData = $stmt->fetchAll();
+            
+            // Get izin/sakit records from attendance_notes
+            $notesStmt = $pdo->query("SELECT an.*, u.nim, u.nama, u.startup,
+                (SELECT dr.status FROM daily_reports dr WHERE dr.user_id=an.user_id AND dr.report_date=an.date LIMIT 1) AS daily_report_status
+                FROM attendance_notes an JOIN users u ON u.id=an.user_id ORDER BY an.date DESC");
+            $notesData = $notesStmt->fetchAll();
+            
+            // Convert notes data to attendance format
+            foreach ($notesData as $note) {
+                $attendanceData[] = [
+                    'id' => 'note_' . $note['id'],
+                    'user_id' => $note['user_id'],
+                    'nim' => $note['nim'],
+                    'nama' => $note['nama'],
+                    'startup' => $note['startup'],
+                    'jam_masuk' => '-',
+                    'jam_masuk_iso' => $note['date'] . ' 00:00:00',
+                    'ekspresi_masuk' => null,
+                    'screenshot_masuk' => null,
+                    'lokasi_masuk' => null,
+                    'lat_masuk' => null,
+                    'lng_masuk' => null,
+                    'jam_pulang' => '-',
+                    'jam_pulang_iso' => null,
+                    'ekspresi_pulang' => null,
+                    'screenshot_pulang' => null,
+                    'lokasi_pulang' => null,
+                    'lat_pulang' => null,
+                    'lng_pulang' => null,
+                    'status' => 'ontime',
+                    'ket' => $note['type'],
+                    'alasan_wfa' => null,
+                    'alasan_izin_sakit' => $note['keterangan'],
+                    'bukti_izin_sakit' => $note['bukti'],
+                    'daily_report_id' => null,
+                    'created_at' => $note['created_at'],
+                    'daily_report_status' => $note['daily_report_status'],
+                    'is_note' => true // Flag to identify this is from attendance_notes
+                ];
+            }
+            
+            // Sort by date descending
+            usort($attendanceData, function($a, $b) {
+                return strtotime($b['jam_masuk_iso']) - strtotime($a['jam_masuk_iso']);
+            });
+            
         } else {
             $uid = (int)$_SESSION['user']['id'];
+            // Get regular attendance records
             $stmt = $pdo->prepare("SELECT a.*, u.nim, u.nama, u.startup,
                 (SELECT dr.status FROM daily_reports dr WHERE dr.user_id=a.user_id AND dr.report_date=DATE(a.jam_masuk_iso) LIMIT 1) AS daily_report_status
                 FROM attendance a JOIN users u ON u.id=a.user_id WHERE a.user_id=:uid ORDER BY a.jam_masuk_iso DESC");
             $stmt->execute([':uid' => $uid]);
+            $attendanceData = $stmt->fetchAll();
+            
+            // Get izin/sakit records from attendance_notes for this user
+            $notesStmt = $pdo->prepare("SELECT an.*, u.nim, u.nama, u.startup,
+                (SELECT dr.status FROM daily_reports dr WHERE dr.user_id=an.user_id AND dr.report_date=an.date LIMIT 1) AS daily_report_status
+                FROM attendance_notes an JOIN users u ON u.id=an.user_id WHERE an.user_id=:uid ORDER BY an.date DESC");
+            $notesStmt->execute([':uid' => $uid]);
+            $notesData = $notesStmt->fetchAll();
+            
+            // Convert notes data to attendance format
+            foreach ($notesData as $note) {
+                $attendanceData[] = [
+                    'id' => 'note_' . $note['id'],
+                    'user_id' => $note['user_id'],
+                    'nim' => $note['nim'],
+                    'nama' => $note['nama'],
+                    'startup' => $note['startup'],
+                    'jam_masuk' => '-',
+                    'jam_masuk_iso' => $note['date'] . ' 00:00:00',
+                    'ekspresi_masuk' => null,
+                    'screenshot_masuk' => null,
+                    'lokasi_masuk' => null,
+                    'lat_masuk' => null,
+                    'lng_masuk' => null,
+                    'jam_pulang' => '-',
+                    'jam_pulang_iso' => null,
+                    'ekspresi_pulang' => null,
+                    'screenshot_pulang' => null,
+                    'lokasi_pulang' => null,
+                    'lat_pulang' => null,
+                    'lng_pulang' => null,
+                    'status' => 'ontime',
+                    'ket' => $note['type'],
+                    'alasan_wfa' => null,
+                    'alasan_izin_sakit' => $note['keterangan'],
+                    'bukti_izin_sakit' => $note['bukti'],
+                    'daily_report_id' => null,
+                    'created_at' => $note['created_at'],
+                    'daily_report_status' => $note['daily_report_status'],
+                    'is_note' => true // Flag to identify this is from attendance_notes
+                ];
+            }
+            
+            // Sort by date descending
+            usort($attendanceData, function($a, $b) {
+                return strtotime($b['jam_masuk_iso']) - strtotime($a['jam_masuk_iso']);
+            });
         }
-        jsonResponse(['ok' => true, 'data' => $stmt->fetchAll()]);
+        jsonResponse(['ok' => true, 'data' => $attendanceData]);
     }
 
     if ($action === 'save_attendance' && $_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -618,8 +763,38 @@ if (isset($_GET['ajax'])) {
                     }
                 }
                 
-                $ins = $pdo->prepare("INSERT INTO attendance (user_id, jam_masuk, jam_masuk_iso, ekspresi_masuk, screenshot_masuk, status) VALUES (:uid, :jam, :iso, :exp, :screenshot, :status)");
-                $ins->execute([':uid' => $u['id'], ':jam' => $jamSekarang, ':iso' => $iso, ':exp' => $ekspresi, ':screenshot' => $screenshot, ':status' => $status]);
+                // Location and geofence handling for WFO/WFA
+                $lat = isset($_POST['lat']) ? (float)$_POST['lat'] : null;
+                $lng = isset($_POST['lng']) ? (float)$_POST['lng'] : null;
+                $lokasi = $_POST['lokasi'] ?? null;
+                $alasanWfa = null;
+
+                // Telkom University main campus simple geofence (circle)
+                $teluLat = -6.9738; // approx Telkom University Bandung
+                $teluLng = 107.6300;
+                $radiusMeters = 1200; // ~1.2km radius
+                $isInsideTelu = false;
+                if ($lat !== null && $lng !== null) {
+                    // Haversine formula for distance
+                    $earth = 6371000; // meters
+                    $dLat = deg2rad($teluLat - $lat);
+                    $dLng = deg2rad($teluLng - $lng);
+                    $a = sin($dLat/2) * sin($dLat/2) + cos(deg2rad($lat)) * cos(deg2rad($teluLat)) * sin($dLng/2) * sin($dLng/2);
+                    $c = 2 * atan2(sqrt($a), sqrt(1-$a));
+                    $distance = $earth * $c;
+                    $isInsideTelu = ($distance <= $radiusMeters);
+                }
+
+                $ketVal = $isInsideTelu ? 'wfo' : 'wfa';
+                if (!$isInsideTelu) {
+                    $alasanWfa = $_POST['alasan_wfa'] ?? null;
+                    if (!$alasanWfa) {
+                        jsonResponse(['ok' => false, 'need_reason' => true, 'message' => 'Di luar wilayah kantor. Harap isi alasan kerja di luar (WFA).'], 400);
+                    }
+                }
+
+                $ins = $pdo->prepare("INSERT INTO attendance (user_id, jam_masuk, jam_masuk_iso, ekspresi_masuk, screenshot_masuk, lokasi_masuk, lat_masuk, lng_masuk, status, ket, alasan_wfa) VALUES (:uid, :jam, :iso, :exp, :screenshot, :lokasi, :lat, :lng, :status, :ket, :alasan)");
+                $ins->execute([':uid' => $u['id'], ':jam' => $jamSekarang, ':iso' => $iso, ':exp' => $ekspresi, ':screenshot' => $screenshot, ':lokasi' => $lokasi, ':lat' => $lat, ':lng' => $lng, ':status' => $status, ':ket' => $ketVal, ':alasan' => $alasanWfa]);
                 
                 // Trigger backup setelah presensi masuk
                 triggerDatabaseBackup();
@@ -658,8 +833,11 @@ if (isset($_GET['ajax'])) {
                 $statusText = "Anda belum melakukan presensi masuk hari ini atau sudah pulang.";
                 jsonResponse(['ok' => false, 'message' => $statusText, 'statusClass' => 'bg-yellow-100 text-yellow-700']);
             } else {
-                $upd = $pdo->prepare("UPDATE attendance SET jam_pulang=:jam, jam_pulang_iso=:iso, ekspresi_pulang=:exp, screenshot_pulang=:screenshot WHERE id=:id");
-                $upd->execute([':jam' => $jamSekarang, ':iso' => $iso, ':exp' => $ekspresi, ':screenshot' => $screenshot, ':id' => $todayRow['id']]);
+                $lat = isset($_POST['lat']) ? (float)$_POST['lat'] : null;
+                $lng = isset($_POST['lng']) ? (float)$_POST['lng'] : null;
+                $lokasi = $_POST['lokasi'] ?? null;
+                $upd = $pdo->prepare("UPDATE attendance SET jam_pulang=:jam, jam_pulang_iso=:iso, ekspresi_pulang=:exp, screenshot_pulang=:screenshot, lokasi_pulang=:lokasi, lat_pulang=:lat, lng_pulang=:lng WHERE id=:id");
+                $upd->execute([':jam' => $jamSekarang, ':iso' => $iso, ':exp' => $ekspresi, ':screenshot' => $screenshot, ':lokasi' => $lokasi, ':lat' => $lat, ':lng' => $lng, ':id' => $todayRow['id']]);
                 
                 // Trigger backup setelah presensi pulang
                 triggerDatabaseBackup();
@@ -673,13 +851,61 @@ if (isset($_GET['ajax'])) {
 
     if ($action === 'delete_attendance' && $_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!isAdmin()) jsonResponse(['error' => 'Forbidden'], 403);
-        $id = (int)($_POST['id'] ?? 0);
-        $pdo->prepare("DELETE FROM attendance WHERE id=:id")->execute([':id' => $id]);
+        $id = $_POST['id'] ?? '';
         
-        // Trigger backup setelah menghapus attendance
+        // Check if this is an attendance_notes record (starts with 'note_')
+        if (strpos($id, 'note_') === 0) {
+            // Extract the actual ID from 'note_123' format
+            $actualId = (int)substr($id, 5);
+            $pdo->prepare("DELETE FROM attendance_notes WHERE id=:id")->execute([':id' => $actualId]);
+        } else {
+            // Regular attendance record
+            $actualId = (int)$id;
+            $pdo->prepare("DELETE FROM attendance WHERE id=:id")->execute([':id' => $actualId]);
+        }
+        
+        // Trigger backup setelah menghapus attendance/notes
         triggerDatabaseBackup();
         
         jsonResponse(['ok' => true]);
+    }
+
+    // Update bukti izin/sakit
+    if ($action === 'update_bukti_izin_sakit' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        if (!isset($_SESSION['user'])) jsonResponse(['error' => 'Unauthorized'], 401);
+        
+        $user_id = (int)$_SESSION['user']['id'];
+        $date = $_POST['date'] ?? '';
+        $bukti = $_POST['bukti'] ?? null;
+        $action_type = $_POST['action_type'] ?? ''; // 'update' or 'delete'
+        
+        if (!$date) jsonResponse(['ok' => false, 'message' => 'Tanggal diperlukan'], 400);
+        
+        if ($action_type === 'delete') {
+            // Delete bukti (set to null)
+            $stmt = $pdo->prepare("UPDATE attendance_notes SET bukti = NULL WHERE user_id = :user_id AND `date` = :date");
+            $stmt->execute([':user_id' => $user_id, ':date' => $date]);
+        } else if ($action_type === 'update' && $bukti) {
+            // Validate image data URL and size (<= 5MB)
+            if (strpos($bukti, 'data:image/') !== 0) {
+                jsonResponse(['ok' => false, 'message' => 'Format bukti tidak valid. Harus berupa gambar.'], 400);
+            }
+            $sizeCheck = checkImageSize($bukti, 5);
+            if (!$sizeCheck['valid']) {
+                jsonResponse(['ok' => false, 'message' => $sizeCheck['message']], 400);
+            }
+            
+            // Update bukti
+            $stmt = $pdo->prepare("UPDATE attendance_notes SET bukti = :bukti WHERE user_id = :user_id AND `date` = :date");
+            $stmt->execute([':bukti' => $bukti, ':user_id' => $user_id, ':date' => $date]);
+        } else {
+            jsonResponse(['ok' => false, 'message' => 'Data tidak valid'], 400);
+        }
+        
+        // Trigger backup setelah update
+        triggerDatabaseBackup();
+        
+        jsonResponse(['ok' => true, 'message' => 'Bukti berhasil diperbarui']);
     }
 
     // Admin: add izin/sakit record
@@ -687,21 +913,21 @@ if (isset($_GET['ajax'])) {
         if (!isAdmin()) jsonResponse(['error' => 'Forbidden'], 403);
         $user_id = (int)($_POST['user_id'] ?? 0);
         $date = $_POST['date'] ?? date('Y-m-d');
-        $type = $_POST['type'] ?? 'izin'; // izin/sakit/wfh
+        $type = $_POST['type'] ?? 'izin'; // izin/sakit/wfa
         $jam_masuk = $_POST['jam_masuk'] ?? null;
         $jam_pulang = $_POST['jam_pulang'] ?? null;
 
         if(!$user_id) jsonResponse(['ok'=>false,'message'=>'Pilih pegawai'],400);
-        if(!in_array($type, ['izin','sakit','wfh'], true)) jsonResponse(['ok'=>false,'message'=>'Tipe tidak valid'],400);
+        if(!in_array($type, ['izin','sakit','wfa'], true)) jsonResponse(['ok'=>false,'message'=>'Tipe tidak valid'],400);
 
         // Logic for setting time based on type
         $jam_masuk_iso = null;
         $jam_pulang_iso = null;
         $status = 'ontime';
 
-        if ($type === 'wfh') {
+        if ($type === 'wfa') {
             if (!$jam_masuk || !$jam_pulang) {
-                jsonResponse(['ok' => false, 'message' => 'Jam masuk dan pulang wajib diisi untuk WFH'], 400);
+                jsonResponse(['ok' => false, 'message' => 'Jam masuk dan pulang wajib diisi untuk WFA'], 400);
             }
             $jam_masuk_iso = $date . ' ' . $jam_masuk . ':00';
             $jam_pulang_iso = $date . ' ' . $jam_pulang . ':00';
@@ -715,7 +941,10 @@ if (isset($_GET['ajax'])) {
         $check->execute([':u' => $user_id, ':d' => $date]);
         if($check->fetch()) jsonResponse(['ok' => false, 'message' => 'Data hari tersebut sudah ada'], 400);
 
-        $sql = "INSERT INTO attendance (user_id, jam_masuk, jam_masuk_iso, jam_pulang, jam_pulang_iso, status, ket) VALUES (:u, :jm, :jmiso, :jp, :jpiso, :s, :ket)";
+        $alasan_izin_sakit = $_POST['alasan_izin_sakit'] ?? null;
+        $bukti_izin_sakit = $_POST['bukti_izin_sakit'] ?? null;
+        
+        $sql = "INSERT INTO attendance (user_id, jam_masuk, jam_masuk_iso, jam_pulang, jam_pulang_iso, status, ket, alasan_izin_sakit, bukti_izin_sakit) VALUES (:u, :jm, :jmiso, :jp, :jpiso, :s, :ket, :alasan, :bukti)";
         $ins = $pdo->prepare($sql);
         $ins->execute([
             ':u' => $user_id,
@@ -724,7 +953,9 @@ if (isset($_GET['ajax'])) {
             ':jp' => $jam_pulang,
             ':jpiso' => $jam_pulang_iso,
             ':s' => $status,
-            ':ket' => $type
+            ':ket' => $type,
+            ':alasan' => $alasan_izin_sakit,
+            ':bukti' => $bukti_izin_sakit
         ]);
         
         // Trigger backup setelah menambah data absence
@@ -738,7 +969,7 @@ if (isset($_GET['ajax'])) {
         if (!isAdmin()) jsonResponse(['error' => 'Forbidden'], 403);
         $id = (int)($_POST['id'] ?? 0);
         if(!$id) jsonResponse(['ok'=>false,'message'=>'ID tidak valid'],400);
-        $fields = ['jam_masuk','jam_pulang','ekspresi_masuk','ekspresi_pulang','status','ket','screenshot_masuk','screenshot_pulang'];
+        $fields = ['jam_masuk','jam_pulang','ekspresi_masuk','ekspresi_pulang','status','ket','screenshot_masuk','screenshot_pulang','alasan_wfa','alasan_izin_sakit','bukti_izin_sakit'];
         $set=[]; $params=[':id'=>$id];
         foreach($fields as $f){ if(isset($_POST[$f])){ $set[] = "$f = :$f"; $params[":$f"] = $_POST[$f]!==''? $_POST[$f] : null; } }
         if(isset($_POST['jam_masuk_iso'])){ $set[]='jam_masuk_iso=:jmiso'; $params[':jmiso']= $_POST['jam_masuk_iso'] ?: null; }
@@ -766,6 +997,205 @@ if (isset($_GET['ajax'])) {
             ];
         }
         jsonResponse(['ok' => true, 'data' => $settings]);
+    }
+
+    // Employee: submit izin/sakit for today
+    if ($action === 'submit_izin_sakit' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        if (isAdmin()) jsonResponse(['error' => 'Forbidden'], 403);
+        
+        // Ensure authenticated session
+        if (!isset($_SESSION['user']) || !isset($_SESSION['user']['id'])) {
+            jsonResponse(['ok' => false, 'message' => 'Unauthorized'], 401);
+        }
+        
+        // Debug logging
+        error_log("submit_izin_sakit: Starting process");
+        error_log("submit_izin_sakit: POST data: " . print_r($_POST, true));
+        
+        // Test database connection
+        try {
+            $pdo->query("SELECT 1");
+            error_log("submit_izin_sakit: Database connection OK");
+        } catch (PDOException $e) {
+            error_log("submit_izin_sakit: Database connection failed: " . $e->getMessage());
+            jsonResponse(['ok' => false, 'message' => 'Database connection failed'], 500);
+        }
+        
+        $user_id = (int)$_SESSION['user']['id'];
+        $type = $_POST['type'] ?? ''; // izin/sakit
+        $alasan = trim($_POST['alasan'] ?? '');
+        $bukti = $_POST['bukti'] ?? null; // base64 image
+        
+        error_log("submit_izin_sakit: Parsed data - user_id: $user_id, type: $type, alasan: $alasan, bukti length: " . (is_string($bukti) ? strlen($bukti) : 'null'));
+        
+        if (!in_array($type, ['izin', 'sakit'], true)) {
+            jsonResponse(['ok' => false, 'message' => 'Tipe tidak valid'], 400);
+        }
+        
+        if (!$alasan) {
+            jsonResponse(['ok' => false, 'message' => 'Alasan harus diisi'], 400);
+        }
+        
+        if (!$bukti || empty($bukti)) {
+            jsonResponse(['ok' => false, 'message' => 'Bukti harus diupload'], 400);
+        }
+        // Validate image data URL and size (<= 5MB)
+        if (strpos($bukti, 'data:image/') !== 0) {
+            jsonResponse(['ok' => false, 'message' => 'Format bukti tidak valid. Harus berupa gambar.'], 400);
+        }
+        $sizeCheck = checkImageSize($bukti, 5);
+        if (!$sizeCheck['valid']) {
+            jsonResponse(['ok' => false, 'message' => $sizeCheck['message']], 400);
+        }
+
+        // Validate user exists to avoid foreign key error
+        try {
+            $chkUser = $pdo->prepare("SELECT id FROM users WHERE id=:id LIMIT 1");
+            $chkUser->execute([':id' => $user_id]);
+            if (!$chkUser->fetch()) {
+                jsonResponse(['ok' => false, 'message' => 'User tidak ditemukan'], 401);
+            }
+        } catch (PDOException $_) {
+            jsonResponse(['ok' => false, 'message' => 'Database error saat validasi user'], 500);
+        }
+        
+        // Check if already has attendance or notes for today
+        $today = date('Y-m-d');
+        error_log("submit_izin_sakit: Checking for existing records for user $user_id on $today");
+        
+        $checkAttendance = $pdo->prepare("SELECT id FROM attendance WHERE user_id=:uid AND DATE(jam_masuk_iso)=:today");
+        $checkAttendance->execute([':uid' => $user_id, ':today' => $today]);
+        $existingAttendance = $checkAttendance->fetch();
+        error_log("submit_izin_sakit: Existing attendance: " . ($existingAttendance ? 'found' : 'none'));
+        
+        // Optional: check notes existence (for logging only)
+        try {
+            $checkNotes = $pdo->prepare("SELECT id FROM attendance_notes WHERE user_id=:uid AND `date`=:today");
+            $checkNotes->execute([':uid' => $user_id, ':today' => $today]);
+            $hasNotesRow = $checkNotes->fetch();
+            error_log("submit_izin_sakit: Existing notes: " . ($hasNotesRow ? 'found' : 'none'));
+        } catch (PDOException $e) {
+            // Table doesn't exist yet, continue
+            error_log("Attendance notes table not found when checking existence: " . $e->getMessage());
+        }
+        
+        // Block ONLY if there is already attendance today
+        if ($existingAttendance) {
+            error_log("submit_izin_sakit: Blocked - already has attendance today");
+            jsonResponse(['ok' => false, 'message' => 'Sudah ada presensi untuk hari ini'], 400);
+        }
+        
+        // Ensure attendance_notes table has correct structure
+        try {
+            // Check and add missing columns
+            $requiredColumns = [
+                'type' => "ENUM('izin','sakit') NOT NULL AFTER `date`",
+                'keterangan' => "TEXT NOT NULL AFTER type",
+                'bukti' => "LONGTEXT NULL AFTER keterangan"
+            ];
+            
+            foreach ($requiredColumns as $columnName => $columnDef) {
+                $checkColumn = $pdo->query("SHOW COLUMNS FROM attendance_notes LIKE '$columnName'");
+                if ($checkColumn->rowCount() == 0) {
+                    error_log("submit_izin_sakit: Adding missing '$columnName' column to attendance_notes table");
+                    $pdo->exec("ALTER TABLE attendance_notes ADD COLUMN $columnName $columnDef");
+                }
+            }
+        } catch (PDOException $e) {
+            error_log("submit_izin_sakit: Error checking/adding columns: " . $e->getMessage());
+        }
+
+        // Insert/Update izin/sakit record to attendance_notes (idempotent)
+        error_log("submit_izin_sakit: Attempting to insert record");
+        try {
+            $sql = "INSERT INTO attendance_notes (user_id, `date`, type, keterangan, bukti) 
+                    VALUES (:uid, :date, :type, :keterangan, :bukti)
+                    ON DUPLICATE KEY UPDATE type = VALUES(type), keterangan = VALUES(keterangan), bukti = VALUES(bukti)";
+            $ins = $pdo->prepare($sql);
+            $result = $ins->execute([
+                ':uid' => $user_id,
+                ':date' => $today,
+                ':type' => $type,
+                ':keterangan' => $alasan,
+                ':bukti' => $bukti
+            ]);
+            
+            error_log("submit_izin_sakit: Insert result: " . ($result ? 'success' : 'failed'));
+            error_log("submit_izin_sakit: Inserted ID: " . $pdo->lastInsertId());
+            
+            triggerDatabaseBackup();
+            error_log("submit_izin_sakit: Process completed successfully");
+            jsonResponse(['ok' => true, 'message' => 'Data izin/sakit berhasil disimpan']);
+        } catch (PDOException $e) {
+            error_log("Error inserting attendance notes: " . $e->getMessage());
+            error_log("Error details: " . print_r($e, true));
+            
+            // If table doesn't exist, try to create it and retry
+            if (strpos($e->getMessage(), "doesn't exist") !== false || strpos($e->getMessage(), "Unknown table") !== false) {
+                error_log("submit_izin_sakit: Table doesn't exist, attempting to create");
+                try {
+                    // Create the attendance_notes table
+                    $pdo->exec(
+                        "CREATE TABLE IF NOT EXISTS attendance_notes (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            user_id INT NOT NULL,
+                            `date` DATE NOT NULL,
+                            type ENUM('izin','sakit') NOT NULL,
+                            keterangan TEXT NOT NULL,
+                            bukti LONGTEXT NULL,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            INDEX(user_id),
+                            UNIQUE KEY unique_user_date (user_id, `date`),
+                            CONSTRAINT fk_an_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+                    );
+                    // Best-effort ensure unique key exists
+                    try { $pdo->exec("ALTER TABLE attendance_notes ADD UNIQUE KEY unique_user_date (user_id, `date`)"); } catch (PDOException $_) {}
+                    
+                    error_log("submit_izin_sakit: Table created, retrying insert");
+                    
+                    // Retry the insert
+                    $ins = $pdo->prepare($sql);
+                    $result = $ins->execute([
+                        ':uid' => $user_id,
+                        ':date' => $today,
+                        ':type' => $type,
+                        ':keterangan' => $alasan,
+                        ':bukti' => $bukti
+                    ]);
+                    
+                    error_log("submit_izin_sakit: Retry insert result: " . ($result ? 'success' : 'failed'));
+                    
+                    triggerDatabaseBackup();
+                    jsonResponse(['ok' => true, 'message' => 'Data izin/sakit berhasil disimpan']);
+                } catch (PDOException $e2) {
+                    error_log("Error creating table and retrying: " . $e2->getMessage());
+                    error_log("Error details: " . print_r($e2, true));
+                    jsonResponse(['ok' => false, 'message' => 'Gagal menyimpan data. Silakan coba lagi.'], 500);
+                }
+            } else if (strpos($e->getMessage(), '1062') !== false || stripos($e->getMessage(), 'Duplicate') !== false) {
+                // Duplicate key: update existing row to be idempotent
+                error_log("submit_izin_sakit: Duplicate detected, performing update");
+                try {
+                    $upd = $pdo->prepare("UPDATE attendance_notes SET type=:type, keterangan=:keterangan, bukti=:bukti WHERE user_id=:uid AND `date`=:date");
+                    $upd->execute([
+                        ':type' => $type,
+                        ':keterangan' => $alasan,
+                        ':bukti' => $bukti,
+                        ':uid' => $user_id,
+                        ':date' => $today
+                    ]);
+                    triggerDatabaseBackup();
+                    jsonResponse(['ok' => true, 'message' => 'Data izin/sakit berhasil diperbarui']);
+                } catch (PDOException $e3) {
+                    error_log("submit_izin_sakit: Update after duplicate failed: " . $e3->getMessage());
+                    jsonResponse(['ok' => false, 'message' => 'Gagal memperbarui data. Silakan coba lagi.'], 500);
+                }
+            } else {
+                error_log("submit_izin_sakit: Other database error occurred");
+                jsonResponse(['ok' => false, 'message' => 'Gagal menyimpan data. Silakan coba lagi.'], 500);
+            }
+        }
     }
 
     // Admin: update settings
@@ -914,7 +1344,7 @@ if (isset($_GET['ajax'])) {
                 u.foto_base64,
                 COUNT(CASE WHEN a.status = 'terlambat' THEN 1 END) as late_count,
                 COUNT(CASE WHEN a.status = 'ontime' THEN 1 END) as ontime_count,
-                COUNT(CASE WHEN a.ket = 'hadir' OR a.ket = 'wfh' THEN 1 END) as present_count,
+                COUNT(CASE WHEN a.ket = 'wfo' OR a.ket = 'wfa' THEN 1 END) as present_count,
                 COUNT(*) as total_days
             FROM users u
             LEFT JOIN attendance a ON u.id = a.user_id 
@@ -936,7 +1366,7 @@ if (isset($_GET['ajax'])) {
             SELECT COUNT(DISTINCT user_id) as present 
             FROM attendance 
             WHERE DATE(jam_masuk_iso) = :today 
-            AND (ket = 'hadir' OR ket = 'wfh')
+            AND (ket = 'wfo' OR ket = 'wfa')
         ");
         $presentTodayStmt->execute([':today' => $today]);
         $presentToday = $presentTodayStmt->fetch()['present'];
@@ -971,7 +1401,7 @@ if (isset($_GET['ajax'])) {
                 FROM attendance 
                 WHERE YEAR(jam_masuk_iso) = :year 
                 AND MONTH(jam_masuk_iso) = :month 
-                AND (ket = 'hadir' OR ket = 'wfh')
+                AND (ket = 'wfo' OR ket = 'wfa')
             ");
             $presentStmt->execute([':year' => $year, ':month' => $month]);
             $present = $presentStmt->fetch()['present'];
@@ -1037,6 +1467,17 @@ if (isset($_GET['ajax'])) {
         $attByDate = [];
         foreach($attRows as $r){ $d = substr($r['jam_masuk_iso']??$r['jam_pulang_iso'],0,10); $attByDate[$d] = $r; }
 
+        // Fetch attendance notes for month (check if table exists first)
+        $notesByDate = [];
+        try {
+            $notesStmt = $pdo->prepare("SELECT * FROM attendance_notes WHERE user_id=:uid AND date BETWEEN :s AND :e");
+            $notesStmt->execute([':uid'=>$uid, ':s'=>$start, ':e'=>$end]);
+            foreach($notesStmt->fetchAll() as $r){ $notesByDate[$r['date']]=$r; }
+        } catch (PDOException $e) {
+            // Table doesn't exist yet, continue with empty array
+            error_log("Attendance notes table not found: " . $e->getMessage());
+        }
+
         $drStmt = $pdo->prepare("SELECT * FROM daily_reports WHERE user_id=:uid AND report_date BETWEEN :s AND :e");
         $drStmt->execute([':uid'=>$uid, ':s'=>$start, ':e'=>$end]);
         $drByDate = [];
@@ -1051,15 +1492,46 @@ if (isset($_GET['ajax'])) {
             if($dow>=1 && $dow<=5){
                 $dstr = $cur->format('Y-m-d');
                 $att = $attByDate[$dstr] ?? null;
+                $notes = $notesByDate[$dstr] ?? null;
                 $dr = $drByDate[$dstr] ?? null;
+                
+                // Determine ket value
+                $ket = null;
+                if ($att && $att['ket']) {
+                    $ket = $att['ket'];
+                } elseif ($notes && $notes['type']) {
+                    $ket = $notes['type'];
+                }
+                
+                // For daily report content, use attendance_notes if available
+                $reportContent = null;
+                if ($dr) {
+                    $reportContent = [
+                        'id'=>$dr['id'], 
+                        'status'=>$dr['status'], 
+                        'has_content'=>!!$dr['content'], 
+                        'content'=>$dr['content'], 
+                        'evaluation'=>$dr['evaluation']
+                    ];
+                } elseif ($notes && $notes['keterangan']) {
+                    // Use attendance_notes content for daily report
+                    $reportContent = [
+                        'id'=>null, 
+                        'status'=>'auto', 
+                        'has_content'=>true, 
+                        'content'=>$notes['keterangan'], 
+                        'evaluation'=>null
+                    ];
+                }
+                
                 $out[] = [
                     'date'=>$dstr,
                     'day'=>$cur->format('l'),
                     'jam_masuk'=>$att['jam_masuk']??null,
                     'jam_pulang'=>$att['jam_pulang']??null,
                     'status_presensi'=>$att['status']??null,
-                    'ket'=>$att['ket']??'hadir',
-                    'daily_report'=> $dr ? [ 'id'=>$dr['id'], 'status'=>$dr['status'], 'has_content'=>!!$dr['content'], 'content'=>$dr['content'], 'evaluation'=>$dr['evaluation'] ] : null
+                    'ket'=>$ket,
+                    'daily_report'=> $reportContent
                 ];
             }
             $cur->modify('+1 day');
@@ -1206,6 +1678,7 @@ if ($page === 'logout') {
         .badge-green { background: #d1fae5; color: #065f46; }
         .badge-red { background: #fee2e2; color: #991b1b; }
         .badge-blue { background: #dbeafe; color: #1e40af; }
+        .badge-yellow { background: #fde68a; color: #854d0e; }
         .btn-pill { border-radius: 9999px; padding: 0.25rem 0.75rem; font-weight: 600; }
         .z-60 { z-index: 60; }
         .z-70 { z-index: 70; }
@@ -1408,6 +1881,7 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                                 <th class="py-2 px-4">Nama</th>
                                 <th class="py-2 px-4">Startup</th>
                                 <th class="py-2 px-4">Jam Masuk</th>
+                                <th class="py-2 px-4">Lokasi Masuk</th>
                                 <th class="py-2 px-4">Screenshot</th>
                             </tr>
                         </thead>
@@ -1693,6 +2167,7 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                                 <th class="py-2 px-4">Tanggal</th>
                                 <th class="py-2 px-4">Jam Masuk</th>
                                 <th class="py-2 px-4">Jam Keluar</th>
+                                <th class="py-2 px-4">Keterangan</th>
                                 <th class="py-2 px-4">Laporan Harian</th>
                                 <th class="py-2 px-4">Status</th>
                             </tr>
@@ -2159,11 +2634,11 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                 <div class="mb-3">
                     <label class="block text-sm text-gray-600 mb-1">Keterangan</label>
                     <select id="edit-att-ket" class="w-full p-2 border rounded-lg">
-                        <option value="hadir">Hadir</option>
+                        <option value="wfo">WFO</option>
                         <option value="izin">Izin</option>
                         <option value="sakit">Sakit</option>
                         <option value="alpha">Alpha</option>
-                        <option value="wfh">WFH</option>
+                        <option value="wfa">WFA</option>
                     </select>
                 </div>
                 <div class="mb-3">
@@ -2192,6 +2667,19 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                 <p class="text-sm text-gray-600">Nama: <span id="admin-dr-nama" class="font-semibold"></span></p>
                 <p class="text-sm text-gray-600">Tanggal: <span id="admin-dr-date" class="font-semibold"></span></p>
             </div>
+            
+            <!-- Bukti Izin/Sakit Section -->
+            <div id="admin-dr-bukti-section" class="mb-4 hidden">
+                <label class="block text-sm text-gray-600 mb-2">Bukti Izin/Sakit:</label>
+                <div id="admin-dr-bukti-container" class="mb-2">
+                    <!-- Bukti image will be inserted here -->
+                </div>
+                <div class="flex gap-2">
+                    <button type="button" id="admin-dr-edit-bukti" class="bg-yellow-500 hover:bg-yellow-600 text-white px-3 py-1 rounded text-sm">Edit Bukti</button>
+                    <button type="button" id="admin-dr-delete-bukti" class="bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded text-sm">Hapus Bukti</button>
+                </div>
+            </div>
+            
             <div class="mb-4">
                 <label class="block text-sm text-gray-600 mb-2">Isi Laporan Harian:</label>
                 <textarea id="admin-dr-content" rows="8" class="w-full p-3 border rounded-lg" placeholder="Tulis detail pekerjaan pegawai hari ini..."></textarea>
@@ -2211,6 +2699,64 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                 <button id="btn-confirm-no" class="bg-gray-300 hover:bg-gray-400 text-gray-800 font-bold py-2 px-6 rounded-lg">Tidak</button>
                 <button id="btn-confirm-yes" class="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-6 rounded-lg">Ya</button>
             </div>
+        </div>
+    </div>
+
+    <!-- WFA Reason Modal -->
+    <div id="wfa-reason-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden">
+        <div class="bg-white p-6 rounded-lg shadow-2xl w-full max-w-md">
+            <h3 class="text-xl font-bold mb-3">Alasan Kerja di Luar Kantor</h3>
+            <p class="text-sm text-gray-600 mb-3">Anda berada di luar wilayah Telkom University. Silakan isi alasan bekerja di luar kantor untuk melanjutkan presensi (WFA).</p>
+            <textarea id="wfa-reason-input" class="w-full p-3 border rounded mb-4" rows="4" placeholder="Tulis alasan Anda..."></textarea>
+            <div class="flex justify-end gap-2">
+                <button id="wfa-reason-cancel" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded">Batal</button>
+                <button id="wfa-reason-submit" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded">Kirim</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Izin/Sakit Input Modal -->
+    <div id="izin-sakit-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden">
+        <div class="bg-white p-6 rounded-lg shadow-2xl w-full max-w-md">
+            <h3 class="text-xl font-bold mb-4">Input Keterangan</h3>
+            <form id="izin-sakit-form">
+                <div class="mb-4">
+                    <label class="block text-sm text-gray-600 mb-2">Jenis Keterangan</label>
+                    <select id="izin-sakit-type" class="w-full p-2 border rounded-lg" required>
+                        <option value="">Pilih jenis...</option>
+                        <option value="izin">Izin</option>
+                        <option value="sakit">Sakit</option>
+                    </select>
+                </div>
+                <div class="mb-4">
+                    <label class="block text-sm text-gray-600 mb-2">Keterangan</label>
+                    <textarea id="izin-sakit-alasan" class="w-full p-3 border rounded" rows="4" placeholder="Tulis keterangan izin/sakit..." required></textarea>
+                </div>
+                <div class="mb-4">
+                    <label class="block text-sm text-gray-600 mb-2">Upload Bukti</label>
+                    <input type="file" id="izin-sakit-bukti" accept="image/*" class="w-full p-2 border rounded" required>
+                    <p class="text-xs text-gray-500 mt-1">Maksimal 5MB. Format: JPG, PNG, GIF</p>
+                    <div id="izin-sakit-preview" class="mt-2 hidden">
+                        <img id="izin-sakit-preview-img" src="" alt="Preview" class="w-full h-32 object-cover rounded border">
+                    </div>
+                    <div id="izin-sakit-error" class="mt-2 text-red-600 text-sm hidden"></div>
+                </div>
+                <div class="flex justify-end gap-2">
+                    <button type="button" id="izin-sakit-cancel" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded">Batal</button>
+                    <button type="submit" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded">Simpan</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Ket Detail Modal -->
+    <div id="ket-detail-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden">
+        <div class="bg-white p-6 rounded-lg shadow-2xl w-full max-w-2xl">
+            <div class="flex justify-between items-center mb-4">
+                <h3 id="ket-detail-title" class="text-xl font-bold"></h3>
+                <button onclick="qs('#ket-detail-modal').classList.add('hidden'); qs('#ket-detail-modal').classList.remove('flex')" class="text-gray-500 hover:text-gray-700 text-2xl">✕</button>
+            </div>
+            <div id="ket-detail-content"></div>
         </div>
     </div>
 
@@ -2236,7 +2782,7 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                     <select id="abs-type" class="w-full p-2 border rounded-lg">
                         <option value="izin">Izin</option>
                         <option value="sakit">Sakit</option>
-                        <option value="wfh">WFH</option>
+                        <option value="wfa">WFA</option>
                     </select>
                 </div>
                 <div id="abs-wfh-form" class="grid grid-cols-2 gap-2 hidden">
@@ -2253,6 +2799,34 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
             <div class="flex justify-end gap-2 mt-4">
                 <button id="abs-cancel" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded">Batal</button>
                 <button id="abs-save" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded">Simpan</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal Edit Bukti Izin/Sakit -->
+    <div id="edit-bukti-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-70 hidden">
+        <div class="bg-white p-6 rounded-lg shadow-2xl w-full max-w-lg">
+            <h3 class="text-xl font-bold mb-4">Edit Bukti Izin/Sakit</h3>
+            <div class="grid gap-3">
+                <div>
+                    <label class="block text-sm text-gray-600 mb-1">Upload Bukti Baru</label>
+                    <input type="file" id="edit-bukti-file" accept="image/*" class="w-full p-3 border rounded-lg">
+                    <p class="text-xs text-gray-500 mt-1">Maksimal 5MB. Format: JPG, PNG, GIF</p>
+                </div>
+                <div class="mt-2">
+                    <video id="edit-bukti-video" autoplay playsinline class="w-full h-48 object-cover rounded-lg hidden"></video>
+                    <canvas id="edit-bukti-canvas" class="hidden"></canvas>
+                    <img id="edit-bukti-preview" class="mt-2 h-32 w-32 object-cover rounded-lg hidden">
+                    <button type="button" id="edit-bukti-capture" class="mt-2 bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm hidden">Ambil Foto</button>
+                </div>
+                <div id="edit-bukti-current" class="hidden">
+                    <label class="block text-sm text-gray-600 mb-1">Bukti Saat Ini:</label>
+                    <img id="edit-bukti-current-img" class="w-full max-w-md h-48 object-cover rounded border">
+                </div>
+            </div>
+            <div class="flex justify-end gap-2 mt-4">
+                <button type="button" id="edit-bukti-cancel" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded">Batal</button>
+                <button type="button" id="edit-bukti-save" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded">Simpan</button>
             </div>
         </div>
     </div>
@@ -2693,15 +3267,19 @@ let performanceStats = {
     lastDetectionTime: 0
 };
 
-// Perbaikan: Konfigurasi threshold yang dapat disesuaikan
+// Advanced: Multi-level detection config for maximum accuracy and performance
 let detectionConfig = {
-    faceMatcherThreshold: 0.5, // Threshold untuk face matching
-    recognitionThreshold: 0.5, // Threshold untuk recognition
-    inputSize: 224, // Ukuran input untuk deteksi (lebih kecil untuk performa)
-    scoreThreshold: 0.5 // Threshold untuk deteksi wajah (lebih tinggi untuk performa)
+    faceMatcherThreshold: 0.45, // Stricter threshold for better accuracy
+    recognitionThreshold: 0.45, // Stricter threshold for better accuracy
+    inputSize: 224, // Higher resolution for better accuracy
+    scoreThreshold: 0.35, // Lower threshold for better face detection
+    minFaceSize: 50, // Minimum face size to consider
+    maxFaces: 1, // Only detect one face at a time for better accuracy
+    confidenceThreshold: 0.8 // High confidence threshold for recognition
 };
 let logMasukData = [];
 let logPulangData = [];
+
 
 // Initialize speech synthesis for offline use
 function initializeSpeechSynthesis() {
@@ -2804,8 +3382,8 @@ async function loadLabeledFaceDescriptors(){
     labeledFaceDescriptors = [];
     console.log(`Loading face descriptors for ${members.length} members...`);
     
-    // Optimasi: batch size lebih besar untuk loading lebih cepat
-    const batchSize = 8;
+    // Optimized: larger batch size for faster loading
+    const batchSize = 12;
     for (let i = 0; i < members.length; i += batchSize) {
         const batch = members.slice(i, i + batchSize);
         const batchPromises = batch.map(async (m) => {
@@ -2815,10 +3393,10 @@ async function loadLabeledFaceDescriptors(){
             }
             try {
                 const img = await faceapi.fetchImage(m.foto_base64);
-                // Perbaikan: parameter yang seimbang untuk akurasi dan kecepatan
+                // Advanced: High-quality parameters for maximum accuracy
                 const det = await faceapi.detectSingleFace(img, new faceapi.TinyFaceDetectorOptions({
-                    inputSize: 320, // Tetap 320 untuk loading database (akurasi penting)
-                    scoreThreshold: 0.4 // Threshold yang seimbang
+                    inputSize: 320, // Higher resolution for better accuracy
+                    scoreThreshold: 0.3 // Lower threshold for better detection
                 })).withFaceLandmarks().withFaceDescriptor();
                 if (det) {
                     console.log(`Successfully loaded face descriptor for: ${m.nama} (${m.nim})`);
@@ -2833,9 +3411,9 @@ async function loadLabeledFaceDescriptors(){
         });
         const batchResults = await Promise.all(batchPromises);
         labeledFaceDescriptors.push(...batchResults.filter(Boolean));
-        // Optimasi: delay lebih pendek untuk loading lebih cepat
+        // Optimized: shorter delay for faster loading
         if (i + batchSize < members.length) {
-            await new Promise(resolve => setTimeout(resolve, 20));
+            await new Promise(resolve => setTimeout(resolve, 10));
         }
     }
     console.log(`Successfully loaded ${labeledFaceDescriptors.length} face descriptors`);
@@ -2854,6 +3432,7 @@ function adjustDetectionThreshold() {
 
 function startScan(mode){
     scanMode = mode;
+    recognitionCompleted = false; // Reset recognition completion flag for new scan
     scanButtonsContainer.classList.add('hidden');
     videoContainer.classList.remove('hidden');
     btnBackScan.classList.remove('hidden');
@@ -2916,6 +3495,12 @@ function resetPresensiPage(){
         window.speechTimeout = null;
     }
     speechSynthesis.cancel();
+    
+    // Advanced: Reset detection history for fresh start
+    detectionHistory = [];
+    lastSuccessfulDetection = null;
+    detectionAttempts = 0;
+    recognitionCompleted = false; // Reset recognition completion flag
 }
 
 function startVideo(){
@@ -2956,14 +3541,19 @@ function startVideoInterval(){
     }
     const displaySize = { width: video.clientWidth, height: video.clientHeight };
     faceapi.matchDimensions(canvas, displaySize);
-    // Optimasi: interval dengan throttling untuk performa lebih baik
+    // Advanced: Optimized interval for maximum performance and accuracy
     let lastDetectionTime = 0;
-    const detectionThrottle = 200; // 200ms throttle untuk mengurangi beban CPU lebih efektif
+    let detectionThrottle = 100; // Faster throttle for better responsiveness
     
     videoInterval = setInterval(async ()=>{
         const now = Date.now();
         if (now - lastDetectionTime < detectionThrottle) {
             return; // Skip detection jika terlalu cepat
+        }
+        
+        // Stop detection if recognition is completed
+        if (recognitionCompleted) {
+            return;
         }
         lastDetectionTime = now;
         
@@ -2971,11 +3561,23 @@ function startVideoInterval(){
             // Optimasi: Performance monitoring
             const detectionStartTime = performance.now();
             
-            // Perbaikan: parameter deteksi yang seimbang untuk akurasi optimal
+            // Advanced: High-quality detection parameters for maximum accuracy
             const detections = await faceapi.detectAllFaces(video, new faceapi.TinyFaceDetectorOptions({
                 inputSize: detectionConfig.inputSize,
                 scoreThreshold: detectionConfig.scoreThreshold
             })).withFaceLandmarks().withFaceDescriptors().withFaceExpressions();
+            
+            // Filter detections by quality and size
+            const qualityDetections = detections.filter(detection => {
+                const quality = assessFaceQuality(detection);
+                const box = detection.detection.box;
+                const area = box.width * box.height;
+                return quality >= 0.6 && area >= detectionConfig.minFaceSize * detectionConfig.minFaceSize;
+            });
+            
+            // Sort by quality and take only the best detection
+            qualityDetections.sort((a, b) => assessFaceQuality(b) - assessFaceQuality(a));
+            const bestDetections = qualityDetections.slice(0, detectionConfig.maxFaces);
             
             // Optimasi: Update performance stats
             const detectionTime = performance.now() - detectionStartTime;
@@ -2990,35 +3592,44 @@ function startVideoInterval(){
                 // Perbaikan: Sesuaikan threshold secara dinamis jika diperlukan
                 adjustDetectionThreshold();
                 
-                // Optimasi: Jika performa terlalu lambat, tingkatkan throttle
-                if (performanceStats.averageDetectionTime > 1500) {
+                // Advanced: Dynamic throttle adjustment for optimal performance
+                if (performanceStats.averageDetectionTime > 400) {
                     console.log('Performance is slow, increasing throttle...');
-                    detectionThrottle = Math.min(500, detectionThrottle + 50);
+                    detectionThrottle = Math.min(150, detectionThrottle + 10);
+                } else if (performanceStats.averageDetectionTime < 200 && detectionThrottle > 80) {
+                    console.log('Performance is good, decreasing throttle...');
+                    detectionThrottle = Math.max(80, detectionThrottle - 5);
                 }
             }
-            const resized = faceapi.resizeResults(detections, displaySize);
+            const resized = faceapi.resizeResults(bestDetections, displaySize);
             const ctx = canvas.getContext('2d');
             ctx.clearRect(0,0,canvas.width,canvas.height);
             if (resized.length > 0) {
                 faceapi.draw.drawDetections(canvas, resized);
                 if (labeledFaceDescriptors && labeledFaceDescriptors.length > 0) {
-                    // Perbaikan: threshold yang lebih toleran untuk akurasi yang lebih baik
+                    // Advanced: Stricter threshold for better accuracy
                     const faceMatcher = new faceapi.FaceMatcher(labeledFaceDescriptors, detectionConfig.faceMatcherThreshold);
                     const results = resized.map(d => faceMatcher.findBestMatch(d.descriptor));
                     results.forEach((result, i) => {
                         const box = resized[i].detection.box;
                         const expressions = resized[i].expressions || {};
                         const topExpression = getTopExpression(expressions);
+                        const face = resized[i];
                         
-                        // Debug: Log hasil deteksi untuk troubleshooting
-                        console.log(`Face ${i}: Label=${result.label}, Distance=${result.distance.toFixed(3)}, Threshold=${detectionConfig.recognitionThreshold}`);
+                        // Debug: Log detection results for troubleshooting
+                        const quality = assessFaceQuality(face);
+                        console.log(`Face ${i}: Label=${result.label}, Distance=${result.distance.toFixed(3)}, Quality=${quality.toFixed(3)}, Threshold=${detectionConfig.recognitionThreshold}`);
+                        
+                        // Advanced: Use quality-based detection acceptance
+                        const shouldAccept = shouldAcceptDetection(result, face);
                         
                         const drawBox = new faceapi.draw.DrawBox(box, {
-                            label: `${result.toString()} (${topExpression})`
+                            label: `${result.toString()} (${topExpression}) ${shouldAccept ? '✓' : '?'}`
                         });
                         drawBox.draw(canvas);
-                        // Perbaikan: threshold yang lebih toleran untuk akurasi yang lebih baik
-                        if (result.label !== 'unknown' && result.distance < detectionConfig.recognitionThreshold) {
+                        
+                        // Advanced: Only accept high-quality, consistent detections
+                        if (shouldAccept) {
                             handleRecognition(result.label, topExpression);
                         }
                     });
@@ -3056,10 +3667,95 @@ function getTopExpression(expressions){
     return map[top] || 'Biasa';
 }
 
+// Advanced: Face quality assessment
+function assessFaceQuality(face) {
+    if (!face || !face.detection) return 0;
+    
+    const box = face.detection.box;
+    const area = box.width * box.height;
+    const aspectRatio = box.width / box.height;
+    
+    // Quality factors
+    let quality = 1.0;
+    
+    // Size factor (prefer larger faces)
+    if (area < 10000) quality *= 0.7;
+    else if (area > 50000) quality *= 1.2;
+    
+    // Aspect ratio factor (prefer square-ish faces)
+    if (aspectRatio < 0.7 || aspectRatio > 1.4) quality *= 0.8;
+    
+    // Position factor (prefer centered faces)
+    const centerX = box.x + box.width / 2;
+    const centerY = box.y + box.height / 2;
+    const canvasCenterX = 320; // Assuming 640px width
+    const canvasCenterY = 240; // Assuming 480px height
+    const distanceFromCenter = Math.sqrt(
+        Math.pow(centerX - canvasCenterX, 2) + Math.pow(centerY - canvasCenterY, 2)
+    );
+    if (distanceFromCenter > 100) quality *= 0.9;
+    
+    return Math.max(0, Math.min(1, quality));
+}
+
+// Advanced: Multiple detection attempts for better accuracy
+let detectionAttempts = 0;
+let lastSuccessfulDetection = null;
+let detectionHistory = [];
+
+function shouldAcceptDetection(result, face) {
+    if (!result || result.label === 'unknown') return false;
+    
+    // Check confidence threshold
+    if (result.distance > detectionConfig.recognitionThreshold) return false;
+    
+    // Check face quality
+    const quality = assessFaceQuality(face);
+    if (quality < 0.6) return false;
+    
+    // Check detection history for consistency
+    detectionHistory.push({
+        label: result.label,
+        distance: result.distance,
+        quality: quality,
+        timestamp: Date.now()
+    });
+    
+    // Keep only recent history (last 5 seconds)
+    detectionHistory = detectionHistory.filter(h => Date.now() - h.timestamp < 5000);
+    
+    // Count recent detections of the same person
+    const recentDetections = detectionHistory.filter(h => h.label === result.label);
+    if (recentDetections.length < 2) return false; // Need at least 2 consistent detections
+    
+    // Check if this person was detected recently
+    const timeSinceLastDetection = lastSuccessfulDetection ? 
+        Date.now() - lastSuccessfulDetection.timestamp : Infinity;
+    
+    // If same person detected within 3 seconds, accept immediately
+    if (lastSuccessfulDetection && 
+        lastSuccessfulDetection.label === result.label && 
+        timeSinceLastDetection < 3000) {
+        return true;
+    }
+    
+    // For new person, need more consistent detections
+    if (recentDetections.length >= 3) {
+        lastSuccessfulDetection = {
+            label: result.label,
+            timestamp: Date.now()
+        };
+        return true;
+    }
+    
+    return false;
+}
+
 let isProcessingRecognition = false;
+let recognitionCompleted = false; // Flag to stop detection after successful recognition
 
 async function handleRecognition(nim, topExpression){
-    if(!scanMode || isProcessingRecognition) return;
+    if(!scanMode || isProcessingRecognition || recognitionCompleted) return;
     isProcessingRecognition = true;
     
     console.log('Recognition triggered:', { nim, topExpression, scanMode });
@@ -3097,19 +3793,78 @@ async function handleRecognition(nim, topExpression){
         return;
     }
     
-    try{
-        const r = await api('?ajax=save_attendance', { 
-            nim, 
-            mode: scanMode, 
+    // Get geolocation
+    const getPosition = () => new Promise((resolve, reject) => {
+        if (!navigator.geolocation) return resolve(null);
+        navigator.geolocation.getCurrentPosition(pos => resolve(pos), err => resolve(null), { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 });
+    });
+    let lat=null, lng=null, lokasi=null;
+    try {
+        const pos = await getPosition();
+        if (pos) {
+            lat = pos.coords.latitude;
+            lng = pos.coords.longitude;
+        }
+    } catch(_) {}
+    // Reverse geocode via Nominatim (no key)
+    async function reverseGeocode(lat, lng){
+        try{
+            const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}`;
+            const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
+            if(!res.ok) return null;
+            const j = await res.json();
+            return j.display_name || null;
+        }catch(_){ return null; }
+    }
+    if(lat!==null && lng!==null){ lokasi = await reverseGeocode(lat,lng); }
+
+    async function submitAttendance(extra={}){
+        return api('?ajax=save_attendance', { 
+            nim,
+            mode: scanMode,
             ekspresi: topExpression,
-            screenshot: screenshot 
+            screenshot: screenshot,
+            lat: lat ?? '',
+            lng: lng ?? '',
+            lokasi: lokasi ?? '',
+            ...extra
         });
+    }
+
+    try{
+        let r = await submitAttendance();
+        if(!r.ok && r.need_reason){
+            // Ask reason via modal, then resubmit
+            const modal = qs('#wfa-reason-modal');
+            const input = qs('#wfa-reason-input');
+            const btnOk = qs('#wfa-reason-submit');
+            const btnCancel = qs('#wfa-reason-cancel');
+            input.value = '';
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+            const getReason = () => new Promise(resolve=>{
+                const onSubmit = ()=>{ const v=input.value.trim(); if(v){ cleanup(); resolve(v);} else { showNotif('Alasan tidak boleh kosong', false);} };
+                const onCancel = ()=>{ cleanup(); resolve(null); };
+                function cleanup(){ btnOk.removeEventListener('click', onSubmit); btnCancel.removeEventListener('click', onCancel); modal.classList.add('hidden'); modal.classList.remove('flex'); }
+                btnOk.addEventListener('click', onSubmit);
+                btnCancel.addEventListener('click', onCancel);
+            });
+            const reason = await getReason();
+            if(!reason){ isProcessingRecognition=false; return; }
+            r = await submitAttendance({ alasan_wfa: reason });
+        }
         console.log('Attendance response:', r);
         
         if(r.ok){
             statusMessage(r.message, r.statusClass || 'bg-green-100 text-green-700');
             // Update log after successful attendance
             updateLogAfterAttendance(nim, scanMode);
+            // Stop detection after successful recognition
+            recognitionCompleted = true;
+            if(videoInterval) {
+                clearInterval(videoInterval);
+                videoInterval = null;
+            }
             //stopVideoAfterRecognition();
         } else {
             statusMessage(r.message || 'Gagal menyimpan presensi', r.statusClass || 'bg-yellow-100 text-yellow-700');
@@ -3237,6 +3992,7 @@ function renderLogMasuk() {
         
         const jamMasuk = item.jam_masuk ? item.jam_masuk.substring(0, 5) : '-';
         const tanggal = item.jam_masuk_iso ? new Date(item.jam_masuk_iso).toLocaleDateString('id-ID') : '-';
+        const lokasi = item.lokasi_masuk || '-';
         
         tr.innerHTML = `
             <td class="py-2 px-4 text-center">${index + 1}</td>
@@ -3244,6 +4000,7 @@ function renderLogMasuk() {
             <td class="py-2 px-4">${item.nama || '-'}</td>
             <td class="py-2 px-4 text-center">${item.startup || '-'}</td>
             <td class="py-2 px-4 text-center">${jamMasuk}</td>
+            <td class="py-2 px-4">${lokasi}</td>
             <td class="py-2 px-4 text-center">${screenshot}</td>
         `;
         body.appendChild(tr);
@@ -3273,6 +4030,7 @@ function renderLogPulang() {
         
         const jamPulang = item.jam_pulang ? item.jam_pulang.substring(0, 5) : '-';
         const tanggal = item.jam_pulang_iso ? new Date(item.jam_pulang_iso).toLocaleDateString('id-ID') : '-';
+        const lokasi = item.lokasi_pulang || '-';
         
         tr.innerHTML = `
             <td class="py-2 px-4 text-center">${index + 1}</td>
@@ -3280,6 +4038,7 @@ function renderLogPulang() {
             <td class="py-2 px-4">${item.nama || '-'}</td>
             <td class="py-2 px-4 text-center">${item.startup || '-'}</td>
             <td class="py-2 px-4 text-center">${jamPulang}</td>
+            <td class="py-2 px-4">${lokasi}</td>
             <td class="py-2 px-4 text-center">${screenshot}</td>
         `;
         body.appendChild(tr);
@@ -3448,15 +4207,16 @@ btnAddMember && btnAddMember.addEventListener('click', ()=>{
 btnCancelModal && btnCancelModal.addEventListener('click', ()=>{ stopModalCamera(); memberModal.classList.add('hidden'); });
 
 document.addEventListener('click', async (e)=>{
-    const btnEdit = e.target.closest('.btn-edit-member');
-    const btnDelete = e.target.closest('.btn-delete-member');
-    const btnViewDr = e.target.closest('.btn-view-dr-admin');
-    const btnEditAtt = e.target.closest('.btn-edit-att');
-    const btnDeleteLaporan = e.target.closest('.btn-delete-laporan');
-    const btnViewMonth = e.target.closest('.btn-view-month');
-    const btnAmApprove = e.target.closest('.btn-am-approve');
-    const btnAmDisapprove = e.target.closest('.btn-am-disapprove');
-    const btnViewMonthDetail = e.target.closest('.btn-view-month-detail');
+    const btnEdit = e.target.closest('.btn-edit-member');
+    const btnDelete = e.target.closest('.btn-delete-member');
+    const btnViewDr = e.target.closest('.btn-view-dr-admin');
+    const btnEditAtt = e.target.closest('.btn-edit-att');
+    const btnDeleteLaporan = e.target.closest('.btn-delete-laporan');
+    const btnViewMonth = e.target.closest('.btn-view-month');
+    const btnAmApprove = e.target.closest('.btn-am-approve');
+    const btnAmDisapprove = e.target.closest('.btn-am-disapprove');
+    const btnViewMonthDetail = e.target.closest('.btn-view-month-detail');
+    const btnViewKet = e.target.closest('.btn-view-ket');
 
     if(btnEdit){
         const data = JSON.parse(btnEdit.getAttribute('data-json').replace(/&apos;/g, "'"));
@@ -3685,10 +4445,90 @@ document.addEventListener('click', async (e)=>{
         showConfirmModal('Yakin set status laporan bulanan?', async ()=>{ await api('?ajax=admin_set_monthly_status', { id, status }); renderAdminMonthly(); });
     }
 
-    if(btnAmDisapprove){
-        const id = btnAmDisapprove.getAttribute('data-id'); const status = 'disapproved';
-        showConfirmModal('Yakin set status laporan bulanan?', async ()=>{ await api('?ajax=admin_set_monthly_status', { id, status }); renderAdminMonthly(); });
-    }
+    if(btnAmDisapprove){
+        const id = btnAmDisapprove.getAttribute('data-id'); const status = 'disapproved';
+        showConfirmModal('Yakin set status laporan bulanan?', async ()=>{ await api('?ajax=admin_set_monthly_status', { id, status }); renderAdminMonthly(); });
+    }
+
+    if(btnViewKet){
+        const att = JSON.parse(btnViewKet.getAttribute('data-json').replace(/&apos;/g, "'"));
+        const modal = qs('#ket-detail-modal');
+        const title = qs('#ket-detail-title');
+        const content = qs('#ket-detail-content');
+        
+        title.textContent = `Detail ${att.ket.toUpperCase()} - ${att.nama}`;
+        
+        if (att.ket === 'wfo' || att.ket === 'wfa') {
+            // Show location map for WFO/WFA
+            let mapContent = '';
+            if (att.lat_masuk && att.lng_masuk && att.lokasi_masuk) {
+                mapContent = `
+                    <div class="mb-4">
+                        <h4 class="font-semibold mb-2">Lokasi Presensi Masuk:</h4>
+                        <p class="text-sm text-gray-600 mb-2">${att.lokasi_masuk}</p>
+                        <div class="bg-gray-100 p-4 rounded-lg">
+                            <div class="text-sm text-gray-600 mb-2">
+                                <strong>Koordinat:</strong> ${att.lat_masuk}, ${att.lng_masuk}
+                            </div>
+                            <a href="https://www.google.com/maps?q=${att.lat_masuk},${att.lng_masuk}" target="_blank" class="inline-block bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">
+                                Buka di Google Maps
+                            </a>
+                        </div>
+                    </div>
+                `;
+            }
+            if (att.lat_pulang && att.lng_pulang && att.lokasi_pulang) {
+                mapContent += `
+                    <div class="mb-4">
+                        <h4 class="font-semibold mb-2">Lokasi Presensi Pulang:</h4>
+                        <p class="text-sm text-gray-600 mb-2">${att.lokasi_pulang}</p>
+                        <div class="bg-gray-100 p-4 rounded-lg">
+                            <div class="text-sm text-gray-600 mb-2">
+                                <strong>Koordinat:</strong> ${att.lat_pulang}, ${att.lng_pulang}
+                            </div>
+                            <a href="https://www.google.com/maps?q=${att.lat_pulang},${att.lng_pulang}" target="_blank" class="inline-block bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">
+                                Buka di Google Maps
+                            </a>
+                        </div>
+                    </div>
+                `;
+            }
+            if (att.ket === 'wfa' && att.alasan_wfa) {
+                mapContent += `
+                    <div class="mb-4">
+                        <h4 class="font-semibold mb-2">Alasan WFA:</h4>
+                        <p class="text-sm text-gray-600 p-3 bg-gray-50 rounded">${att.alasan_wfa}</p>
+                    </div>
+                `;
+            }
+            content.innerHTML = mapContent || '<p class="text-gray-500">Tidak ada data lokasi</p>';
+        } else if (att.ket === 'izin' || att.ket === 'sakit') {
+            // Show proof and reason for izin/sakit
+            let proofContent = '';
+            if (att.bukti_izin_sakit) {
+                proofContent = `
+                    <div class="mb-4">
+                        <h4 class="font-semibold mb-2">Bukti ${att.ket}:</h4>
+                        <div class="flex justify-center">
+                            <img src="${att.bukti_izin_sakit}" alt="Bukti ${att.ket}" class="max-w-full max-h-96 object-contain rounded border shadow-lg" style="max-width: 100%; height: auto;">
+                        </div>
+                    </div>
+                `;
+            }
+            if (att.alasan_izin_sakit) {
+                proofContent += `
+                    <div class="mb-4">
+                        <h4 class="font-semibold mb-2">Keterangan:</h4>
+                        <p class="text-sm text-gray-600 p-3 bg-gray-50 rounded">${att.alasan_izin_sakit}</p>
+                    </div>
+                `;
+            }
+            content.innerHTML = proofContent || '<p class="text-gray-500">Tidak ada data bukti</p>';
+        }
+        
+        modal.classList.remove('hidden');
+        modal.classList.add('flex');
+    }
 });
 
 memberForm && memberForm.addEventListener('submit', async (e)=>{
@@ -3792,17 +4632,17 @@ async function renderLaporan(){
         // Format jam untuk tampilan (hanya jam:menit)
         const formatTime = (timeStr) => {
             if (!timeStr || timeStr === '-') return '-';
-            if (timeStr === 'izin' || timeStr === 'sakit' || timeStr === 'wfh') return timeStr;
+            if (timeStr === 'izin' || timeStr === 'sakit' || timeStr === 'wfa') return timeStr;
             // Extract only HH:MM from HH:MM:SS
             return timeStr.substring(0, 5);
         };
         
-        const jamMasuk = (att.ket === 'izin' || att.ket === 'sakit' || att.ket === 'wfh') ? att.ket : formatTime(att.jam_masuk);
-        const jamPulang = (att.ket === 'izin' || att.ket === 'sakit') ? att.ket : formatTime(att.jam_pulang);
+        const jamMasuk = (att.ket === 'izin' || att.ket === 'sakit' || att.ket === 'wfa') ? '-' : formatTime(att.jam_masuk);
+        const jamPulang = (att.ket === 'izin' || att.ket === 'sakit') ? '-' : formatTime(att.jam_pulang);
         
         // Create screenshot display functions
         const createScreenshotDisplay = (screenshotData, ekspresi, mode) => {
-            if (att.ket === 'izin' || att.ket === 'sakit' || (att.ket === 'wfh' && mode === 'pulang')) {
+            if (att.ket === 'izin' || att.ket === 'sakit' || (att.ket === 'wfa' && mode === 'pulang')) {
                 return '<div class="text-center">-</div>';
             }
             if (screenshotData) {
@@ -3815,6 +4655,21 @@ async function renderLaporan(){
         const buktiMasuk = createScreenshotDisplay(att.screenshot_masuk, att.ekspresi_masuk, 'masuk');
         const buktiPulang = createScreenshotDisplay(att.screenshot_pulang, att.ekspresi_pulang, 'pulang');
         
+        // Ket button logic with oval styling and colors
+        let ketButton = '';
+        if (att.ket && (att.ket === 'wfo' || att.ket === 'wfa' || att.ket === 'izin' || att.ket === 'sakit')) {
+            const ketColors = {
+                'wfo': 'bg-green-500 hover:bg-green-600 text-white',
+                'wfa': 'bg-blue-500 hover:bg-blue-600 text-white', 
+                'izin': 'bg-yellow-500 hover:bg-yellow-600 text-white',
+                'sakit': 'bg-yellow-500 hover:bg-yellow-600 text-white'
+            };
+            const colorClass = ketColors[att.ket] || 'bg-gray-500 hover:bg-gray-600 text-white';
+            ketButton = `<button class="btn-view-ket ${colorClass} px-2 py-1 rounded-full text-xs font-medium transition-colors duration-200" data-json='${JSON.stringify(att).replace(/'/g,"&apos;")}' title="Lihat Detail ${att.ket.toUpperCase()}">${att.ket.toUpperCase()}</button>`;
+        } else {
+            ketButton = '<span class="text-gray-400">-</span>';
+        }
+
         tr.innerHTML = `
             <td class="py-2 px-4">${tanggal}</td>
             <td class="py-2 px-4">${att.nim||''}</td>
@@ -3823,7 +4678,7 @@ async function renderLaporan(){
             <td class="py-2 px-4">${jamMasuk}</td>
             <td class="py-2 px-4">${buktiMasuk}</td>
             <td class="py-2 px-4"><span class="badge ${statusClass}">${statusText}</span></td>
-            <td class="py-2 px-4">${att.ket||'-'}</td>
+            <td class="py-2 px-4">${ketButton}</td>
             <td class="py-2 px-4">${jamPulang}</td>
             <td class="py-2 px-4">${buktiPulang}</td>
             <td class="py-2 px-4"><span class="badge ${dailyReportClass}">${dailyReportStatus}</span></td>
@@ -3861,7 +4716,7 @@ qs('#abs-cancel') && qs('#abs-cancel').addEventListener('click', ()=> qs('#absen
 document.addEventListener('change', (e) => {
     if (e.target.id === 'abs-type') {
         const wfhForm = qs('#abs-wfh-form');
-        if (e.target.value === 'wfh') {
+        if (e.target.value === 'wfa') {
             wfhForm.classList.remove('hidden');
         } else {
             wfhForm.classList.add('hidden');
@@ -4525,6 +5380,34 @@ function renderRekapData(data, m, y) {
             return timeStr.substring(0, 5);
         };
         
+        // Keterangan column logic
+        let keteranganContent = '';
+        const today = new Date().toISOString().slice(0, 10);
+        const isToday = row.date === today;
+        const isFuture = row.date > today;
+        
+        if (row.ket && (row.ket === 'wfo' || row.ket === 'wfa' || row.ket === 'izin' || row.ket === 'sakit')) {
+            // Show actual keterangan if exists
+            let badgeClass = 'badge-gray';
+            if (row.ket === 'wfo') badgeClass = 'badge-green';
+            else if (row.ket === 'wfa') badgeClass = 'badge-blue';
+            else if (row.ket === 'izin') badgeClass = 'badge-yellow';
+            else if (row.ket === 'sakit') badgeClass = 'badge-yellow';
+            
+            keteranganContent = `<span class="badge ${badgeClass}">${row.ket.toUpperCase()}</span>`;
+        } else if (!isAttendanceComplete && isToday) {
+            // Show input button only for today if no attendance
+            keteranganContent = `<button class="btn-input-keterangan bg-indigo-500 hover:bg-indigo-600 text-white px-3 py-1 rounded text-sm" data-date="${row.date}">Input Keterangan</button>`;
+        } else if (!isAttendanceComplete && isFuture) {
+            // Show "Tidak Tersedia" for future days
+            keteranganContent = '<span class="text-gray-400">Tidak Tersedia</span>';
+        } else if (!isAttendanceComplete && !isToday && !isFuture) {
+            // Mark past days without attendance as alpha
+            keteranganContent = '<span class="badge badge-red">ALPHA</span>';
+        } else {
+            keteranganContent = '<span class="text-gray-400">-</span>';
+        }
+
         const tr = document.createElement('tr');
         tr.className = 'border-b hover:bg-gray-50 text-center';
         tr.innerHTML = `
@@ -4532,6 +5415,7 @@ function renderRekapData(data, m, y) {
             <td class="py-2 px-4">${tanggal}</td>
             <td class="py-2 px-4">${formatTimeDisplay(row.jam_masuk)}</td>
             <td class="py-2 px-4">${formatTimeDisplay(row.jam_pulang)}</td>
+            <td class="py-2 px-4">${keteranganContent}</td>
             <td class="py-2 px-4">${reportBtns}</td>
             <td class="py-2 px-4">${statusLabel}</td>`;
         body.appendChild(tr);
@@ -4577,19 +5461,132 @@ drUserModal.id='dr-user-modal';
 drUserModal.className='fixed inset-0 bg-black/50 hidden items-center justify-center z-50';
 drUserModal.innerHTML = `
     <div class="bg-white p-6 rounded-lg shadow-2xl w-full max-w-2xl">
-        <h3 class="text-xl font-bold mb-2">Laporan Harian</h3>
-        <div class="text-sm text-gray-500 mb-2" id="dr-user-date"></div>
-        <textarea id="dr-user-content" class="w-full border rounded p-2" rows="8" placeholder="Tulis detail pekerjaan hari ini..."></textarea>
-        <div id="dr-evaluation-container" class="mt-4 hidden">
-            <h4 class="text-sm font-bold text-gray-700 mb-1">Evaluasi Admin:</h4>
-            <p id="dr-user-evaluation" class="whitespace-pre-wrap border p-3 rounded bg-gray-100"></p>
-        </div>
-        <div class="flex justify-end gap-2 mt-4">
-          <button id="dr-user-cancel" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded">Batal</button>
-          <button id="dr-user-save" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded">Simpan</button>
-        </div>
+        <h3 class="text-xl font-bold mb-2">Laporan Harian</h3>
+        <div class="text-sm text-gray-500 mb-2" id="dr-user-date"></div>
+        
+        <!-- Bukti Izin/Sakit Section -->
+        <div id="dr-user-bukti-section" class="mb-4 hidden">
+        <label class="block text-sm text-gray-600 mb-2">Bukti Izin/Sakit:</label>
+        <div id="dr-user-bukti-container" class="mb-2">
+            <!-- Bukti image will be inserted here -->
+        </div>
+        <div id="dr-user-bukti-actions" class="flex gap-2 hidden">
+            <button type="button" id="dr-user-edit-bukti" class="bg-yellow-500 hover:bg-yellow-600 text-white px-3 py-1 rounded text-sm">Edit Bukti</button>
+            <button type="button" id="dr-user-delete-bukti" class="bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded text-sm">Hapus Bukti</button>
+        </div>
+    </div>
+    
+        <textarea id="dr-user-content" class="w-full border rounded p-2" rows="8" placeholder="Tulis detail pekerjaan hari ini..."></textarea>
+        <div id="dr-evaluation-container" class="mt-4 hidden">
+        <h4 class="text-sm font-bold text-gray-700 mb-1">Evaluasi Admin:</h4>
+        <p id="dr-user-evaluation" class="whitespace-pre-wrap border p-3 rounded bg-gray-100"></p>
+    </div>
+    <div class="flex justify-end gap-2 mt-4">
+        <button id="dr-user-cancel" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded">Batal</button>
+        <button id="dr-user-save" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded">Simpan</button>
+    </div>
     </div>`;
 document.body.appendChild(drUserModal);
+
+// Izin/Sakit modal handlers
+const izinSakitModal = qs('#izin-sakit-modal');
+const izinSakitForm = qs('#izin-sakit-form');
+const izinSakitBukti = qs('#izin-sakit-bukti');
+const izinSakitPreview = qs('#izin-sakit-preview');
+const izinSakitPreviewImg = qs('#izin-sakit-preview-img');
+
+// File upload preview with size validation
+izinSakitBukti && izinSakitBukti.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    const errorDiv = qs('#izin-sakit-error');
+    
+    if (file) {
+        // Check file size (5MB = 5 * 1024 * 1024 bytes)
+        const maxSize = 5 * 1024 * 1024;
+        if (file.size > maxSize) {
+            errorDiv.textContent = `File terlalu besar. Maksimal 5MB. Ukuran saat ini: ${(file.size / (1024 * 1024)).toFixed(2)}MB`;
+            errorDiv.classList.remove('hidden');
+            izinSakitPreview.classList.add('hidden');
+            return;
+        }
+        
+        // Check file type
+        if (!file.type.startsWith('image/')) {
+            errorDiv.textContent = 'File harus berupa gambar (JPG, PNG, GIF)';
+            errorDiv.classList.remove('hidden');
+            izinSakitPreview.classList.add('hidden');
+            return;
+        }
+        
+        // Clear error and show preview
+        errorDiv.classList.add('hidden');
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            izinSakitPreviewImg.src = e.target.result;
+            izinSakitPreview.classList.remove('hidden');
+        };
+        reader.readAsDataURL(file);
+    } else {
+        errorDiv.classList.add('hidden');
+        izinSakitPreview.classList.add('hidden');
+    }
+});
+
+// Cancel button
+qs('#izin-sakit-cancel') && qs('#izin-sakit-cancel').addEventListener('click', () => {
+    izinSakitModal.classList.add('hidden');
+    izinSakitForm.reset();
+    izinSakitPreview.classList.add('hidden');
+});
+
+// Form submit
+izinSakitForm && izinSakitForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    
+    const type = qs('#izin-sakit-type').value;
+    const alasan = qs('#izin-sakit-alasan').value;
+    const file = izinSakitBukti.files[0];
+    
+    if (!type || !alasan || !file) {
+        showNotif('Semua field harus diisi', false);
+        return;
+    }
+    
+    // Convert file to base64
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+        try {
+            const r = await api('?ajax=submit_izin_sakit', {
+                type: type,
+                alasan: alasan,
+                bukti: e.target.result
+            });
+            
+            if (r.ok) {
+                showNotif(r.message, true);
+                izinSakitModal.classList.add('hidden');
+                izinSakitForm.reset();
+                izinSakitPreview.classList.add('hidden');
+                initRekapPage(); // Refresh rekap
+            } else {
+                showNotif(r.message || 'Gagal menyimpan', false);
+            }
+        } catch (error) {
+            console.error('Error submitting izin/sakit:', error);
+            showNotif('Terjadi kesalahan', false);
+        }
+    };
+    reader.readAsDataURL(file);
+});
+
+// Input keterangan button handler
+document.addEventListener('click', async (e) => {
+    if (e.target.classList.contains('btn-input-keterangan')) {
+        const date = e.target.getAttribute('data-date');
+        izinSakitModal.classList.remove('hidden');
+        izinSakitModal.classList.add('flex');
+    }
+});
 
 document.addEventListener('click', async (e)=>{
     const target = e.target.closest('.btn-create-dr, .btn-edit-dr, .btn-view-dr');
@@ -4606,17 +5603,51 @@ document.addEventListener('click', async (e)=>{
         const r = await api('?ajax=get_rekap', { month: new Date(date).getMonth()+1, year: new Date(date).getFullYear() });
         const item = (r.data||[]).find(x=> x.date===date);
         if(item && item.daily_report){
-            ta.value = item.daily_report.content||'';
-            if(item.daily_report.status==='approved' || isView){
-                 ta.disabled=true;
-                 qs('#dr-user-save').style.display='none';
-                 if (item.daily_report.evaluation) {
-                     qs('#dr-user-evaluation').textContent = item.daily_report.evaluation;
-                     qs('#dr-evaluation-container').classList.remove('hidden');
-                 }
-            } else {
-                 qs('#dr-evaluation-container').classList.add('hidden');
-            }
+            ta.value = item.daily_report.content||'';
+            if(item.daily_report.status==='approved' || isView){
+                ta.disabled=true;
+                qs('#dr-user-save').style.display='none';
+                if (item.daily_report.evaluation) {
+                    qs('#dr-user-evaluation').textContent = item.daily_report.evaluation;
+                    qs('#dr-evaluation-container').classList.remove('hidden');
+                }
+            } else {
+                qs('#dr-evaluation-container').classList.add('hidden');
+            }
+        }
+        
+        // Cek apakah ada bukti izin/sakit untuk tanggal ini
+        if (item && (item.ket === 'izin' || item.ket === 'sakit')) {
+            // Get attendance data to find bukti
+            const attendanceData = await api('?ajax=get_attendance');
+            if (attendanceData.ok && attendanceData.data) {
+                const todayRecord = attendanceData.data.find(att => 
+                    att.jam_masuk_iso && 
+                    att.jam_masuk_iso.slice(0, 10) === date &&
+                    (att.ket === 'izin' || att.ket === 'sakit') &&
+                    att.bukti_izin_sakit
+                );
+                
+                if (todayRecord) {
+                    // Tampilkan bukti izin/sakit
+                    qs('#dr-user-bukti-section').classList.remove('hidden');
+                    qs('#dr-user-bukti-container').innerHTML = `
+                        <div class="flex justify-center">
+                            <img src="${todayRecord.bukti_izin_sakit}" alt="Bukti ${todayRecord.ket}" class="max-w-full max-h-64 object-contain rounded border shadow-lg" style="max-width: 100%; height: auto;">
+                        </div>
+                        <p class="text-sm text-gray-600 mt-2 text-center">Bukti ${todayRecord.ket.toUpperCase()}</p>
+                    `;
+                    // Show edit/delete buttons
+                    qs('#dr-user-bukti-actions').classList.remove('hidden');
+                    qs('#dr-user-edit-bukti').dataset.date = date;
+                    qs('#dr-user-delete-bukti').dataset.date = date;
+                } else {
+                    qs('#dr-user-bukti-section').classList.add('hidden');
+                    qs('#dr-user-bukti-actions').classList.add('hidden');
+                }
+            }
+        } else {
+            qs('#dr-user-bukti-section').classList.add('hidden');
         }
         drUserModal.classList.remove('hidden'); 
         drUserModal.classList.add('flex');
@@ -4628,6 +5659,138 @@ qs('#dr-user-save') && qs('#dr-user-save').addEventListener('click', async ()=>{
     const date = drUserModal.dataset.date; const content = qs('#dr-user-content').value;
     const r = await api('?ajax=save_daily_report', { date, content });
     if(r.ok){ drUserModal.classList.add('hidden'); drUserModal.classList.remove('flex'); initRekapPage(); } else { showNotif(r.message||'Gagal simpan'); }
+});
+
+// Event handler untuk edit bukti izin/sakit
+qs('#dr-user-edit-bukti') && qs('#dr-user-edit-bukti').addEventListener('click', () => {
+    const date = qs('#dr-user-edit-bukti').dataset.date;
+    // Open edit bukti modal
+    qs('#edit-bukti-modal').classList.remove('hidden');
+    qs('#edit-bukti-modal').classList.add('flex');
+    qs('#edit-bukti-save').dataset.date = date;
+    
+    // Show current bukti
+    const currentImg = qs('#dr-user-bukti-container img');
+    if (currentImg) {
+        qs('#edit-bukti-current').classList.remove('hidden');
+        qs('#edit-bukti-current-img').src = currentImg.src;
+    }
+});
+
+// Event handler untuk hapus bukti izin/sakit
+qs('#dr-user-delete-bukti') && qs('#dr-user-delete-bukti').addEventListener('click', async () => {
+    const date = qs('#dr-user-delete-bukti').dataset.date;
+    
+    if (confirm('Apakah Anda yakin ingin menghapus bukti ini?')) {
+        try {
+            const r = await api('?ajax=update_bukti_izin_sakit', {
+                date: date,
+                action_type: 'delete'
+            });
+            
+            if (r.ok) {
+                showNotif('Bukti berhasil dihapus');
+                // Hide bukti section
+                qs('#dr-user-bukti-section').classList.add('hidden');
+                qs('#dr-user-bukti-actions').classList.add('hidden');
+            } else {
+                showNotif(r.message || 'Gagal menghapus bukti', false);
+            }
+        } catch (error) {
+            console.error('Error deleting bukti:', error);
+            showNotif('Terjadi kesalahan', false);
+        }
+    }
+});
+
+// Event handler untuk modal edit bukti
+qs('#edit-bukti-cancel') && qs('#edit-bukti-cancel').addEventListener('click', () => {
+    qs('#edit-bukti-modal').classList.add('hidden');
+    qs('#edit-bukti-modal').classList.remove('flex');
+    qs('#edit-bukti-file').value = '';
+    qs('#edit-bukti-preview').classList.add('hidden');
+    qs('#edit-bukti-current').classList.add('hidden');
+});
+
+qs('#edit-bukti-save') && qs('#edit-bukti-save').addEventListener('click', async () => {
+    const date = qs('#edit-bukti-save').dataset.date;
+    const file = qs('#edit-bukti-file').files[0];
+    
+    if (!file) {
+        showNotif('Pilih file gambar terlebih dahulu', false);
+        return;
+    }
+    
+    // Check file size (5MB = 5 * 1024 * 1024 bytes)
+    const maxSize = 5 * 1024 * 1024;
+    if (file.size > maxSize) {
+        showNotif(`File terlalu besar. Maksimal 5MB. Ukuran saat ini: ${(file.size / (1024 * 1024)).toFixed(2)}MB`, false);
+        return;
+    }
+    
+    // Check file type
+    if (!file.type.startsWith('image/')) {
+        showNotif('File harus berupa gambar (JPG, PNG, GIF)', false);
+        return;
+    }
+    
+    // Convert file to base64
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+        try {
+            const r = await api('?ajax=update_bukti_izin_sakit', {
+                date: date,
+                action_type: 'update',
+                bukti: e.target.result
+            });
+            
+            if (r.ok) {
+                showNotif('Bukti berhasil diperbarui');
+                qs('#edit-bukti-modal').classList.add('hidden');
+                qs('#edit-bukti-modal').classList.remove('flex');
+                qs('#edit-bukti-file').value = '';
+                qs('#edit-bukti-preview').classList.add('hidden');
+                qs('#edit-bukti-current').classList.add('hidden');
+                
+                // Refresh the daily report modal to show updated bukti
+                const drModal = qs('#dr-user-modal');
+                if (drModal && !drModal.classList.contains('hidden')) {
+                    // Trigger a refresh of the bukti display
+                    const currentDate = drModal.dataset.date;
+                    if (currentDate) {
+                        // Re-trigger the daily report modal to refresh bukti
+                        const btn = document.createElement('button');
+                        btn.className = 'btn-edit-dr';
+                        btn.setAttribute('data-date', currentDate);
+                        btn.click();
+                    }
+                }
+            } else {
+                showNotif(r.message || 'Gagal memperbarui bukti', false);
+            }
+        } catch (error) {
+            console.error('Error updating bukti:', error);
+            showNotif('Terjadi kesalahan', false);
+        }
+    };
+    reader.readAsDataURL(file);
+});
+
+// File upload preview for edit bukti modal
+qs('#edit-bukti-file') && qs('#edit-bukti-file').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    const preview = qs('#edit-bukti-preview');
+    
+    if (file) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            qs('#edit-bukti-preview').src = e.target.result;
+            preview.classList.remove('hidden');
+        };
+        reader.readAsDataURL(file);
+    } else {
+        preview.classList.add('hidden');
+    }
 });
 
 // Helper function for month names
