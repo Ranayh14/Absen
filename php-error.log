@@ -516,3 +516,133 @@ Stack trace:
 [19-Sep-2025 07:52:22 Europe/Berlin] bootstrap: index.php started
 [19-Sep-2025 07:52:22 Europe/Berlin] bootstrap: index.php started
 [19-Sep-2025 07:52:24 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 07:53:45 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 07:53:45 Europe/Berlin] get_today_attendance: type=masuk, today=2025-09-19, count=0
+[19-Sep-2025 07:54:03 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 07:54:03 Europe/Berlin] Attendance request: NIM=607012300035, Mode=masuk, Expression=Senang, Screenshot=YES
+[19-Sep-2025 07:54:03 Europe/Berlin] Current date: 2025-09-19, User ID: 3
+[19-Sep-2025 07:54:03 Europe/Berlin] No existing attendance record found for user 3 on date 2025-09-19
+[19-Sep-2025 07:54:03 Europe/Berlin] Database backup berhasil dibuat: D:\xampp\htdocs\Magang\Absen/database_backup/absen_db_backup.sql
+[19-Sep-2025 07:54:09 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 07:54:09 Europe/Berlin] get_today_attendance: type=masuk, today=2025-09-19, count=1
+[19-Sep-2025 07:54:21 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 07:56:00 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 07:56:07 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 07:56:07 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 07:56:08 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 07:56:08 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 07:56:10 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 07:56:10 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 07:56:19 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 07:56:19 Europe/Berlin] Database backup berhasil dibuat: D:\xampp\htdocs\Magang\Absen/database_backup/absen_db_backup.sql
+[19-Sep-2025 07:56:19 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 07:56:21 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 07:56:21 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 07:56:23 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 07:56:25 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 07:56:25 Europe/Berlin] get_today_attendance: type=masuk, today=2025-09-19, count=0
+[19-Sep-2025 07:56:59 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 07:56:59 Europe/Berlin] Attendance request: NIM=607012300035, Mode=masuk, Expression=Senang, Screenshot=YES
+[19-Sep-2025 07:56:59 Europe/Berlin] Current date: 2025-09-19, User ID: 3
+[19-Sep-2025 07:56:59 Europe/Berlin] No existing attendance record found for user 3 on date 2025-09-19
+[19-Sep-2025 07:56:59 Europe/Berlin] Database backup berhasil dibuat: D:\xampp\htdocs\Magang\Absen/database_backup/absen_db_backup.sql
+[19-Sep-2025 07:57:05 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 07:57:05 Europe/Berlin] get_today_attendance: type=masuk, today=2025-09-19, count=1
+[19-Sep-2025 08:06:32 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 08:19:57 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 08:19:59 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 08:20:03 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 08:20:03 Europe/Berlin] get_today_attendance: type=masuk, today=2025-09-19, count=1
+[19-Sep-2025 08:21:51 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 08:21:51 Europe/Berlin] Attendance request: NIM=607012300035, Mode=masuk, Expression=Biasa, Screenshot=YES
+[19-Sep-2025 08:21:51 Europe/Berlin] Current date: 2025-09-19, User ID: 3
+[19-Sep-2025 08:21:51 Europe/Berlin] Found existing attendance record: ID=102, jam_masuk_iso=2025-09-19 12:56:59, jam_pulang_iso=
+[19-Sep-2025 08:23:50 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 08:23:50 Europe/Berlin] Attendance request: NIM=607012300035, Mode=masuk, Expression=Senang, Screenshot=YES
+[19-Sep-2025 08:23:50 Europe/Berlin] Current date: 2025-09-19, User ID: 3
+[19-Sep-2025 08:23:50 Europe/Berlin] Found existing attendance record: ID=102, jam_masuk_iso=2025-09-19 12:56:59, jam_pulang_iso=
+[19-Sep-2025 08:29:51 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 08:29:56 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 08:29:58 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 08:29:58 Europe/Berlin] get_today_attendance: type=masuk, today=2025-09-19, count=1
+[19-Sep-2025 08:30:31 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 08:30:31 Europe/Berlin] Attendance request: NIM=607012300035, Mode=masuk, Expression=Biasa, Screenshot=YES
+[19-Sep-2025 08:30:31 Europe/Berlin] Current date: 2025-09-19, User ID: 3
+[19-Sep-2025 08:30:31 Europe/Berlin] Found existing attendance record: ID=102, jam_masuk_iso=2025-09-19 12:56:59, jam_pulang_iso=
+[19-Sep-2025 08:31:29 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 08:31:29 Europe/Berlin] Attendance request: NIM=607012300114, Mode=masuk, Expression=Biasa, Screenshot=YES
+[19-Sep-2025 08:31:29 Europe/Berlin] Current date: 2025-09-19, User ID: 15
+[19-Sep-2025 08:31:29 Europe/Berlin] No existing attendance record found for user 15 on date 2025-09-19
+[19-Sep-2025 08:31:29 Europe/Berlin] Database backup berhasil dibuat: D:\xampp\htdocs\Magang\Absen/database_backup/absen_db_backup.sql
+[19-Sep-2025 08:31:39 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 08:31:39 Europe/Berlin] get_today_attendance: type=masuk, today=2025-09-19, count=2
+[19-Sep-2025 08:32:18 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 08:32:18 Europe/Berlin] get_today_attendance: type=masuk, today=2025-09-19, count=2
+[19-Sep-2025 08:32:33 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 08:32:33 Europe/Berlin] Attendance request: NIM=607012300035, Mode=masuk, Expression=Biasa, Screenshot=YES
+[19-Sep-2025 08:32:33 Europe/Berlin] Current date: 2025-09-19, User ID: 3
+[19-Sep-2025 08:32:33 Europe/Berlin] Found existing attendance record: ID=102, jam_masuk_iso=2025-09-19 12:56:59, jam_pulang_iso=
+[19-Sep-2025 08:33:11 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 08:33:11 Europe/Berlin] Attendance request: NIM=607012300035, Mode=masuk, Expression=Biasa, Screenshot=YES
+[19-Sep-2025 08:33:11 Europe/Berlin] Current date: 2025-09-19, User ID: 3
+[19-Sep-2025 08:33:11 Europe/Berlin] Found existing attendance record: ID=102, jam_masuk_iso=2025-09-19 12:56:59, jam_pulang_iso=
+[19-Sep-2025 08:39:48 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 08:39:51 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 08:39:54 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 08:39:55 Europe/Berlin] get_today_attendance: type=masuk, today=2025-09-19, count=2
+[19-Sep-2025 08:40:15 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 08:40:15 Europe/Berlin] Attendance request: NIM=607062300015, Mode=masuk, Expression=Biasa, Screenshot=YES
+[19-Sep-2025 08:40:15 Europe/Berlin] Current date: 2025-09-19, User ID: 16
+[19-Sep-2025 08:40:15 Europe/Berlin] No existing attendance record found for user 16 on date 2025-09-19
+[19-Sep-2025 08:40:15 Europe/Berlin] Database backup berhasil dibuat: D:\xampp\htdocs\Magang\Absen/database_backup/absen_db_backup.sql
+[19-Sep-2025 08:40:21 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 08:40:21 Europe/Berlin] get_today_attendance: type=masuk, today=2025-09-19, count=3
+[19-Sep-2025 08:40:40 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 08:40:43 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 08:40:46 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 08:40:46 Europe/Berlin] get_today_attendance: type=masuk, today=2025-09-19, count=3
+[19-Sep-2025 08:41:10 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 08:41:10 Europe/Berlin] Attendance request: NIM=607062300002, Mode=masuk, Expression=Biasa, Screenshot=YES
+[19-Sep-2025 08:41:10 Europe/Berlin] Current date: 2025-09-19, User ID: 18
+[19-Sep-2025 08:41:10 Europe/Berlin] No existing attendance record found for user 18 on date 2025-09-19
+[19-Sep-2025 08:41:10 Europe/Berlin] Database backup berhasil dibuat: D:\xampp\htdocs\Magang\Absen/database_backup/absen_db_backup.sql
+[19-Sep-2025 08:41:18 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 08:41:18 Europe/Berlin] get_today_attendance: type=masuk, today=2025-09-19, count=4
+[19-Sep-2025 09:07:27 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 09:07:30 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 09:07:46 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 09:08:05 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 09:08:06 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 09:08:06 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 09:08:06 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 09:08:11 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 09:08:11 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 09:08:12 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 09:08:12 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 09:08:18 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 09:08:18 Europe/Berlin] Database backup berhasil dibuat: D:\xampp\htdocs\Magang\Absen/database_backup/absen_db_backup.sql
+[19-Sep-2025 09:08:18 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 09:08:21 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 09:08:21 Europe/Berlin] Database backup berhasil dibuat: D:\xampp\htdocs\Magang\Absen/database_backup/absen_db_backup.sql
+[19-Sep-2025 09:08:21 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 09:08:26 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 09:08:26 Europe/Berlin] Database backup berhasil dibuat: D:\xampp\htdocs\Magang\Absen/database_backup/absen_db_backup.sql
+[19-Sep-2025 09:08:26 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 09:08:34 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 09:08:51 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 09:08:51 Europe/Berlin] Database backup berhasil dibuat: D:\xampp\htdocs\Magang\Absen/database_backup/absen_db_backup.sql
+[19-Sep-2025 09:08:51 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 09:08:54 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 09:08:54 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 09:08:56 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 09:09:28 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 09:09:28 Europe/Berlin] get_today_attendance: type=masuk, today=2025-09-19, count=0
+[19-Sep-2025 09:10:04 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 09:10:04 Europe/Berlin] Attendance request: NIM=607012300035, Mode=masuk, Expression=Biasa, Screenshot=YES
+[19-Sep-2025 09:10:04 Europe/Berlin] Current date: 2025-09-19, User ID: 3
+[19-Sep-2025 09:10:04 Europe/Berlin] No existing attendance record found for user 3 on date 2025-09-19
+[19-Sep-2025 09:10:04 Europe/Berlin] Database backup berhasil dibuat: D:\xampp\htdocs\Magang\Absen/database_backup/absen_db_backup.sql
+[19-Sep-2025 09:10:13 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 09:10:13 Europe/Berlin] get_today_attendance: type=masuk, today=2025-09-19, count=1
+[19-Sep-2025 09:10:37 Europe/Berlin] bootstrap: index.php started
+[19-Sep-2025 09:10:39 Europe/Berlin] bootstrap: index.php started

@@ -1863,8 +1863,9 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
             <div id="video-container" class="bg-gray-900 rounded-lg overflow-hidden aspect-video mt-4 max-w-4xl mx-auto hidden">
                 <video id="video" autoplay muted playsinline></video>
                 <canvas id="canvas"></canvas>
-                <div class="absolute top-3 left-3">
+                <div class="absolute top-3 left-3 flex gap-2">
                     <button id="btn-back-scan" class="bg-white/90 hover:bg-white text-gray-800 font-semibold py-1.5 px-3 rounded-lg hidden">Kembali</button>
+                    <button id="btn-stop-detection" class="bg-red-500/90 hover:bg-red-600 text-white font-semibold py-1.5 px-3 rounded-lg hidden">Stop Deteksi</button>
                 </div>
             </div>
             <div id="presensi-status" class="mt-4 text-center font-medium text-lg p-3 rounded-md hidden"></div>
@@ -3267,19 +3268,62 @@ let performanceStats = {
     lastDetectionTime: 0
 };
 
-// Advanced: Multi-level detection config for maximum accuracy and performance
+// BALANCED: Detection config for speed + accuracy
 let detectionConfig = {
-    faceMatcherThreshold: 0.45, // Stricter threshold for better accuracy
-    recognitionThreshold: 0.45, // Stricter threshold for better accuracy
-    inputSize: 224, // Higher resolution for better accuracy
-    scoreThreshold: 0.35, // Lower threshold for better face detection
-    minFaceSize: 50, // Minimum face size to consider
-    maxFaces: 1, // Only detect one face at a time for better accuracy
-    confidenceThreshold: 0.8 // High confidence threshold for recognition
+    faceMatcherThreshold: 0.4, // Balanced for accuracy
+    recognitionThreshold: 0.4, // Balanced for accuracy
+    inputSize: 320, // Balanced resolution for speed vs accuracy
+    scoreThreshold: 0.2, // Lower threshold for better detection
+    minFaceSize: 60, // Balanced minimum face size
+    maxFaces: 2, // Allow 2 faces for better detection
+    confidenceThreshold: 0.7, // Balanced confidence
+    detectionThrottle: 30, // Fast but not too aggressive
+    qualityThreshold: 0.6, // Balanced quality threshold
+    landmarkThreshold: 0.7, // Balanced landmark threshold
+    expressionThreshold: 0.5 // Balanced expression threshold
 };
 let logMasukData = [];
 let logPulangData = [];
 
+
+// Helper functions for image variations to improve recognition accuracy
+function createRotatedImage(img, degrees) {
+    return new Promise((resolve) => {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        
+        // Set canvas size to accommodate rotation
+        const size = Math.max(img.width, img.height) * 1.5;
+        canvas.width = size;
+        canvas.height = size;
+        
+        // Center the image
+        ctx.translate(size / 2, size / 2);
+        ctx.rotate((degrees * Math.PI) / 180);
+        ctx.drawImage(img, -img.width / 2, -img.height / 2);
+        
+        // Convert back to image
+        const rotatedImg = new Image();
+        rotatedImg.onload = () => resolve(rotatedImg);
+        rotatedImg.src = canvas.toDataURL();
+    });
+}
+
+function createScaledImage(img, scale) {
+    return new Promise((resolve) => {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        
+        canvas.width = img.width * scale;
+        canvas.height = img.height * scale;
+        
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        
+        const scaledImg = new Image();
+        scaledImg.onload = () => resolve(scaledImg);
+        scaledImg.src = canvas.toDataURL();
+    });
+}
 
 // Initialize speech synthesis for offline use
 function initializeSpeechSynthesis() {
@@ -3382,8 +3426,8 @@ async function loadLabeledFaceDescriptors(){
     labeledFaceDescriptors = [];
     console.log(`Loading face descriptors for ${members.length} members...`);
     
-    // Optimized: larger batch size for faster loading
-    const batchSize = 12;
+    // ULTRA-FAST: larger batch size for maximum speed
+    const batchSize = 20;
     for (let i = 0; i < members.length; i += batchSize) {
         const batch = members.slice(i, i + batchSize);
         const batchPromises = batch.map(async (m) => {
@@ -3393,14 +3437,58 @@ async function loadLabeledFaceDescriptors(){
             }
             try {
                 const img = await faceapi.fetchImage(m.foto_base64);
-                // Advanced: High-quality parameters for maximum accuracy
-                const det = await faceapi.detectSingleFace(img, new faceapi.TinyFaceDetectorOptions({
-                    inputSize: 320, // Higher resolution for better accuracy
-                    scoreThreshold: 0.3 // Lower threshold for better detection
-                })).withFaceLandmarks().withFaceDescriptor();
+                // ENHANCED: Multiple detection attempts for better accuracy
+                let det = null;
+                
+                // Try with different parameters to ensure detection
+                const detectionParams = [
+                    { inputSize: 320, scoreThreshold: 0.2 }, // Primary attempt
+                    { inputSize: 224, scoreThreshold: 0.1 }, // Fallback 1
+                    { inputSize: 416, scoreThreshold: 0.3 }  // Fallback 2
+                ];
+                
+                for (const params of detectionParams) {
+                    try {
+                        det = await faceapi.detectSingleFace(img, new faceapi.TinyFaceDetectorOptions(params))
+                            .withFaceLandmarks().withFaceDescriptor();
+                        if (det) break; // Success, exit loop
+                    } catch (err) {
+                        console.warn(`Detection attempt failed for ${m.nama} with params:`, params, err);
+                    }
+                }
                 if (det) {
                     console.log(`Successfully loaded face descriptor for: ${m.nama} (${m.nim})`);
-                    return new faceapi.LabeledFaceDescriptors(m.nim, [det.descriptor]);
+                    // Create multiple descriptors for better accuracy
+                    const descriptors = [det.descriptor];
+                    
+                    // ENHANCED: Create multiple descriptors for better accuracy
+                    try {
+                        // Create a slightly rotated version for better recognition
+                        const rotatedImg = await createRotatedImage(img, 3); // 3 degree rotation
+                        const rotatedDet = await faceapi.detectSingleFace(rotatedImg, new faceapi.TinyFaceDetectorOptions({
+                            inputSize: 320,
+                            scoreThreshold: 0.2
+                        })).withFaceLandmarks().withFaceDescriptor();
+                        
+                        if (rotatedDet) {
+                            descriptors.push(rotatedDet.descriptor);
+                        }
+                        
+                        // Create a slightly scaled version
+                        const scaledImg = await createScaledImage(img, 0.98); // 98% scale
+                        const scaledDet = await faceapi.detectSingleFace(scaledImg, new faceapi.TinyFaceDetectorOptions({
+                            inputSize: 320,
+                            scoreThreshold: 0.2
+                        })).withFaceLandmarks().withFaceDescriptor();
+                        
+                        if (scaledDet) {
+                            descriptors.push(scaledDet.descriptor);
+                        }
+                    } catch (variationError) {
+                        console.warn(`Could not create variations for ${m.nama}:`, variationError);
+                    }
+                    
+                    return new faceapi.LabeledFaceDescriptors(m.nim, descriptors);
                 } else {
                     console.warn(`Failed to detect face for: ${m.nama} (${m.nim})`);
                 }
@@ -3411,9 +3499,9 @@ async function loadLabeledFaceDescriptors(){
         });
         const batchResults = await Promise.all(batchPromises);
         labeledFaceDescriptors.push(...batchResults.filter(Boolean));
-        // Optimized: shorter delay for faster loading
+        // ULTRA-FAST: minimal delay for maximum speed
         if (i + batchSize < members.length) {
-            await new Promise(resolve => setTimeout(resolve, 10));
+            await new Promise(resolve => setTimeout(resolve, 5));
         }
     }
     console.log(`Successfully loaded ${labeledFaceDescriptors.length} face descriptors`);
@@ -3433,9 +3521,11 @@ function adjustDetectionThreshold() {
 function startScan(mode){
     scanMode = mode;
     recognitionCompleted = false; // Reset recognition completion flag for new scan
+    resetRecognitionSystem(); // Reset system for new scan
     scanButtonsContainer.classList.add('hidden');
     videoContainer.classList.remove('hidden');
     btnBackScan.classList.remove('hidden');
+    qs('#btn-stop-detection').classList.remove('hidden');
     
     // Hide the two panel layout (text and image sections)
     const twoPanelLayout = qs('#two-panel-layout');
@@ -3467,11 +3557,22 @@ if (btnBackScan) {
     btnBackScan.addEventListener('click', ()=>{ resetPresensiPage(); });
 }
 
+// Add event listener for stop detection button
+const btnStopDetection = qs('#btn-stop-detection');
+if (btnStopDetection) {
+    btnStopDetection.addEventListener('click', ()=>{ 
+        stopDetection();
+        statusMessage('Deteksi dihentikan. Klik "Kembali" untuk keluar.', 'bg-yellow-100 text-yellow-700');
+    });
+}
+
 function resetPresensiPage(){
     stopVideo();
+    resetRecognitionSystem(); // Reset recognition system
     scanButtonsContainer.classList.remove('hidden');
     videoContainer.classList.add('hidden');
     btnBackScan.classList.add('hidden');
+    qs('#btn-stop-detection').classList.add('hidden');
     
     // Show the two panel layout (text and image sections) again
     const twoPanelLayout = qs('#two-panel-layout');
@@ -3543,7 +3644,7 @@ function startVideoInterval(){
     faceapi.matchDimensions(canvas, displaySize);
     // Advanced: Optimized interval for maximum performance and accuracy
     let lastDetectionTime = 0;
-    let detectionThrottle = 100; // Faster throttle for better responsiveness
+    let detectionThrottle = detectionConfig.detectionThrottle; // Use config value
     
     videoInterval = setInterval(async ()=>{
         const now = Date.now();
@@ -3551,31 +3652,29 @@ function startVideoInterval(){
             return; // Skip detection jika terlalu cepat
         }
         
-        // Stop detection if recognition is completed
-        if (recognitionCompleted) {
-            return;
-        }
+        // Continue detection for multi-person support
+        // Only stop if explicitly requested
         lastDetectionTime = now;
         
         try {
             // Optimasi: Performance monitoring
             const detectionStartTime = performance.now();
             
-            // Advanced: High-quality detection parameters for maximum accuracy
+            // Optimized: Fast detection parameters for maximum speed
             const detections = await faceapi.detectAllFaces(video, new faceapi.TinyFaceDetectorOptions({
                 inputSize: detectionConfig.inputSize,
                 scoreThreshold: detectionConfig.scoreThreshold
-            })).withFaceLandmarks().withFaceDescriptors().withFaceExpressions();
+            })).withFaceLandmarks().withFaceDescriptors();
             
-            // Filter detections by quality and size
+            // BALANCED: Smart filtering for accuracy + speed
             const qualityDetections = detections.filter(detection => {
                 const quality = assessFaceQuality(detection);
                 const box = detection.detection.box;
                 const area = box.width * box.height;
-                return quality >= 0.6 && area >= detectionConfig.minFaceSize * detectionConfig.minFaceSize;
+                return quality >= detectionConfig.qualityThreshold && area >= detectionConfig.minFaceSize * detectionConfig.minFaceSize;
             });
             
-            // Sort by quality and take only the best detection
+            // Sort by quality and take best detections
             qualityDetections.sort((a, b) => assessFaceQuality(b) - assessFaceQuality(a));
             const bestDetections = qualityDetections.slice(0, detectionConfig.maxFaces);
             
@@ -3612,11 +3711,9 @@ function startVideoInterval(){
                     const results = resized.map(d => faceMatcher.findBestMatch(d.descriptor));
                     results.forEach((result, i) => {
                         const box = resized[i].detection.box;
-                        const expressions = resized[i].expressions || {};
-                        const topExpression = getTopExpression(expressions);
                         const face = resized[i];
                         
-                        // Debug: Log detection results for troubleshooting
+                        // BALANCED: Informative logging for debugging
                         const quality = assessFaceQuality(face);
                         console.log(`Face ${i}: Label=${result.label}, Distance=${result.distance.toFixed(3)}, Quality=${quality.toFixed(3)}, Threshold=${detectionConfig.recognitionThreshold}`);
                         
@@ -3624,13 +3721,14 @@ function startVideoInterval(){
                         const shouldAccept = shouldAcceptDetection(result, face);
                         
                         const drawBox = new faceapi.draw.DrawBox(box, {
-                            label: `${result.toString()} (${topExpression}) ${shouldAccept ? '✓' : '?'}`
+                            label: `${result.toString()} ${shouldAccept ? '✓' : '?'}`
                         });
                         drawBox.draw(canvas);
                         
                         // Advanced: Only accept high-quality, consistent detections
                         if (shouldAccept) {
-                            handleRecognition(result.label, topExpression);
+                            // Recognition will be handled by instant processing or queue system
+                            console.log(`Face ${i}: Recognition triggered for ${result.label}`);
                         }
                     });
                 } else {
@@ -3649,7 +3747,7 @@ function startVideoInterval(){
                 statusMessage('Error deteksi wajah. Coba refresh halaman.', 'bg-red-100 text-red-700');
             }
         }
-    }, 500);
+    }, 30); // BALANCED interval for speed + accuracy
 }
 
 if (video) {
@@ -3667,7 +3765,7 @@ function getTopExpression(expressions){
     return map[top] || 'Biasa';
 }
 
-// Advanced: Face quality assessment
+// Advanced: Enhanced face quality assessment with detailed analysis
 function assessFaceQuality(face) {
     if (!face || !face.detection) return 0;
     
@@ -3675,17 +3773,21 @@ function assessFaceQuality(face) {
     const area = box.width * box.height;
     const aspectRatio = box.width / box.height;
     
-    // Quality factors
+    // Quality factors with detailed analysis
     let quality = 1.0;
     
-    // Size factor (prefer larger faces)
-    if (area < 10000) quality *= 0.7;
-    else if (area > 50000) quality *= 1.2;
+    // 1. Size factor (prefer larger faces for better detail)
+    if (area < 15000) quality *= 0.6; // Too small
+    else if (area < 25000) quality *= 0.8; // Small but acceptable
+    else if (area > 80000) quality *= 1.3; // Large and detailed
+    else if (area > 50000) quality *= 1.1; // Good size
     
-    // Aspect ratio factor (prefer square-ish faces)
-    if (aspectRatio < 0.7 || aspectRatio > 1.4) quality *= 0.8;
+    // 2. Aspect ratio factor (prefer natural face proportions)
+    if (aspectRatio < 0.6 || aspectRatio > 1.6) quality *= 0.5; // Too distorted
+    else if (aspectRatio < 0.7 || aspectRatio > 1.4) quality *= 0.8; // Slightly distorted
+    else if (aspectRatio >= 0.8 && aspectRatio <= 1.2) quality *= 1.2; // Good proportions
     
-    // Position factor (prefer centered faces)
+    // 3. Position factor (prefer centered faces)
     const centerX = box.x + box.width / 2;
     const centerY = box.y + box.height / 2;
     const canvasCenterX = 320; // Assuming 640px width
@@ -3693,98 +3795,175 @@ function assessFaceQuality(face) {
     const distanceFromCenter = Math.sqrt(
         Math.pow(centerX - canvasCenterX, 2) + Math.pow(centerY - canvasCenterY, 2)
     );
-    if (distanceFromCenter > 100) quality *= 0.9;
+    if (distanceFromCenter > 150) quality *= 0.7; // Too far from center
+    else if (distanceFromCenter > 100) quality *= 0.9; // Slightly off-center
+    else if (distanceFromCenter < 50) quality *= 1.1; // Well centered
     
-    return Math.max(0, Math.min(1, quality));
+    // 4. Landmark quality factor (if available)
+    if (face.landmarks) {
+        const landmarks = face.landmarks.positions;
+        if (landmarks && landmarks.length >= 68) {
+            // Check for landmark consistency and symmetry
+            const leftEye = landmarks[36];
+            const rightEye = landmarks[45];
+            const nose = landmarks[30];
+            const leftMouth = landmarks[48];
+            const rightMouth = landmarks[54];
+            
+            if (leftEye && rightEye && nose && leftMouth && rightMouth) {
+                // Check eye symmetry
+                const eyeDistance = Math.abs(leftEye.x - rightEye.x);
+                const eyeHeightDiff = Math.abs(leftEye.y - rightEye.y);
+                if (eyeHeightDiff < eyeDistance * 0.1) quality *= 1.1; // Good eye alignment
+                else if (eyeHeightDiff > eyeDistance * 0.2) quality *= 0.8; // Poor eye alignment
+                
+                // Check face symmetry
+                const faceCenterX = (leftEye.x + rightEye.x) / 2;
+                const noseCenterDiff = Math.abs(nose.x - faceCenterX);
+                if (noseCenterDiff < box.width * 0.1) quality *= 1.1; // Good symmetry
+                else if (noseCenterDiff > box.width * 0.2) quality *= 0.9; // Poor symmetry
+            }
+        }
+    }
+    
+    // 5. Expression quality factor (if available)
+    if (face.expressions) {
+        const expressions = face.expressions;
+        const maxExpression = Math.max(...Object.values(expressions));
+        if (maxExpression > 0.8) quality *= 1.1; // Clear expression
+        else if (maxExpression < 0.3) quality *= 0.9; // Unclear expression
+    }
+    
+    // 6. Detection confidence factor
+    if (face.detection.score) {
+        if (face.detection.score > 0.9) quality *= 1.2; // High confidence
+        else if (face.detection.score > 0.8) quality *= 1.1; // Good confidence
+        else if (face.detection.score < 0.6) quality *= 0.8; // Low confidence
+    }
+    
+    return Math.max(0, Math.min(1.5, quality)); // Allow quality > 1 for excellent faces
 }
 
 // Advanced: Multiple detection attempts for better accuracy
 let detectionAttempts = 0;
-let lastSuccessfulDetection = null;
+// Multi-person detection queue system
 let detectionHistory = [];
+let recognitionQueue = [];
+let isProcessingQueue = false;
+let lastSuccessfulDetection = null;
 
 function shouldAcceptDetection(result, face) {
     if (!result || result.label === 'unknown') return false;
     
-    // Check confidence threshold
+    // BALANCED: Essential checks for accuracy
     if (result.distance > detectionConfig.recognitionThreshold) return false;
     
-    // Check face quality
-    const quality = assessFaceQuality(face);
-    if (quality < 0.6) return false;
+    // Smart quality check - only check if distance is borderline
+    if (result.distance > 0.35) {
+        const quality = assessFaceQuality(face);
+        if (quality < detectionConfig.qualityThreshold) return false;
+    }
     
-    // Check detection history for consistency
-    detectionHistory.push({
-        label: result.label,
-        distance: result.distance,
-        quality: quality,
-        timestamp: Date.now()
+    // Check if this person is already being processed
+    if (isProcessingRecognition) return false;
+    
+    // INSTANT RECOGNITION: Process immediately on first valid detection
+    addToRecognitionQueue(result.label, face);
+    return true;
+}
+
+function addToRecognitionQueue(label, face) {
+    // Check if already in queue
+    if (recognitionQueue.some(item => item.label === label)) return;
+    
+    // INSTANT PROCESSING: If no one is being processed, process immediately
+    if (!isProcessingRecognition && !isProcessingQueue) {
+        console.log(`INSTANT PROCESSING for ${label}`);
+        handleRecognition(label, 'Biasa'); // Use default expression for speed
+        return;
+    }
+    
+    // Otherwise add to queue
+    recognitionQueue.push({
+        label: label,
+        face: face,
+        timestamp: Date.now(),
+        priority: recognitionQueue.length // First come, first served
     });
     
-    // Keep only recent history (last 5 seconds)
-    detectionHistory = detectionHistory.filter(h => Date.now() - h.timestamp < 5000);
+    console.log(`Added ${label} to recognition queue. Queue length: ${recognitionQueue.length}`);
     
-    // Count recent detections of the same person
-    const recentDetections = detectionHistory.filter(h => h.label === result.label);
-    if (recentDetections.length < 2) return false; // Need at least 2 consistent detections
+    // Process queue if not already processing
+    if (!isProcessingQueue) {
+        processRecognitionQueue();
+    }
+}
+
+async function processRecognitionQueue() {
+    if (isProcessingQueue || recognitionQueue.length === 0) return;
     
-    // Check if this person was detected recently
-    const timeSinceLastDetection = lastSuccessfulDetection ? 
-        Date.now() - lastSuccessfulDetection.timestamp : Infinity;
+    isProcessingQueue = true;
     
-    // If same person detected within 3 seconds, accept immediately
-    if (lastSuccessfulDetection && 
-        lastSuccessfulDetection.label === result.label && 
-        timeSinceLastDetection < 3000) {
-        return true;
+    while (recognitionQueue.length > 0) {
+        const item = recognitionQueue.shift();
+        console.log(`Processing recognition for: ${item.label}`);
+        
+        try {
+            await handleRecognition(item.label, 'Biasa'); // Use default expression for speed
+            
+            // BALANCED: Reasonable delay for next person
+            await new Promise(resolve => setTimeout(resolve, 200));
+        } catch (error) {
+            console.error(`Error processing recognition for ${item.label}:`, error);
+        }
     }
     
-    // For new person, need more consistent detections
-    if (recentDetections.length >= 3) {
-        lastSuccessfulDetection = {
-            label: result.label,
-            timestamp: Date.now()
-        };
-        return true;
-    }
-    
-    return false;
+    isProcessingQueue = false;
 }
 
 let isProcessingRecognition = false;
 let recognitionCompleted = false; // Flag to stop detection after successful recognition
 
 async function handleRecognition(nim, topExpression){
-    if(!scanMode || isProcessingRecognition || recognitionCompleted) return;
+    if(!scanMode || isProcessingRecognition) return;
     isProcessingRecognition = true;
     
     console.log('Recognition triggered:', { nim, topExpression, scanMode });
     
-    // Take screenshot before sending data
-    let screenshot = null;
-    try {
-        // Wait a bit for video to be ready
-        await new Promise(resolve => setTimeout(resolve, 100));
+    // ULTRA-FAST: Take screenshot and get geolocation in parallel
+    const [screenshot, position] = await Promise.all([
+        // Screenshot
+        new Promise((resolve) => {
+            try {
+                if (video && canvas && video.videoWidth > 0 && video.videoHeight > 0) {
+                    console.log('Taking screenshot...', { videoWidth: video.videoWidth, videoHeight: video.videoHeight });
+                    const ctx = canvas.getContext('2d');
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                    const screenshot = canvas.toDataURL('image/jpeg', 0.7); // Lower quality for speed
+                    console.log('Screenshot taken successfully, size:', screenshot.length);
+                    resolve(screenshot);
+                } else {
+                    console.warn('Video not ready for screenshot');
+                    resolve(null);
+                }
+            } catch (screenshotError) {
+                console.warn('Failed to take screenshot:', screenshotError);
+                resolve(null);
+            }
+        }),
         
-        if (video && canvas && video.videoWidth > 0 && video.videoHeight > 0) {
-            console.log('Taking screenshot...', { videoWidth: video.videoWidth, videoHeight: video.videoHeight });
-            const ctx = canvas.getContext('2d');
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            screenshot = canvas.toDataURL('image/jpeg', 0.8);
-            console.log('Screenshot taken successfully, size:', screenshot.length);
-        } else {
-            console.warn('Video not ready for screenshot:', { 
-                video: !!video, 
-                canvas: !!canvas, 
-                videoWidth: video?.videoWidth, 
-                videoHeight: video?.videoHeight 
-            });
-        }
-    } catch (screenshotError) {
-        console.warn('Failed to take screenshot:', screenshotError);
-    }
+        // Geolocation
+        new Promise((resolve) => {
+            if (!navigator.geolocation) return resolve(null);
+            navigator.geolocation.getCurrentPosition(
+                pos => resolve(pos), 
+                err => resolve(null), 
+                { enableHighAccuracy: false, timeout: 3000, maximumAge: 300000 } // Faster geolocation
+            );
+        })
+    ]);
     
     // Validate screenshot before proceeding
     if (!screenshot || screenshot.length < 1000) {
@@ -3793,19 +3972,12 @@ async function handleRecognition(nim, topExpression){
         return;
     }
     
-    // Get geolocation
-    const getPosition = () => new Promise((resolve, reject) => {
-        if (!navigator.geolocation) return resolve(null);
-        navigator.geolocation.getCurrentPosition(pos => resolve(pos), err => resolve(null), { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 });
-    });
+    // ULTRA-FAST: Use position from parallel processing
     let lat=null, lng=null, lokasi=null;
-    try {
-        const pos = await getPosition();
-        if (pos) {
-            lat = pos.coords.latitude;
-            lng = pos.coords.longitude;
-        }
-    } catch(_) {}
+    if (position) {
+        lat = position.coords.latitude;
+        lng = position.coords.longitude;
+    }
     // Reverse geocode via Nominatim (no key)
     async function reverseGeocode(lat, lng){
         try{
@@ -3859,13 +4031,8 @@ async function handleRecognition(nim, topExpression){
             statusMessage(r.message, r.statusClass || 'bg-green-100 text-green-700');
             // Update log after successful attendance
             updateLogAfterAttendance(nim, scanMode);
-            // Stop detection after successful recognition
-            recognitionCompleted = true;
-            if(videoInterval) {
-                clearInterval(videoInterval);
-                videoInterval = null;
-            }
-            //stopVideoAfterRecognition();
+            // Continue detection for multi-person support
+            console.log(`Successfully processed attendance for ${nim}. Continuing detection for other people.`);
         } else {
             statusMessage(r.message || 'Gagal menyimpan presensi', r.statusClass || 'bg-yellow-100 text-yellow-700');
         }
@@ -3879,9 +4046,10 @@ async function handleRecognition(nim, topExpression){
         }
         statusMessage(errorMessage, 'bg-red-100 text-red-700');
     } finally {
+        // BALANCED reset for speed + accuracy
         setTimeout(() => {
             isProcessingRecognition = false;
-        }, 2000);
+        }, 100);
     }
 }
 
@@ -3899,6 +4067,35 @@ function stopVideoAfterRecognition(){
     setTimeout(()=>{
         if(isCameraActive) resetPresensiPage();
     }, delayDuration);
+}
+
+// Function to reset recognition system for multi-person support
+function resetRecognitionSystem() {
+    // Clear detection history
+    detectionHistory = [];
+    
+    // Clear recognition queue
+    recognitionQueue = [];
+    
+    // Reset processing flags
+    isProcessingRecognition = false;
+    isProcessingQueue = false;
+    recognitionCompleted = false;
+    
+    // Reset last successful detection
+    lastSuccessfulDetection = null;
+    
+    console.log('Recognition system reset for multi-person support');
+}
+
+// Function to manually stop detection (for admin use)
+function stopDetection() {
+    if(videoInterval) {
+        clearInterval(videoInterval);
+        videoInterval = null;
+    }
+    resetRecognitionSystem();
+    console.log('Face detection stopped manually');
 }
 
 // Initialize face recognition when page loads
