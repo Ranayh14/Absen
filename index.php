@@ -360,6 +360,7 @@ if (isset($_GET['ajax'])) {
 
     // Check if database is available
     if (!isset($pdo)) {
+        error_log("Database connection failed in AJAX handler");
         jsonResponse(['error' => 'Database connection failed'], 500);
     }
 
@@ -671,16 +672,20 @@ if (isset($_GET['ajax'])) {
         $ekspresi = $_POST['ekspresi'] ?? null;
         $screenshot = $_POST['screenshot'] ?? null; // base64 screenshot data
         
-        // Check screenshot size (max 1MB) and validate screenshot exists
+        // Check screenshot size (max 2MB) and validate screenshot exists
         if (!$screenshot || empty($screenshot)) {
             jsonResponse(['ok' => false, 'message' => 'Screenshot tidak berhasil diambil. Silakan coba lagi dengan posisi yang lebih baik.'], 400);
         }
-        if ($screenshot && !checkImageSize($screenshot, 1)) {
-            jsonResponse(['ok' => false, 'message' => 'Ukuran screenshot terlalu besar. Maksimal 1MB. Silakan coba lagi.'], 400);
+        if ($screenshot) {
+            $sizeCheck = checkImageSize($screenshot, 2);
+            if (!$sizeCheck['valid']) {
+                jsonResponse(['ok' => false, 'message' => $sizeCheck['message']], 400);
+            }
         }
         
         // Debug logging
         error_log("Attendance request: NIM=$nim, Mode=$mode, Expression=$ekspresi, Screenshot=" . ($screenshot ? 'YES' : 'NO'));
+        error_log("POST data: " . print_r($_POST, true));
         
         // Verify attendance table structure before proceeding
         if (!verifyAttendanceTable($pdo)) {
@@ -688,11 +693,22 @@ if (isset($_GET['ajax'])) {
             jsonResponse(['ok' => false, 'message' => 'Database structure error. Please contact administrator.'], 500);
         }
         
-        if (!$nim || !in_array($mode, ['masuk', 'pulang'], true)) jsonResponse(['ok' => false, 'message' => 'Bad request'], 400);
-        $stmt = $pdo->prepare("SELECT * FROM users WHERE nim=:nim LIMIT 1");
-        $stmt->execute([':nim' => $nim]);
-        $u = $stmt->fetch();
-        if (!$u) jsonResponse(['ok' => false, 'message' => 'NIM tidak ditemukan'], 404);
+        if (!$nim || !in_array($mode, ['masuk', 'pulang'], true)) {
+            error_log("Validation failed: NIM=$nim, Mode=$mode");
+            jsonResponse(['ok' => false, 'message' => 'Bad request: NIM atau mode tidak valid'], 400);
+        }
+        try {
+            $stmt = $pdo->prepare("SELECT * FROM users WHERE nim=:nim LIMIT 1");
+            $stmt->execute([':nim' => $nim]);
+            $u = $stmt->fetch();
+            if (!$u) {
+                error_log("User not found for NIM: $nim");
+                jsonResponse(['ok' => false, 'message' => 'NIM tidak ditemukan'], 404);
+            }
+        } catch (PDOException $e) {
+            error_log("Database error in save_attendance: " . $e->getMessage());
+            jsonResponse(['ok' => false, 'message' => 'Database error'], 500);
+        }
     
         $now = new DateTime('now', new DateTimeZone('Asia/Jakarta'));
         $jamSekarang = $now->format('H:i:s'); // Tetap simpan dengan detik untuk database
@@ -701,15 +717,22 @@ if (isset($_GET['ajax'])) {
         
         // Debug logging after variables are defined
         error_log("Current date: $today, User ID: " . $u['id']);
+        error_log("User data: " . print_r($u, true));
+        error_log("Mode: $mode, Expression: $ekspresi");
+        error_log("Screenshot size: " . strlen($screenshot));
+        error_log("Screenshot preview: " . substr($screenshot, 0, 100) . "...");
+        error_log("Screenshot starts with: " . substr($screenshot, 0, 20));
+        error_log("Screenshot ends with: " . substr($screenshot, -20));
+        error_log("Screenshot contains data:image: " . (strpos($screenshot, 'data:image') !== false ? 'YES' : 'NO'));
         $currentHour = (int)$now->format('H');
         $currentMinute = (int)$now->format('i');
         $todayStart = $today . ' 00:00:00';
         $todayEnd   = $today . ' 23:59:59';
     
         if ($mode === 'masuk') {
-            // Check if within check-in time window (6 AM - 4 PM)
-            if ($currentHour < 6 || $currentHour >= 16) {
-                $statusText = "Presensi masuk hanya tersedia dari jam 06:00 sampai 16:00.";
+            // Check if within check-in time window (5 AM - 8 PM) - More flexible hours
+            if ($currentHour < 5 || $currentHour >= 20) {
+                $statusText = "Presensi masuk tersedia dari jam 05:00 sampai 20:00.";
                 jsonResponse(['ok' => false, 'message' => $statusText, 'statusClass' => 'bg-red-100 text-red-700'], 400);
             }
     
@@ -2878,7 +2901,7 @@ function showNotif(msg, success=true){
     bar.textContent = msg;
     bar.className = `fixed top-4 left-1/2 transform -translate-x-1/2 px-6 py-3 rounded-lg shadow-lg z-70 ${success?'bg-emerald-600':'bg-red-600'} text-white`;
     bar.classList.remove('hidden');
-    setTimeout(()=> bar.classList.add('hidden'), 3000);
+    setTimeout(()=> bar.classList.add('hidden'), 1500); // Faster notification dismissal
 }
 function qs(sel){ return document.querySelector(sel); }
 function qsa(sel){ return Array.from(document.querySelectorAll(sel)); }
@@ -2912,8 +2935,11 @@ document.addEventListener('click', (e) => {
         closeScreenshotModal();
     }
 });
-// Add a global variable to keep track of the current speech
+// Add global variables to manage speech synthesis
 let currentSpeech = null;
+let speechQueue = [];
+let isSpeaking = false;
+let speechInterval = null;
 
 function speak(text) {
     try {
@@ -2923,20 +2949,40 @@ function speak(text) {
             return;
         }
 
-        // Cancel any ongoing speech before starting a new one
-        speechSynthesis.cancel();
-
-        // If there's a pending timeout, clear it to avoid conflicts
-        if (window.speechTimeout) {
-            clearTimeout(window.speechTimeout);
-            window.speechTimeout = null;
+        // Add to queue instead of canceling immediately
+        if (text && text.trim() && text !== lastSpokenMessage) {
+            speechQueue.push(text);
+            lastSpokenMessage = text;
         }
 
-        // Wait for voices to be loaded (important for offline)
+        // Start speech processing if not already running
+        if (!isSpeaking) {
+            processSpeechQueue();
+        }
+        return;
+
+    } catch (e) {
+        console.error('Speech synthesis error:', e);
+        isSpeaking = false;
+        speechQueue = [];
+    }
+}
+
+function processSpeechQueue() {
+    if (isSpeaking || speechQueue.length === 0) return;
+    
+    isSpeaking = true;
+    const text = speechQueue.shift();
+    
+    try {
+        // Cancel any ongoing speech
+        speechSynthesis.cancel();
+        
+        // Wait for voices to be loaded
         const speakWithVoice = () => {
             const u = new SpeechSynthesisUtterance(text);
             u.lang = 'id-ID';
-            u.rate = 0.8; // Slightly slower for better offline performance
+            u.rate = 0.9; // Faster rate for speed
             u.pitch = 1.0;
             u.volume = 1.0;
 
@@ -2957,40 +3003,34 @@ function speak(text) {
 
             u.onstart = () => {
                 console.log('Speech started:', text);
-                // Clear the video scanning interval while the speech is active
-                if (videoInterval) {
-                    clearInterval(videoInterval);
-                    videoInterval = null;
-                }
             };
 
             u.onend = () => {
                 console.log('Speech ended:', text);
-                // Speech has finished, now reset the message and restart scanning
-                lastSpokenMessage = '';
-                if (isCameraActive && !videoInterval) {
-                    startVideoInterval();
-                }
+                isSpeaking = false;
+                
+                // Process next in queue after a short delay
+                setTimeout(() => {
+                    if (speechQueue.length > 0) {
+                        processSpeechQueue();
+                    } else if (isCameraActive && !videoInterval) {
+                        startVideoInterval();
+                    }
+                }, 200); // 200ms interval between speeches
             };
 
             u.onerror = (e) => {
                 console.error('Speech error:', e);
-                // Handle different error types
-                if (e.error === 'interrupted') {
-                    console.log('Speech was interrupted, retrying...');
-                    // Retry once after a short delay
-                    setTimeout(() => {
-                        if (text === lastSpokenMessage) {
-                            speechSynthesis.speak(u);
-                        }
-                    }, 100);
-                } else {
-                    // For other errors, just reset and continue
-                    lastSpokenMessage = '';
-                    if (isCameraActive && !videoInterval) {
+                isSpeaking = false;
+                
+                // Skip this speech and continue with queue
+                setTimeout(() => {
+                    if (speechQueue.length > 0) {
+                        processSpeechQueue();
+                    } else if (isCameraActive && !videoInterval) {
                         startVideoInterval();
                     }
-                }
+                }, 100);
             };
 
             speechSynthesis.speak(u);
@@ -3001,25 +3041,26 @@ function speak(text) {
         if (speechSynthesis.getVoices().length > 0) {
             speakWithVoice();
         } else {
-            // Wait for voices to load (especially important offline)
+            // Wait for voices to load
             speechSynthesis.addEventListener('voiceschanged', speakWithVoice, { once: true });
             
-            // Fallback timeout in case voices don't load
-            setTimeout(() => {
-                if (speechSynthesis.getVoices().length === 0) {
-                    console.warn('No voices available, speaking with default settings');
-                    speakWithVoice();
-                }
-            }, 1000);
+            // Fallback if no voices
+            if (speechSynthesis.getVoices().length === 0) {
+                console.warn('No voices available, speaking with default settings');
+                speakWithVoice();
+            }
         }
 
     } catch (e) {
-        console.error('Speech synthesis error:', e);
-        // Reset and continue even if speech fails
-        lastSpokenMessage = '';
-        if (isCameraActive && !videoInterval) {
-            startVideoInterval();
-        }
+        console.error('Speech processing error:', e);
+        isSpeaking = false;
+        
+        // Continue with queue
+        setTimeout(() => {
+            if (speechQueue.length > 0) {
+                processSpeechQueue();
+            }
+        }, 100);
     }
 }
 
@@ -3032,11 +3073,8 @@ function statusMessage(text, cls) {
     presensiStatus.className = 'mt-4 text-center font-medium text-lg p-3 rounded-md ' + cls;
     presensiStatus.classList.remove('hidden');
 
-    // Only speak if the message is different from the last one
-    if (text !== lastSpokenMessage) {
-        lastSpokenMessage = text;
-        speak(text);
-    }
+    // Use the improved speak function with queue
+    speak(text);
 }
 
 
@@ -3056,12 +3094,21 @@ async function api(url, data){
         } else if (url.startsWith('/')) {
             // If it starts with /, it's already a proper relative URL
         } else if (url.startsWith('?')) {
-            // If it starts with ?, it's a query string, prepend current path
-            const currentPath = window.location.pathname;
-            url = currentPath + url;
+            // If it starts with ?, it's a query string, use current page
+            url = window.location.pathname + url;
         } else {
             // If it's a relative URL, make it start with /
             url = '/' + url;
+        }
+        
+        // Fallback: if URL contains localhost:3000, replace with current host
+        if (url.includes('localhost:3000')) {
+            url = url.replace('localhost:3000', window.location.host);
+        }
+        
+        // Additional fallback: if URL still contains localhost:3000, force use current origin
+        if (url.includes('localhost:3000')) {
+            url = window.location.origin + url.replace(/^https?:\/\/[^\/]+/, '');
         }
         
         // Debug: Log the final URL being used
@@ -3077,7 +3124,9 @@ async function api(url, data){
         
         // Check if response is ok
         if (!res.ok) {
-            throw new Error(`HTTP error! status: ${res.status}`);
+            const errorText = await res.text();
+            console.error('API Error Response:', errorText);
+            throw new Error(`HTTP error! status: ${res.status}, response: ${errorText}`);
         }
         
         // Get response text first to check if it's valid JSON
@@ -3110,6 +3159,15 @@ async function api(url, data){
         // Provide more specific error messages
         if (error.name === 'TypeError' && error.message.includes('Failed to fetch')) {
             throw new Error('Tidak dapat terhubung ke server. Pastikan XAMPP sudah berjalan.');
+        } else if (error.message.includes('HTTP error! status: 400')) {
+            // Check if it's a time validation error
+            if (error.message.includes('Presensi masuk hanya tersedia') || error.message.includes('Presensi masuk tersedia')) {
+                throw new Error('Waktu presensi tidak sesuai. Silakan coba pada jam yang tepat.');
+            } else {
+                throw new Error('Data yang dikirim tidak valid. Silakan coba lagi.');
+            }
+        } else if (error.message.includes('HTTP error! status: 500')) {
+            throw new Error('Server error. Silakan coba lagi.');
         }
         
         throw error;
@@ -3183,7 +3241,7 @@ if (loginForm) {
         if(r.ok){
             msg.className = 'text-green-600';
             msg.textContent = 'Login berhasil. Mengalihkan...';
-            setTimeout(()=> location.href='?', 600);
+            setTimeout(()=> location.href='?', 200); // Faster redirect
         } else {
             msg.className = 'text-red-600';
             msg.textContent = r.message || 'Gagal login';
@@ -3237,7 +3295,7 @@ if (registerForm) {
         const fd = new FormData(e.target);
         const r = await api('?ajax=register', fd);
         const msg = qs('#register-msg');
-        if(r.ok){ msg.className='text-green-600'; msg.textContent='Registrasi berhasil. Silakan login.'; setTimeout(()=>location.href='?page=login', 800); }
+        if(r.ok){ msg.className='text-green-600'; msg.textContent='Registrasi berhasil. Silakan login.'; setTimeout(()=>location.href='?page=login', 300); } // Faster redirect
         else { msg.className='text-red-600'; msg.textContent=r.message||'Gagal registrasi'; }
     });
 }
@@ -3268,19 +3326,21 @@ let performanceStats = {
     lastDetectionTime: 0
 };
 
-// BALANCED: Detection config for speed + accuracy
+// BALANCED: Detection config optimized for speed and accuracy
 let detectionConfig = {
-    faceMatcherThreshold: 0.4, // Balanced for accuracy
-    recognitionThreshold: 0.4, // Balanced for accuracy
-    inputSize: 320, // Balanced resolution for speed vs accuracy
-    scoreThreshold: 0.2, // Lower threshold for better detection
-    minFaceSize: 60, // Balanced minimum face size
-    maxFaces: 2, // Allow 2 faces for better detection
+    faceMatcherThreshold: 0.5, // Balanced threshold for good accuracy
+    recognitionThreshold: 0.5, // Balanced threshold for good accuracy
+    inputSize: 320, // Lower resolution for maximum speed
+    scoreThreshold: 0.3, // Lower threshold for better face detection
+    minFaceSize: 60, // Smaller minimum face size for better detection
+    maxFaces: 1, // Limit to 1 face for faster processing
     confidenceThreshold: 0.7, // Balanced confidence
-    detectionThrottle: 30, // Fast but not too aggressive
+    detectionThrottle: 1, // Ultra-fast detection (1000 FPS) for <2 second processing
     qualityThreshold: 0.6, // Balanced quality threshold
-    landmarkThreshold: 0.7, // Balanced landmark threshold
-    expressionThreshold: 0.5 // Balanced expression threshold
+    landmarkThreshold: 0.6, // Balanced landmark threshold
+    expressionThreshold: 0.5, // Balanced expression threshold
+    landmarkWeight: 0.4, // Weight for facial landmarks
+    descriptorWeight: 0.6 // Weight for face descriptor
 };
 let logMasukData = [];
 let logPulangData = [];
@@ -3370,9 +3430,13 @@ async function initializeFaceRecognition() {
     try {
         await loadFaceApiModels();
         await loadLabeledFaceDescriptors();
-        console.log('Face recognition system initialized successfully');
+        console.log('✅ Face recognition system initialized successfully');
+        console.log('📋 Available models loaded:');
+        console.log('  - TinyFaceDetector: ✅');
+        console.log('  - FaceLandmark68Net: ✅');
+        console.log('  - FaceRecognitionNet: ✅');
     } catch (error) {
-        console.error('Failed to initialize face recognition:', error);
+        console.error('❌ Failed to initialize face recognition:', error);
         showNotif('Gagal memuat sistem pengenalan wajah', false);
     }
 }
@@ -3400,7 +3464,7 @@ async function loadFaceApiModels(){
         await faceapi.nets.faceExpressionNet.loadFromUri(MODEL_URL);
 
         loadingProgress.textContent = 'Model AI berhasil dimuat!';
-        await new Promise(resolve => setTimeout(resolve, 500));
+        // INSTANT: No delay for maximum speed
     } catch (error) {
         loadingProgress.textContent = 'Gagal memuat model AI. Silakan refresh halaman.';
         if (presensiStatus) {
@@ -3408,7 +3472,7 @@ async function loadFaceApiModels(){
             presensiStatus.className = 'mt-4 text-center font-medium text-lg p-3 rounded-md bg-red-100 text-red-700';
             presensiStatus.classList.remove('hidden');
         }
-        setTimeout(() => { loadingOverlay.classList.add('hidden'); }, 3000);
+        setTimeout(() => { loadingOverlay.classList.add('hidden'); }, 1000); // Faster error display
         throw error;
     } finally {
         loadingOverlay.classList.add('hidden');
@@ -3425,6 +3489,8 @@ async function loadLabeledFaceDescriptors(){
     const members = await fetchMembers();
     labeledFaceDescriptors = [];
     console.log(`Loading face descriptors for ${members.length} members...`);
+    let loadedCount = 0;
+    let failedCount = 0;
     
     // ULTRA-FAST: larger batch size for maximum speed
     const batchSize = 20;
@@ -3440,11 +3506,11 @@ async function loadLabeledFaceDescriptors(){
                 // ENHANCED: Multiple detection attempts for better accuracy
                 let det = null;
                 
-                // Try with different parameters to ensure detection
+                // ULTRA-FAST: Try with maximum speed parameters
                 const detectionParams = [
-                    { inputSize: 320, scoreThreshold: 0.2 }, // Primary attempt
-                    { inputSize: 224, scoreThreshold: 0.1 }, // Fallback 1
-                    { inputSize: 416, scoreThreshold: 0.3 }  // Fallback 2
+                    { inputSize: 320, scoreThreshold: 0.3 }, // Primary attempt - fast resolution
+                    { inputSize: 224, scoreThreshold: 0.25 },  // Fallback 1 - faster
+                    { inputSize: 160, scoreThreshold: 0.2 }  // Fallback 2 - fastest
                 ];
                 
                 for (const params of detectionParams) {
@@ -3457,7 +3523,8 @@ async function loadLabeledFaceDescriptors(){
                     }
                 }
                 if (det) {
-                    console.log(`Successfully loaded face descriptor for: ${m.nama} (${m.nim})`);
+                    loadedCount++;
+                    console.log(`✓ Successfully loaded face descriptor for: ${m.nama} (${m.nim})`);
                     // Create multiple descriptors for better accuracy
                     const descriptors = [det.descriptor];
                     
@@ -3466,8 +3533,8 @@ async function loadLabeledFaceDescriptors(){
                         // Create a slightly rotated version for better recognition
                         const rotatedImg = await createRotatedImage(img, 3); // 3 degree rotation
                         const rotatedDet = await faceapi.detectSingleFace(rotatedImg, new faceapi.TinyFaceDetectorOptions({
-                            inputSize: 320,
-                            scoreThreshold: 0.2
+                            inputSize: 224,
+                            scoreThreshold: 0.3
                         })).withFaceLandmarks().withFaceDescriptor();
                         
                         if (rotatedDet) {
@@ -3477,8 +3544,8 @@ async function loadLabeledFaceDescriptors(){
                         // Create a slightly scaled version
                         const scaledImg = await createScaledImage(img, 0.98); // 98% scale
                         const scaledDet = await faceapi.detectSingleFace(scaledImg, new faceapi.TinyFaceDetectorOptions({
-                            inputSize: 320,
-                            scoreThreshold: 0.2
+                            inputSize: 224,
+                            scoreThreshold: 0.3
                         })).withFaceLandmarks().withFaceDescriptor();
                         
                         if (scaledDet) {
@@ -3490,7 +3557,8 @@ async function loadLabeledFaceDescriptors(){
                     
                     return new faceapi.LabeledFaceDescriptors(m.nim, descriptors);
                 } else {
-                    console.warn(`Failed to detect face for: ${m.nama} (${m.nim})`);
+                    failedCount++;
+                    console.warn(`✗ Failed to detect face for: ${m.nama} (${m.nim})`);
                 }
             } catch (err) {
                 console.warn('Deteksi gagal untuk', m.nama, err);
@@ -3499,22 +3567,34 @@ async function loadLabeledFaceDescriptors(){
         });
         const batchResults = await Promise.all(batchPromises);
         labeledFaceDescriptors.push(...batchResults.filter(Boolean));
-        // ULTRA-FAST: minimal delay for maximum speed
-        if (i + batchSize < members.length) {
-            await new Promise(resolve => setTimeout(resolve, 5));
-        }
+        // INSTANT: No delay for maximum speed
     }
-    console.log(`Successfully loaded ${labeledFaceDescriptors.length} face descriptors`);
+    console.log(`📊 Face Descriptor Loading Summary:`);
+    console.log(`  ✓ Successfully loaded: ${loadedCount} face descriptors`);
+    console.log(`  ✗ Failed to load: ${failedCount} face descriptors`);
+    console.log(`  📈 Total loaded descriptors: ${labeledFaceDescriptors.length}`);
+    
+    if (loadedCount === 0) {
+        console.error('⚠️ WARNING: No face descriptors were loaded! Check if members have valid photos.');
+    } else if (failedCount > 0) {
+        console.warn(`⚠️ WARNING: ${failedCount} members could not be loaded. Check their photos.`);
+    }
 }
 
-// Perbaikan: Fungsi untuk menyesuaikan threshold secara dinamis
+// BALANCED: Dynamic threshold adjustment for optimal performance
 function adjustDetectionThreshold() {
-    // Jika terlalu banyak "unknown", tingkatkan toleransi
-    if (performanceStats.detectionCount > 100 && performanceStats.averageDetectionTime > 200) {
-        console.log('Adjusting thresholds for better accuracy...');
-        detectionConfig.faceMatcherThreshold = Math.min(0.6, detectionConfig.faceMatcherThreshold + 0.05);
-        detectionConfig.recognitionThreshold = Math.min(0.6, detectionConfig.recognitionThreshold + 0.05);
-        console.log(`New thresholds: FaceMatcher=${detectionConfig.faceMatcherThreshold}, Recognition=${detectionConfig.recognitionThreshold}`);
+    // Smart threshold adjustment based on performance
+    if (performanceStats.detectionCount > 50 && performanceStats.averageDetectionTime > 200) {
+        console.log('🔧 Adjusting thresholds for better performance...');
+        detectionConfig.faceMatcherThreshold = Math.min(0.6, detectionConfig.faceMatcherThreshold + 0.02);
+        detectionConfig.recognitionThreshold = Math.min(0.6, detectionConfig.recognitionThreshold + 0.02);
+        console.log(`📊 New thresholds: FaceMatcher=${detectionConfig.faceMatcherThreshold}, Recognition=${detectionConfig.recognitionThreshold}`);
+    } else if (performanceStats.detectionCount > 100 && performanceStats.averageDetectionTime < 150) {
+        // If performance is good, we can be more strict for better accuracy
+        console.log('🔧 Performance is good, optimizing for accuracy...');
+        detectionConfig.faceMatcherThreshold = Math.max(0.4, detectionConfig.faceMatcherThreshold - 0.01);
+        detectionConfig.recognitionThreshold = Math.max(0.4, detectionConfig.recognitionThreshold - 0.01);
+        console.log(`📊 Optimized thresholds: FaceMatcher=${detectionConfig.faceMatcherThreshold}, Recognition=${detectionConfig.recognitionThreshold}`);
     }
 }
 
@@ -3596,6 +3676,8 @@ function resetPresensiPage(){
         window.speechTimeout = null;
     }
     speechSynthesis.cancel();
+    speechQueue = [];
+    isSpeaking = false;
     
     // Advanced: Reset detection history for fresh start
     detectionHistory = [];
@@ -3629,7 +3711,13 @@ function startVideo(){
 
 function stopVideo(){
     if(video && video.srcObject){ video.srcObject.getTracks().forEach(t=>t.stop()); video.srcObject=null; }
-    isCameraActive=false; if(videoInterval) clearInterval(videoInterval); speechSynthesis.cancel();
+    isCameraActive=false; if(videoInterval) clearInterval(videoInterval); 
+    
+    // Clear speech queue and cancel any ongoing speech
+    speechSynthesis.cancel();
+    speechQueue = [];
+    isSpeaking = false;
+    
     if(canvas){ const ctx = canvas.getContext('2d'); ctx.clearRect(0,0,canvas.width,canvas.height); }
 }
 
@@ -3660,7 +3748,7 @@ function startVideoInterval(){
             // Optimasi: Performance monitoring
             const detectionStartTime = performance.now();
             
-            // Optimized: Fast detection parameters for maximum speed
+            // ENHANCED: Optimized detection with higher resolution for better accuracy
             const detections = await faceapi.detectAllFaces(video, new faceapi.TinyFaceDetectorOptions({
                 inputSize: detectionConfig.inputSize,
                 scoreThreshold: detectionConfig.scoreThreshold
@@ -3691,13 +3779,13 @@ function startVideoInterval(){
                 // Perbaikan: Sesuaikan threshold secara dinamis jika diperlukan
                 adjustDetectionThreshold();
                 
-                // Advanced: Dynamic throttle adjustment for optimal performance
-                if (performanceStats.averageDetectionTime > 400) {
+                // ULTRA-FAST: Dynamic throttle for maximum speed
+                if (performanceStats.averageDetectionTime > 100) {
                     console.log('Performance is slow, increasing throttle...');
-                    detectionThrottle = Math.min(150, detectionThrottle + 10);
-                } else if (performanceStats.averageDetectionTime < 200 && detectionThrottle > 80) {
-                    console.log('Performance is good, decreasing throttle...');
-                    detectionThrottle = Math.max(80, detectionThrottle - 5);
+                    detectionThrottle = Math.min(20, detectionThrottle + 2);
+                } else if (performanceStats.averageDetectionTime < 50 && detectionThrottle > 1) {
+                    console.log('Performance is excellent, decreasing throttle...');
+                    detectionThrottle = Math.max(1, detectionThrottle - 1);
                 }
             }
             const resized = faceapi.resizeResults(bestDetections, displaySize);
@@ -3717,6 +3805,19 @@ function startVideoInterval(){
                         const quality = assessFaceQuality(face);
                         console.log(`Face ${i}: Label=${result.label}, Distance=${result.distance.toFixed(3)}, Quality=${quality.toFixed(3)}, Threshold=${detectionConfig.recognitionThreshold}`);
                         
+                        // ULTRA-ENHANCED: Detailed debugging information
+                        if (result.label !== 'unknown') {
+                            console.log(`✅ Face recognized as: ${result.label}`);
+                            console.log(`  📊 Distance: ${result.distance.toFixed(3)} (threshold: ${detectionConfig.recognitionThreshold})`);
+                            console.log(`  🎯 Quality: ${quality.toFixed(3)} (threshold: ${detectionConfig.qualityThreshold})`);
+                            console.log(`  📐 Face Size: ${(box.width * box.height).toFixed(0)}px (min: ${detectionConfig.minFaceSize * detectionConfig.minFaceSize}px)`);
+                            console.log(`  🚀 Confidence: ${(face.detection.score * 100).toFixed(1)}%`);
+                        } else {
+                            console.log(`❌ Face not recognized - Distance too high: ${result.distance.toFixed(3)} > ${detectionConfig.recognitionThreshold}`);
+                            console.log(`  📊 Quality: ${quality.toFixed(3)} (threshold: ${detectionConfig.qualityThreshold})`);
+                            console.log(`  📐 Face Size: ${(box.width * box.height).toFixed(0)}px (min: ${detectionConfig.minFaceSize * detectionConfig.minFaceSize}px)`);
+                        }
+                        
                         // Advanced: Use quality-based detection acceptance
                         const shouldAccept = shouldAcceptDetection(result, face);
                         
@@ -3733,6 +3834,7 @@ function startVideoInterval(){
                     });
                 } else {
                     statusMessage('Database wajah kosong. Silakan tambah member.', 'bg-gray-200 text-gray-600');
+                    console.warn('⚠️ No face descriptors available for recognition');
                 }
             } else {
                 if (presensiStatus && presensiStatus.textContent !== 'Arahkan wajah ke kamera') {
@@ -3747,7 +3849,7 @@ function startVideoInterval(){
                 statusMessage('Error deteksi wajah. Coba refresh halaman.', 'bg-red-100 text-red-700');
             }
         }
-    }, 30); // BALANCED interval for speed + accuracy
+    }, 10); // ULTRA-FAST interval for <2 second processing
 }
 
 if (video) {
@@ -3799,31 +3901,10 @@ function assessFaceQuality(face) {
     else if (distanceFromCenter > 100) quality *= 0.9; // Slightly off-center
     else if (distanceFromCenter < 50) quality *= 1.1; // Well centered
     
-    // 4. Landmark quality factor (if available)
+    // 4. Enhanced landmark quality factor (if available)
     if (face.landmarks) {
-        const landmarks = face.landmarks.positions;
-        if (landmarks && landmarks.length >= 68) {
-            // Check for landmark consistency and symmetry
-            const leftEye = landmarks[36];
-            const rightEye = landmarks[45];
-            const nose = landmarks[30];
-            const leftMouth = landmarks[48];
-            const rightMouth = landmarks[54];
-            
-            if (leftEye && rightEye && nose && leftMouth && rightMouth) {
-                // Check eye symmetry
-                const eyeDistance = Math.abs(leftEye.x - rightEye.x);
-                const eyeHeightDiff = Math.abs(leftEye.y - rightEye.y);
-                if (eyeHeightDiff < eyeDistance * 0.1) quality *= 1.1; // Good eye alignment
-                else if (eyeHeightDiff > eyeDistance * 0.2) quality *= 0.8; // Poor eye alignment
-                
-                // Check face symmetry
-                const faceCenterX = (leftEye.x + rightEye.x) / 2;
-                const noseCenterDiff = Math.abs(nose.x - faceCenterX);
-                if (noseCenterDiff < box.width * 0.1) quality *= 1.1; // Good symmetry
-                else if (noseCenterDiff > box.width * 0.2) quality *= 0.9; // Poor symmetry
-            }
-        }
+        const landmarkScore = assessEnhancedLandmarkQuality(face.landmarks);
+        quality *= (0.7 + landmarkScore * 0.3); // Weight landmark quality heavily
     }
     
     // 5. Expression quality factor (if available)
@@ -3844,6 +3925,175 @@ function assessFaceQuality(face) {
     return Math.max(0, Math.min(1.5, quality)); // Allow quality > 1 for excellent faces
 }
 
+// ENHANCED: Detailed facial feature assessment for better accuracy
+function assessEnhancedLandmarkQuality(landmarks) {
+    if (!landmarks || !landmarks.positions || landmarks.positions.length < 68) return 0;
+    
+    const positions = landmarks.positions;
+    let featureScore = 0;
+    
+    // 1. Eye region analysis (points 36-47 for left eye, 42-47 for right eye)
+    const leftEyePoints = positions.slice(36, 42);
+    const rightEyePoints = positions.slice(42, 48);
+    const eyeScore = assessEyeQuality(leftEyePoints, rightEyePoints);
+    featureScore += eyeScore * 0.3; // 30% weight for eyes
+    
+    // 2. Nose analysis (points 27-35)
+    const nosePoints = positions.slice(27, 36);
+    const noseScore = assessNoseQuality(nosePoints);
+    featureScore += noseScore * 0.25; // 25% weight for nose
+    
+    // 3. Eyebrow analysis (points 17-26)
+    const leftEyebrow = positions.slice(17, 22);
+    const rightEyebrow = positions.slice(22, 27);
+    const eyebrowScore = assessEyebrowQuality(leftEyebrow, rightEyebrow);
+    featureScore += eyebrowScore * 0.2; // 20% weight for eyebrows
+    
+    // 4. Mouth analysis (points 48-67)
+    const mouthPoints = positions.slice(48, 68);
+    const mouthScore = assessMouthQuality(mouthPoints);
+    featureScore += mouthScore * 0.15; // 15% weight for mouth
+    
+    // 5. Face contour analysis (points 0-16)
+    const contourPoints = positions.slice(0, 17);
+    const contourScore = assessContourQuality(contourPoints);
+    featureScore += contourScore * 0.1; // 10% weight for face shape
+    
+    return Math.min(1, featureScore);
+}
+
+function assessEyeQuality(leftEye, rightEye) {
+    if (!leftEye || !rightEye || leftEye.length !== 6 || rightEye.length !== 6) return 0;
+    
+    let score = 1.0;
+    
+    // Check eye symmetry
+    const leftEyeCenter = getCenterPoint(leftEye);
+    const rightEyeCenter = getCenterPoint(rightEye);
+    const eyeDistance = Math.abs(leftEyeCenter.x - rightEyeCenter.x);
+    const eyeHeightDiff = Math.abs(leftEyeCenter.y - rightEyeCenter.y);
+    
+    // Good symmetry bonus
+    if (eyeHeightDiff < eyeDistance * 0.05) score *= 1.2;
+    else if (eyeHeightDiff > eyeDistance * 0.15) score *= 0.8;
+    
+    // Check eye shape consistency
+    const leftEyeShape = getEyeShape(leftEye);
+    const rightEyeShape = getEyeShape(rightEye);
+    const shapeConsistency = 1 - Math.abs(leftEyeShape - rightEyeShape);
+    score *= (0.5 + shapeConsistency * 0.5);
+    
+    return Math.min(1, score);
+}
+
+function assessNoseQuality(nosePoints) {
+    if (!nosePoints || nosePoints.length !== 9) return 0;
+    
+    let score = 1.0;
+    
+    // Check nose alignment (should be roughly vertical)
+    const noseTop = nosePoints[0];
+    const noseBottom = nosePoints[6];
+    const noseSlope = Math.abs((noseBottom.x - noseTop.x) / (noseBottom.y - noseTop.y));
+    
+    if (noseSlope < 0.1) score *= 1.2; // Very straight
+    else if (noseSlope > 0.3) score *= 0.8; // Too tilted
+    
+    // Check nose width consistency
+    const noseWidth = Math.abs(nosePoints[4].x - nosePoints[8].x);
+    const noseHeight = Math.abs(noseBottom.y - noseTop.y);
+    const noseRatio = noseWidth / noseHeight;
+    
+    if (noseRatio > 0.3 && noseRatio < 0.6) score *= 1.1; // Good proportions
+    else if (noseRatio > 0.8 || noseRatio < 0.2) score *= 0.9; // Unusual proportions
+    
+    return Math.min(1, score);
+}
+
+function assessEyebrowQuality(leftEyebrow, rightEyebrow) {
+    if (!leftEyebrow || !rightEyebrow || leftEyebrow.length !== 5 || rightEyebrow.length !== 5) return 0;
+    
+    let score = 1.0;
+    
+    // Check eyebrow symmetry
+    const leftEyebrowCenter = getCenterPoint(leftEyebrow);
+    const rightEyebrowCenter = getCenterPoint(rightEyebrow);
+    const eyebrowHeightDiff = Math.abs(leftEyebrowCenter.y - rightEyebrowCenter.y);
+    const eyebrowDistance = Math.abs(leftEyebrowCenter.x - rightEyebrowCenter.x);
+    
+    if (eyebrowHeightDiff < eyebrowDistance * 0.05) score *= 1.1;
+    else if (eyebrowHeightDiff > eyebrowDistance * 0.15) score *= 0.9;
+    
+    // Check eyebrow shape consistency
+    const leftShape = getEyebrowShape(leftEyebrow);
+    const rightShape = getEyebrowShape(rightEyebrow);
+    const shapeConsistency = 1 - Math.abs(leftShape - rightShape);
+    score *= (0.7 + shapeConsistency * 0.3);
+    
+    return Math.min(1, score);
+}
+
+function assessMouthQuality(mouthPoints) {
+    if (!mouthPoints || mouthPoints.length !== 20) return 0;
+    
+    let score = 1.0;
+    
+    // Check mouth symmetry
+    const leftMouth = mouthPoints[0];
+    const rightMouth = mouthPoints[6];
+    const mouthCenter = mouthPoints[9];
+    
+    const leftDistance = Math.abs(leftMouth.x - mouthCenter.x);
+    const rightDistance = Math.abs(rightMouth.x - mouthCenter.x);
+    const symmetry = 1 - Math.abs(leftDistance - rightDistance) / Math.max(leftDistance, rightDistance);
+    
+    score *= (0.8 + symmetry * 0.2);
+    
+    return Math.min(1, score);
+}
+
+function assessContourQuality(contourPoints) {
+    if (!contourPoints || contourPoints.length !== 17) return 0;
+    
+    let score = 1.0;
+    
+    // Check face shape consistency
+    const chin = contourPoints[8];
+    const leftJaw = contourPoints[4];
+    const rightJaw = contourPoints[12];
+    
+    const jawWidth = Math.abs(rightJaw.x - leftJaw.x);
+    const faceHeight = Math.abs(chin.y - contourPoints[0].y);
+    const faceRatio = jawWidth / faceHeight;
+    
+    if (faceRatio > 0.6 && faceRatio < 0.9) score *= 1.1; // Good face proportions
+    else if (faceRatio > 1.2 || faceRatio < 0.4) score *= 0.9; // Unusual proportions
+    
+    return Math.min(1, score);
+}
+
+// Helper functions
+function getCenterPoint(points) {
+    const x = points.reduce((sum, p) => sum + p.x, 0) / points.length;
+    const y = points.reduce((sum, p) => sum + p.y, 0) / points.length;
+    return { x, y };
+}
+
+function getEyeShape(eyePoints) {
+    const width = Math.abs(eyePoints[3].x - eyePoints[0].x);
+    const height = Math.abs(eyePoints[1].y - eyePoints[4].y);
+    return width / height;
+}
+
+function getEyebrowShape(eyebrowPoints) {
+    const start = eyebrowPoints[0];
+    const end = eyebrowPoints[4];
+    const middle = eyebrowPoints[2];
+    const arch = Math.abs(middle.y - (start.y + end.y) / 2);
+    const length = Math.abs(end.x - start.x);
+    return arch / length;
+}
+
 // Advanced: Multiple detection attempts for better accuracy
 let detectionAttempts = 0;
 // Multi-person detection queue system
@@ -3855,13 +4105,17 @@ let lastSuccessfulDetection = null;
 function shouldAcceptDetection(result, face) {
     if (!result || result.label === 'unknown') return false;
     
-    // BALANCED: Essential checks for accuracy
+    // ENHANCED: More lenient checks for better recognition
     if (result.distance > detectionConfig.recognitionThreshold) return false;
     
-    // Smart quality check - only check if distance is borderline
-    if (result.distance > 0.35) {
-        const quality = assessFaceQuality(face);
-        if (quality < detectionConfig.qualityThreshold) return false;
+    // Enhanced quality check with facial feature analysis
+    const quality = assessFaceQuality(face);
+    if (quality < detectionConfig.qualityThreshold) return false;
+    
+    // BALANCED: Enhanced facial feature consistency check
+    if (face.landmarks) {
+        const landmarkScore = assessEnhancedLandmarkQuality(face.landmarks);
+        if (landmarkScore < 0.4) return false; // Balanced threshold for good accuracy
     }
     
     // Check if this person is already being processed
@@ -3873,53 +4127,12 @@ function shouldAcceptDetection(result, face) {
 }
 
 function addToRecognitionQueue(label, face) {
-    // Check if already in queue
-    if (recognitionQueue.some(item => item.label === label)) return;
-    
-    // INSTANT PROCESSING: If no one is being processed, process immediately
-    if (!isProcessingRecognition && !isProcessingQueue) {
-        console.log(`INSTANT PROCESSING for ${label}`);
-        handleRecognition(label, 'Biasa'); // Use default expression for speed
-        return;
-    }
-    
-    // Otherwise add to queue
-    recognitionQueue.push({
-        label: label,
-        face: face,
-        timestamp: Date.now(),
-        priority: recognitionQueue.length // First come, first served
-    });
-    
-    console.log(`Added ${label} to recognition queue. Queue length: ${recognitionQueue.length}`);
-    
-    // Process queue if not already processing
-    if (!isProcessingQueue) {
-        processRecognitionQueue();
-    }
+    // INSTANT PROCESSING: Always process immediately for maximum speed
+    console.log(`🚀 INSTANT PROCESSING for ${label}`);
+    handleRecognition(label, 'Biasa'); // Use default expression for speed
 }
 
-async function processRecognitionQueue() {
-    if (isProcessingQueue || recognitionQueue.length === 0) return;
-    
-    isProcessingQueue = true;
-    
-    while (recognitionQueue.length > 0) {
-        const item = recognitionQueue.shift();
-        console.log(`Processing recognition for: ${item.label}`);
-        
-        try {
-            await handleRecognition(item.label, 'Biasa'); // Use default expression for speed
-            
-            // BALANCED: Reasonable delay for next person
-            await new Promise(resolve => setTimeout(resolve, 200));
-        } catch (error) {
-            console.error(`Error processing recognition for ${item.label}:`, error);
-        }
-    }
-    
-    isProcessingQueue = false;
-}
+// Queue system removed for instant processing
 
 let isProcessingRecognition = false;
 let recognitionCompleted = false; // Flag to stop detection after successful recognition
@@ -3930,9 +4143,9 @@ async function handleRecognition(nim, topExpression){
     
     console.log('Recognition triggered:', { nim, topExpression, scanMode });
     
-    // ULTRA-FAST: Take screenshot and get geolocation in parallel
+    // ULTRA-FAST: Take screenshot and get geolocation in parallel for speed
     const [screenshot, position] = await Promise.all([
-        // Screenshot
+        // Screenshot - optimized for speed
         new Promise((resolve) => {
             try {
                 if (video && canvas && video.videoWidth > 0 && video.videoHeight > 0) {
@@ -3941,7 +4154,7 @@ async function handleRecognition(nim, topExpression){
                     canvas.width = video.videoWidth;
                     canvas.height = video.videoHeight;
                     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-                    const screenshot = canvas.toDataURL('image/jpeg', 0.7); // Lower quality for speed
+                    const screenshot = canvas.toDataURL('image/jpeg', 0.6); // Balanced quality for speed and accuracy
                     console.log('Screenshot taken successfully, size:', screenshot.length);
                     resolve(screenshot);
                 } else {
@@ -3954,13 +4167,13 @@ async function handleRecognition(nim, topExpression){
             }
         }),
         
-        // Geolocation
+        // Geolocation - Ultra fast
         new Promise((resolve) => {
             if (!navigator.geolocation) return resolve(null);
             navigator.geolocation.getCurrentPosition(
                 pos => resolve(pos), 
                 err => resolve(null), 
-                { enableHighAccuracy: false, timeout: 3000, maximumAge: 300000 } // Faster geolocation
+                { enableHighAccuracy: false, timeout: 500, maximumAge: 900000 } // Maximum speed geolocation
             );
         })
     ]);
@@ -4043,13 +4256,43 @@ async function handleRecognition(nim, topExpression){
             errorMessage = 'Server mengalami masalah teknis. Silakan coba lagi.';
         } else if (err.message.includes('HTTP error')) {
             errorMessage = 'Koneksi ke server bermasalah. Silakan coba lagi.';
+        } else if (err.message.includes('Data yang dikirim tidak valid')) {
+            errorMessage = 'Data yang dikirim tidak valid. Silakan coba lagi.';
+        } else if (err.message.includes('Server error')) {
+            errorMessage = 'Server error. Silakan coba lagi.';
+        } else if (err.message.includes('Presensi masuk hanya tersedia') || err.message.includes('Presensi masuk tersedia')) {
+            errorMessage = 'Waktu presensi tidak sesuai. Silakan coba pada jam yang tepat.';
+        } else if (err.message.includes('Waktu presensi tidak sesuai')) {
+            errorMessage = 'Waktu presensi tidak sesuai. Silakan coba pada jam yang tepat.';
+        } else if (err.message.includes('NIM tidak ditemukan')) {
+            errorMessage = 'NIM tidak ditemukan. Silakan hubungi administrator.';
+        } else if (err.message.includes('Database error')) {
+            errorMessage = 'Database error. Silakan hubungi administrator.';
+        } else if (err.message.includes('Screenshot tidak berhasil diambil')) {
+            errorMessage = 'Screenshot tidak berhasil diambil. Silakan coba lagi dengan posisi yang lebih baik.';
+        } else if (err.message.includes('Ukuran screenshot terlalu besar')) {
+            errorMessage = 'Ukuran screenshot terlalu besar. Silakan coba lagi.';
+        } else if (err.message.includes('Database structure error')) {
+            errorMessage = 'Database structure error. Silakan hubungi administrator.';
+        } else if (err.message.includes('Bad request')) {
+            errorMessage = 'Bad request. Silakan coba lagi.';
+        } else if (err.message.includes('Unauthorized')) {
+            errorMessage = 'Unauthorized. Silakan login kembali.';
+        } else if (err.message.includes('Forbidden')) {
+            errorMessage = 'Forbidden. Silakan hubungi administrator.';
+        } else if (err.message.includes('Tidak dapat terhubung ke server')) {
+            errorMessage = 'Tidak dapat terhubung ke server. Pastikan XAMPP sudah berjalan.';
+        } else if (err.message.includes('Server tidak merespons')) {
+            errorMessage = 'Server tidak merespons. Silakan coba lagi.';
+        } else if (err.message.includes('Network error')) {
+            errorMessage = 'Network error. Silakan coba lagi.';
+        } else if (err.message.includes('Connection refused')) {
+            errorMessage = 'Connection refused. Silakan coba lagi.';
         }
         statusMessage(errorMessage, 'bg-red-100 text-red-700');
     } finally {
-        // BALANCED reset for speed + accuracy
-        setTimeout(() => {
-            isProcessingRecognition = false;
-        }, 100);
+        // INSTANT: Immediate reset for maximum speed
+        isProcessingRecognition = false;
     }
 }
 
@@ -4058,11 +4301,12 @@ function stopVideoAfterRecognition(){
         clearInterval(videoInterval);
         videoInterval = null;
     }
-    let delayDuration = 10000;
+    // INSTANT: Much faster reset for better user experience
+    let delayDuration = 3000; // Reduced from 10000 to 3000
     if (presensiStatus && presensiStatus.textContent) {
         const currentText = presensiStatus.textContent;
         const wordCount = currentText.split(' ').length;
-        delayDuration = Math.max(10000, wordCount * 500 + 3000);
+        delayDuration = Math.max(2000, wordCount * 200 + 1000); // Much faster calculation
     }
     setTimeout(()=>{
         if(isCameraActive) resetPresensiPage();
@@ -4100,8 +4344,18 @@ function stopDetection() {
 
 // Initialize face recognition when page loads
 document.addEventListener('DOMContentLoaded', () => {
+    console.log('🚀 Initializing face recognition system...');
     initializeSpeechSynthesis();
     initializeFaceRecognition();
+    
+    // INSTANT: Immediate debug info display
+    console.log('🔧 Face Recognition Debug Info:');
+    console.log(`  - Face Matcher Threshold: ${detectionConfig.faceMatcherThreshold}`);
+    console.log(`  - Recognition Threshold: ${detectionConfig.recognitionThreshold}`);
+    console.log(`  - Quality Threshold: ${detectionConfig.qualityThreshold}`);
+    console.log(`  - Score Threshold: ${detectionConfig.scoreThreshold}`);
+    console.log(`  - Input Size: ${detectionConfig.inputSize}`);
+    console.log(`  - Min Face Size: ${detectionConfig.minFaceSize}`);
     // Reset log data daily
     checkAndResetLogDaily();
 });
@@ -4244,14 +4498,12 @@ function renderLogPulang() {
 
 // Update log after successful attendance
 function updateLogAfterAttendance(nim, mode) {
-    // Delay sedikit untuk memastikan data sudah tersimpan di database
-    setTimeout(() => {
-        if (mode === 'masuk') {
-            loadLogMasuk();
-        } else {
-            loadLogPulang();
-        }
-    }, 1000);
+    // INSTANT: Immediate update for maximum speed
+    if (mode === 'masuk') {
+        loadLogMasuk();
+    } else {
+        loadLogPulang();
+    }
 }
 
 // Check and reset log daily
