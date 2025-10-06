@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 session_start();
 
 ini_set('log_errors', '1');
@@ -65,7 +65,12 @@ function ensureSchema(PDO $pdo): void {
             nama VARCHAR(255) NOT NULL,
             prodi VARCHAR(255) NULL,
             startup VARCHAR(255) NULL,
-            foto_base64 LONGTEXT NULL,
+                    foto_base64 LONGTEXT NULL,
+                    face_embedding LONGTEXT NULL,
+                    face_embedding_updated TIMESTAMP NULL,
+                    advanced_features LONGTEXT NULL,
+                    facial_geometry LONGTEXT NULL,
+                    feature_vector LONGTEXT NULL,
             password_hash VARCHAR(255) NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
@@ -134,7 +139,25 @@ function ensureSchema(PDO $pdo): void {
         'daily_report_id' => "ALTER TABLE attendance ADD COLUMN daily_report_id INT NULL AFTER ket"
     ];
     
+            // Add FaceNet embedding columns to users table
+            $userColumns = [
+                'face_embedding' => "ALTER TABLE users ADD COLUMN face_embedding LONGTEXT NULL AFTER foto_base64",
+                'face_embedding_updated' => "ALTER TABLE users ADD COLUMN face_embedding_updated TIMESTAMP NULL AFTER face_embedding",
+                'advanced_features' => "ALTER TABLE users ADD COLUMN advanced_features LONGTEXT NULL AFTER face_embedding_updated",
+                'facial_geometry' => "ALTER TABLE users ADD COLUMN facial_geometry LONGTEXT NULL AFTER advanced_features",
+                'feature_vector' => "ALTER TABLE users ADD COLUMN feature_vector LONGTEXT NULL AFTER facial_geometry"
+            ];
+    
     foreach ($requiredColumns as $column => $sql) {
+        try {
+            $pdo->exec($sql);
+        } catch (PDOException $e) {
+            // Column already exists, ignore error
+        }
+    }
+    
+    // Add FaceNet embedding columns to users table
+    foreach ($userColumns as $column => $sql) {
         try {
             $pdo->exec($sql);
         } catch (PDOException $e) {
@@ -352,6 +375,642 @@ function getFirstName($fullName) {
     if (empty($fullName)) return '';
     $nameParts = explode(' ', trim($fullName));
     return $nameParts[0];
+}
+
+// FaceNet Integration Functions
+function generateFaceEmbedding($base64Image) {
+    try {
+        $data = [
+            'action' => 'generate_embedding',
+            'image' => $base64Image
+        ];
+        
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, 'http://localhost/facenet_api.php');
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($data));
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+        
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        
+        if ($httpCode === 200 && $response) {
+            $result = json_decode($response, true);
+            if ($result && $result['success']) {
+                return $result['data']['embedding'];
+            }
+        }
+        
+        error_log("FaceNet embedding generation failed: " . $response);
+        return null;
+    } catch (Exception $e) {
+        error_log("Error generating face embedding: " . $e->getMessage());
+        return null;
+    }
+}
+
+function recognizeFace($base64Image, $threshold = 1.0) {
+    try {
+        $data = [
+            'action' => 'recognize_face',
+            'image' => $base64Image,
+            'threshold' => $threshold
+        ];
+        
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, 'http://localhost/facenet_api.php');
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($data));
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+        
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        
+        if ($httpCode === 200 && $response) {
+            $result = json_decode($response, true);
+            if ($result && $result['success']) {
+                return $result['data'];
+            }
+        }
+        
+        error_log("FaceNet recognition failed: " . $response);
+        return null;
+    } catch (Exception $e) {
+        error_log("Error recognizing face: " . $e->getMessage());
+        return null;
+    }
+}
+
+function saveFaceEmbedding($userId, $embedding) {
+    global $pdo;
+    try {
+        $stmt = $pdo->prepare("UPDATE users SET face_embedding = ?, face_embedding_updated = NOW() WHERE id = ?");
+        $stmt->execute([json_encode($embedding), $userId]);
+        return true;
+    } catch (Exception $e) {
+        error_log("Error saving face embedding: " . $e->getMessage());
+        return false;
+    }
+}
+
+function getFaceEmbeddings() {
+    global $pdo;
+    try {
+        $stmt = $pdo->query("SELECT id, nim, nama, face_embedding FROM users WHERE role='pegawai' AND face_embedding IS NOT NULL");
+        $users = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        
+        $embeddings = [];
+        foreach ($users as $user) {
+            $embedding = json_decode($user['face_embedding'], true);
+            if ($embedding) {
+                $embeddings[$user['nim']] = $embedding;
+            }
+        }
+        
+        return $embeddings;
+    } catch (Exception $e) {
+        error_log("Error getting face embeddings: " . $e->getMessage());
+        return [];
+    }
+}
+
+function processAttendanceWithFaceNet($base64Image) {
+    try {
+        $data = [
+            'action' => 'process_attendance',
+            'image' => $base64Image,
+            'threshold' => 1.0
+        ];
+        
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, 'http://localhost/facenet_api.php');
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($data));
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+        
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        
+        if ($httpCode === 200 && $response) {
+            $result = json_decode($response, true);
+            if ($result && $result['success']) {
+                return $result['data'];
+            }
+        }
+        
+        error_log("FaceNet attendance processing failed: " . $response);
+        return null;
+    } catch (Exception $e) {
+        error_log("Error processing attendance with FaceNet: " . $e->getMessage());
+        return null;
+    }
+}
+
+// Enhanced FaceNet Functions
+function generateEnhancedFaceEmbedding($base64Image) {
+    try {
+        $data = [
+            'action' => 'generate_enhanced_embedding',
+            'image' => $base64Image
+        ];
+        
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, 'http://localhost/facenet_enhanced_api.php');
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($data));
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 60);
+        
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        
+        if ($httpCode === 200 && $response) {
+            $result = json_decode($response, true);
+            if ($result && $result['success']) {
+                return $result['data'];
+            }
+        }
+        
+        error_log("Enhanced FaceNet embedding generation failed: " . $response);
+        return null;
+    } catch (Exception $e) {
+        error_log("Error generating enhanced face embedding: " . $e->getMessage());
+        return null;
+    }
+}
+
+// High Accuracy FaceNet Functions
+function processHighAccuracyAttendance($base64Image, $userId = null) {
+    try {
+        $data = [
+            'action' => 'process_high_accuracy_attendance',
+            'image' => $base64Image
+        ];
+        
+        if ($userId !== null) {
+            $data['user_id'] = $userId;
+        }
+        
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, 'http://localhost/facenet_high_accuracy_api.php');
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 60);
+        
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        
+        if ($httpCode === 200 && $response) {
+            $result = json_decode($response, true);
+            if ($result && $result['success']) {
+                return $result['data'];
+            }
+        }
+        
+        error_log("High accuracy attendance processing failed: " . $response);
+        return null;
+    } catch (Exception $e) {
+        error_log("Error processing high accuracy attendance: " . $e->getMessage());
+        return null;
+    }
+}
+
+// Optimized FaceNet Functions - iPhone-like Performance
+function processOptimizedAttendance($base64Image, $threshold = 0.5) {
+    try {
+        $data = [
+            'action' => 'process_attendance_optimized',
+            'image' => $base64Image,
+            'threshold' => $threshold
+        ];
+        
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, 'http://localhost/facenet_optimized_api.php');
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 10); // Faster timeout for optimized service
+        
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        
+        if ($httpCode === 200 && $response) {
+            $result = json_decode($response, true);
+            if ($result && $result['success']) {
+                return $result['data'];
+            }
+        }
+        
+        error_log("Optimized attendance processing failed: " . $response);
+        return null;
+    } catch (Exception $e) {
+        error_log("Error processing optimized attendance: " . $e->getMessage());
+        return null;
+    }
+}
+
+function recognizeFaceOptimized($base64Image, $threshold = 0.5) {
+    try {
+        $data = [
+            'action' => 'recognize_face_optimized',
+            'image' => $base64Image,
+            'threshold' => $threshold
+        ];
+        
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, 'http://localhost/facenet_optimized_api.php');
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+        
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        
+        if ($httpCode === 200 && $response) {
+            $result = json_decode($response, true);
+            if ($result && $result['success']) {
+                return $result['data'];
+            }
+        }
+        
+        error_log("Optimized face recognition failed: " . $response);
+        return null;
+    } catch (Exception $e) {
+        error_log("Error in optimized face recognition: " . $e->getMessage());
+        return null;
+    }
+}
+
+function generateOptimizedEmbedding($base64Image) {
+    try {
+        $data = [
+            'action' => 'generate_embedding_optimized',
+            'image' => $base64Image
+        ];
+        
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, 'http://localhost/facenet_optimized_api.php');
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+        
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        
+        if ($httpCode === 200 && $response) {
+            $result = json_decode($response, true);
+            if ($result && $result['success']) {
+                return $result['data'];
+            }
+        }
+        
+        error_log("Optimized embedding generation failed: " . $response);
+        return null;
+    } catch (Exception $e) {
+        error_log("Error generating optimized embedding: " . $e->getMessage());
+        return null;
+    }
+}
+
+function getOptimizedPerformanceStats() {
+    try {
+        $data = ['action' => 'get_performance_stats'];
+        
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, 'http://localhost/facenet_optimized_api.php');
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 5);
+        
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        
+        if ($httpCode === 200 && $response) {
+            $result = json_decode($response, true);
+            if ($result && $result['success']) {
+                return $result['data'];
+            }
+        }
+        
+        error_log("Failed to get optimized performance stats: " . $response);
+        return null;
+    } catch (Exception $e) {
+        error_log("Error getting optimized performance stats: " . $e->getMessage());
+        return null;
+    }
+}
+
+// Ultra Accurate FaceNet Functions - Maximum Accuracy with Ultra-Fast Response
+function processUltraAccurateAttendance($base64Image, $validationLevel = 'normal') {
+    try {
+        $data = [
+            'action' => 'process_attendance_ultra_accurate',
+            'image' => $base64Image,
+            'validation_level' => $validationLevel
+        ];
+        
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, 'http://localhost/facenet_ultra_accurate_api.php');
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 5); // Ultra-fast timeout
+        
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        
+        if ($httpCode === 200 && $response) {
+            $result = json_decode($response, true);
+            if ($result && $result['success']) {
+                return $result['data'];
+            }
+        }
+        
+        error_log("Ultra accurate attendance processing failed: " . $response);
+        return null;
+    } catch (Exception $e) {
+        error_log("Error processing ultra accurate attendance: " . $e->getMessage());
+        return null;
+    }
+}
+
+function getUltraAccuratePerformanceStats() {
+    try {
+        $data = ['action' => 'get_performance_stats'];
+        
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, 'http://localhost/facenet_ultra_accurate_api.php');
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 3);
+        
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        
+        if ($httpCode === 200 && $response) {
+            $result = json_decode($response, true);
+            if ($result && $result['success']) {
+                return $result['data'];
+            }
+        }
+        
+        error_log("Failed to get ultra accurate performance stats: " . $response);
+        return null;
+    } catch (Exception $e) {
+        error_log("Error getting ultra accurate performance stats: " . $e->getMessage());
+        return null;
+    }
+}
+
+// iPhone-Level Accurate FaceNet Functions - Maximum Accuracy with Unique Feature Analysis
+function processIPhoneLevelAttendance($base64Image) {
+    try {
+        $data = [
+            'action' => 'process_attendance_iphone_level',
+            'image' => $base64Image
+        ];
+        
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, 'http://localhost/facenet_iphone_accurate_api.php');
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 3); // Ultra-fast timeout for optimized analysis
+        
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        
+        if ($httpCode === 200 && $response) {
+            $result = json_decode($response, true);
+            if ($result && $result['success']) {
+                return $result['data'];
+            }
+        }
+        
+        error_log("iPhone-level attendance processing failed: " . $response);
+        return null;
+    } catch (Exception $e) {
+        error_log("Error processing iPhone-level attendance: " . $e->getMessage());
+        return null;
+    }
+}
+
+function getIPhoneLevelPerformanceStats() {
+    try {
+        $data = ['action' => 'get_performance_stats'];
+        
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, 'http://localhost/facenet_iphone_accurate_api.php');
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 5);
+        
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        
+        if ($httpCode === 200 && $response) {
+            $result = json_decode($response, true);
+            if ($result && $result['success']) {
+                return $result['data'];
+            }
+        }
+        
+        error_log("Failed to get iPhone-level performance stats: " . $response);
+        return null;
+    } catch (Exception $e) {
+        error_log("Error getting iPhone-level performance stats: " . $e->getMessage());
+        return null;
+    }
+}
+
+function generateHighAccuracyEmbedding($base64Image, $userId) {
+    try {
+        $data = [
+            'action' => 'generate_high_accuracy_embedding',
+            'image' => $base64Image,
+            'user_id' => $userId
+        ];
+        
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, 'http://localhost/facenet_high_accuracy_api.php');
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 60);
+        
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        
+        if ($httpCode === 200 && $response) {
+            $result = json_decode($response, true);
+            if ($result && $result['success']) {
+                return $result['data'];
+            }
+        }
+        
+        error_log("High accuracy embedding generation failed: " . $response);
+        return null;
+    } catch (Exception $e) {
+        error_log("Error generating high accuracy embedding: " . $e->getMessage());
+        return null;
+    }
+}
+
+function getHighAccuracyPerformanceStats() {
+    try {
+        $data = ['action' => 'get_performance_stats'];
+        
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, 'http://localhost/facenet_high_accuracy_api.php');
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+        
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        
+        if ($httpCode === 200 && $response) {
+            $result = json_decode($response, true);
+            if ($result && $result['success']) {
+                return $result['data'];
+            }
+        }
+        
+        error_log("Failed to get high accuracy performance stats: " . $response);
+        return null;
+    } catch (Exception $e) {
+        error_log("Error getting high accuracy performance stats: " . $e->getMessage());
+        return null;
+    }
+}
+
+function recognizeEnhancedFace($base64Image, $threshold = 1.0) {
+    try {
+        $data = [
+            'action' => 'recognize_enhanced_face',
+            'image' => $base64Image,
+            'threshold' => $threshold
+        ];
+        
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, 'http://localhost/facenet_enhanced_api.php');
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($data));
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 60);
+        
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        
+        if ($httpCode === 200 && $response) {
+            $result = json_decode($response, true);
+            if ($result && $result['success']) {
+                return $result['data'];
+            }
+        }
+        
+        error_log("Enhanced FaceNet recognition failed: " . $response);
+        return null;
+    } catch (Exception $e) {
+        error_log("Error recognizing enhanced face: " . $e->getMessage());
+        return null;
+    }
+}
+
+function saveEnhancedFaceEmbedding($userId, $enhancedEmbedding) {
+    global $pdo;
+    try {
+        $baseEmbedding = json_encode($enhancedEmbedding['base_embedding'] ?? []);
+        $advancedFeatures = json_encode($enhancedEmbedding['advanced_features'] ?? []);
+        $facialGeometry = json_encode($enhancedEmbedding['advanced_features']['geometry'] ?? []);
+        $featureVector = json_encode($enhancedEmbedding['advanced_features']['feature_vector'] ?? []);
+        
+        $stmt = $pdo->prepare("
+            UPDATE users SET 
+                face_embedding = ?, 
+                advanced_features = ?,
+                facial_geometry = ?,
+                feature_vector = ?,
+                face_embedding_updated = NOW() 
+            WHERE id = ?
+        ");
+        $stmt->execute([$baseEmbedding, $advancedFeatures, $facialGeometry, $featureVector, $userId]);
+        return true;
+    } catch (Exception $e) {
+        error_log("Error saving enhanced face embedding: " . $e->getMessage());
+        return false;
+    }
+}
+
+function processEnhancedAttendance($base64Image) {
+    try {
+        $data = [
+            'action' => 'process_enhanced_attendance',
+            'image' => $base64Image,
+            'threshold' => 1.0
+        ];
+        
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, 'http://localhost/facenet_enhanced_api.php');
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($data));
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 60);
+        
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        
+        if ($httpCode === 200 && $response) {
+            $result = json_decode($response, true);
+            if ($result && $result['success']) {
+                return $result['data'];
+            }
+        }
+        
+        error_log("Enhanced FaceNet attendance processing failed: " . $response);
+        return null;
+    } catch (Exception $e) {
+        error_log("Error processing enhanced attendance: " . $e->getMessage());
+        return null;
+    }
 }
 
 // ----- AJAX ENDPOINTS -----
@@ -894,6 +1553,404 @@ if (isset($_GET['ajax'])) {
     }
 
     // Update bukti izin/sakit
+    // FaceNet endpoints
+    if ($action === 'generate_face_embedding' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        if (!isset($_SESSION['user'])) jsonResponse(['error' => 'Unauthorized'], 401);
+        
+        $base64Image = $_POST['image'] ?? '';
+        if (empty($base64Image)) {
+            jsonResponse(['error' => 'Image is required'], 400);
+        }
+        
+        // Use the new save_embedding endpoint
+        $data = [
+            'action' => 'save_embedding',
+            'image' => $base64Image,
+            'user_id' => $_SESSION['user']['id']
+        ];
+        
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, 'http://localhost/facenet_api.php');
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($data));
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+        
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        
+        if ($httpCode === 200 && $response) {
+            $result = json_decode($response, true);
+            if ($result && $result['success']) {
+                jsonResponse(['ok' => true, 'message' => 'Face embedding generated and saved successfully']);
+            } else {
+                jsonResponse(['error' => $result['error'] ?? 'Failed to generate face embedding'], 500);
+            }
+        } else {
+            jsonResponse(['error' => 'Failed to generate face embedding'], 500);
+        }
+    }
+
+    if ($action === 'recognize_face' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        $base64Image = $_POST['image'] ?? '';
+        if (empty($base64Image)) {
+            jsonResponse(['error' => 'Image is required'], 400);
+        }
+        
+        // Use the new recognize_face endpoint
+        $data = [
+            'action' => 'recognize_face',
+            'image' => $base64Image,
+            'threshold' => 1.0
+        ];
+        
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, 'http://localhost/facenet_api.php');
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($data));
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+        
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        
+        if ($httpCode === 200 && $response) {
+            $result = json_decode($response, true);
+            if ($result && $result['success']) {
+                jsonResponse(['ok' => true, 'data' => $result['data']]);
+            } else {
+                jsonResponse(['error' => $result['error'] ?? 'Face recognition failed'], 500);
+            }
+        } else {
+            jsonResponse(['error' => 'Face recognition failed'], 500);
+        }
+    }
+
+if ($action === 'process_attendance_facenet' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    $base64Image = $_POST['image'] ?? '';
+    if (empty($base64Image)) {
+        jsonResponse(['error' => 'Image is required'], 400);
+    }
+    
+    // Use the new process_attendance endpoint
+    $data = [
+        'action' => 'process_attendance',
+        'image' => $base64Image,
+        'threshold' => 1.0
+    ];
+    
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, 'http://localhost/facenet_api.php');
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($data));
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    
+    if ($httpCode === 200 && $response) {
+        $result = json_decode($response, true);
+        if ($result && $result['success']) {
+            jsonResponse(['ok' => true, 'data' => $result['data']]);
+        } else {
+            jsonResponse(['error' => $result['error'] ?? 'Attendance processing failed'], 500);
+        }
+    } else {
+        jsonResponse(['error' => 'Attendance processing failed'], 500);
+    }
+}
+
+// Enhanced FaceNet AJAX Endpoints
+if ($action === 'generate_enhanced_face_embedding' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!isset($_SESSION['user'])) jsonResponse(['error' => 'Unauthorized'], 401);
+    
+    $base64Image = $_POST['image'] ?? '';
+    if (empty($base64Image)) {
+        jsonResponse(['error' => 'Image is required'], 400);
+    }
+    
+    // Use the enhanced save_embedding endpoint
+    $data = [
+        'action' => 'save_enhanced_embedding',
+        'image' => $base64Image,
+        'user_id' => $_SESSION['user']['id']
+    ];
+    
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, 'http://localhost/facenet_enhanced_api.php');
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($data));
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 60);
+    
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    
+    if ($httpCode === 200 && $response) {
+        $result = json_decode($response, true);
+        if ($result && $result['success']) {
+            jsonResponse(['ok' => true, 'message' => 'Enhanced face embedding generated and saved successfully']);
+        } else {
+            jsonResponse(['error' => $result['error'] ?? 'Failed to generate enhanced face embedding'], 500);
+        }
+    } else {
+        jsonResponse(['error' => 'Failed to generate enhanced face embedding'], 500);
+    }
+}
+
+if ($action === 'recognize_enhanced_face' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    $base64Image = $_POST['image'] ?? '';
+    if (empty($base64Image)) {
+        jsonResponse(['error' => 'Image is required'], 400);
+    }
+    
+    // Use the enhanced recognize_face endpoint
+    $data = [
+        'action' => 'recognize_enhanced_face',
+        'image' => $base64Image,
+        'threshold' => 1.0
+    ];
+    
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, 'http://localhost/facenet_enhanced_api.php');
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($data));
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 60);
+    
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    
+    if ($httpCode === 200 && $response) {
+        $result = json_decode($response, true);
+        if ($result && $result['success']) {
+            jsonResponse(['ok' => true, 'data' => $result['data']]);
+        } else {
+            jsonResponse(['error' => $result['error'] ?? 'Enhanced face recognition failed'], 500);
+        }
+    } else {
+        jsonResponse(['error' => 'Enhanced face recognition failed'], 500);
+    }
+}
+
+if ($action === 'process_enhanced_attendance' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    $base64Image = $_POST['image'] ?? '';
+    if (empty($base64Image)) {
+        jsonResponse(['error' => 'Image is required'], 400);
+    }
+    
+    // Use the enhanced process_attendance endpoint
+    $data = [
+        'action' => 'process_enhanced_attendance',
+        'image' => $base64Image,
+        'threshold' => 1.0
+    ];
+    
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, 'http://localhost/facenet_enhanced_api.php');
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($data));
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 60);
+    
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    
+    if ($httpCode === 200 && $response) {
+        $result = json_decode($response, true);
+        if ($result && $result['success']) {
+            jsonResponse(['ok' => true, 'data' => $result['data']]);
+        } else {
+            jsonResponse(['error' => $result['error'] ?? 'Enhanced attendance processing failed'], 500);
+        }
+    } else {
+        jsonResponse(['error' => 'Enhanced attendance processing failed'], 500);
+    }
+}
+
+// High Accuracy FaceNet Endpoints
+if ($action === 'process_high_accuracy_attendance' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!isset($_SESSION['user'])) jsonResponse(['error' => 'Unauthorized'], 401);
+    
+    $base64Image = $_POST['image'] ?? '';
+    if (empty($base64Image)) {
+        jsonResponse(['error' => 'Image is required'], 400);
+    }
+    
+    $userId = $_SESSION['user']['id'] ?? null;
+    $result = processHighAccuracyAttendance($base64Image, $userId);
+    
+    if ($result) {
+        jsonResponse(['ok' => true, 'data' => $result]);
+    } else {
+        jsonResponse(['error' => 'High accuracy attendance processing failed'], 500);
+    }
+}
+
+if ($action === 'generate_high_accuracy_embedding' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!isset($_SESSION['user'])) jsonResponse(['error' => 'Unauthorized'], 401);
+    
+    $base64Image = $_POST['image'] ?? '';
+    if (empty($base64Image)) {
+        jsonResponse(['error' => 'Image is required'], 400);
+    }
+    
+    $userId = $_SESSION['user']['id'];
+    $result = generateHighAccuracyEmbedding($base64Image, $userId);
+    
+    if ($result) {
+        jsonResponse(['ok' => true, 'data' => $result]);
+    } else {
+        jsonResponse(['error' => 'High accuracy embedding generation failed'], 500);
+    }
+}
+
+if ($action === 'get_high_accuracy_stats' && $_SERVER['REQUEST_METHOD'] === 'GET') {
+    if (!isAdmin()) jsonResponse(['error' => 'Admin access required'], 403);
+    
+    $stats = getHighAccuracyPerformanceStats();
+    if ($stats) {
+        jsonResponse(['ok' => true, 'data' => $stats]);
+    } else {
+        jsonResponse(['error' => 'Failed to get high accuracy performance stats'], 500);
+    }
+}
+
+// Optimized FaceNet Endpoints - iPhone-like Performance
+if ($action === 'process_optimized_attendance' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!isset($_SESSION['user'])) jsonResponse(['error' => 'Unauthorized'], 401);
+    
+    $base64Image = $_POST['image'] ?? '';
+    $threshold = floatval($_POST['threshold'] ?? 0.5);
+    
+    if (empty($base64Image)) {
+        jsonResponse(['error' => 'Image is required'], 400);
+    }
+    
+    $result = processOptimizedAttendance($base64Image, $threshold);
+    
+    if ($result) {
+        jsonResponse(['ok' => true, 'data' => $result]);
+    } else {
+        jsonResponse(['error' => 'Optimized attendance processing failed'], 500);
+    }
+}
+
+if ($action === 'recognize_face_optimized' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!isset($_SESSION['user'])) jsonResponse(['error' => 'Unauthorized'], 401);
+    
+    $base64Image = $_POST['image'] ?? '';
+    $threshold = floatval($_POST['threshold'] ?? 0.5);
+    
+    if (empty($base64Image)) {
+        jsonResponse(['error' => 'Image is required'], 400);
+    }
+    
+    $result = recognizeFaceOptimized($base64Image, $threshold);
+    
+    if ($result) {
+        jsonResponse(['ok' => true, 'data' => $result]);
+    } else {
+        jsonResponse(['error' => 'Optimized face recognition failed'], 500);
+    }
+}
+
+if ($action === 'generate_optimized_embedding' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!isset($_SESSION['user'])) jsonResponse(['error' => 'Unauthorized'], 401);
+    
+    $base64Image = $_POST['image'] ?? '';
+    if (empty($base64Image)) {
+        jsonResponse(['error' => 'Image is required'], 400);
+    }
+    
+    $result = generateOptimizedEmbedding($base64Image);
+    
+    if ($result) {
+        jsonResponse(['ok' => true, 'data' => $result]);
+    } else {
+        jsonResponse(['error' => 'Optimized embedding generation failed'], 500);
+    }
+}
+
+if ($action === 'get_optimized_stats' && $_SERVER['REQUEST_METHOD'] === 'GET') {
+    if (!isAdmin()) jsonResponse(['error' => 'Admin access required'], 403);
+    
+    $stats = getOptimizedPerformanceStats();
+    if ($stats) {
+        jsonResponse(['ok' => true, 'data' => $stats]);
+    } else {
+        jsonResponse(['error' => 'Failed to get optimized performance stats'], 500);
+    }
+}
+
+// Ultra Accurate FaceNet Endpoints - Maximum Accuracy with Ultra-Fast Response
+if ($action === 'process_ultra_accurate_attendance' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!isset($_SESSION['user'])) jsonResponse(['error' => 'Unauthorized'], 401);
+    
+    $base64Image = $_POST['image'] ?? '';
+    $validationLevel = $_POST['validation_level'] ?? 'normal';
+    
+    if (empty($base64Image)) {
+        jsonResponse(['error' => 'Image is required'], 400);
+    }
+    
+    $result = processUltraAccurateAttendance($base64Image, $validationLevel);
+    
+    if ($result) {
+        jsonResponse(['ok' => true, 'data' => $result]);
+    } else {
+        jsonResponse(['error' => 'Ultra accurate attendance processing failed'], 500);
+    }
+}
+
+if ($action === 'get_ultra_accurate_stats' && $_SERVER['REQUEST_METHOD'] === 'GET') {
+    if (!isAdmin()) jsonResponse(['error' => 'Admin access required'], 403);
+    
+    $stats = getUltraAccuratePerformanceStats();
+    if ($stats) {
+        jsonResponse(['ok' => true, 'data' => $stats]);
+    } else {
+        jsonResponse(['error' => 'Failed to get ultra accurate performance stats'], 500);
+    }
+}
+
+// iPhone-Level Accurate FaceNet Endpoints - Maximum Accuracy with Unique Feature Analysis
+if ($action === 'process_iphone_level_attendance' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!isset($_SESSION['user'])) jsonResponse(['error' => 'Unauthorized'], 401);
+    
+    $base64Image = $_POST['image'] ?? '';
+    
+    if (empty($base64Image)) {
+        jsonResponse(['error' => 'Image is required'], 400);
+    }
+    
+    $result = processIPhoneLevelAttendance($base64Image);
+    
+    if ($result) {
+        jsonResponse(['ok' => true, 'data' => $result]);
+    } else {
+        jsonResponse(['error' => 'iPhone-level attendance processing failed'], 500);
+    }
+}
+
+if ($action === 'get_iphone_level_stats' && $_SERVER['REQUEST_METHOD'] === 'GET') {
+    if (!isAdmin()) jsonResponse(['error' => 'Admin access required'], 403);
+    
+    $stats = getIPhoneLevelPerformanceStats();
+    if ($stats) {
+        jsonResponse(['ok' => true, 'data' => $stats]);
+    } else {
+        jsonResponse(['error' => 'Failed to get iPhone-level performance stats'], 500);
+    }
+}
+
     if ($action === 'update_bukti_izin_sakit' && $_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!isset($_SESSION['user'])) jsonResponse(['error' => 'Unauthorized'], 401);
         
