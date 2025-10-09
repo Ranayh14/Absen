@@ -542,7 +542,12 @@ class iPhoneLevelFaceNet {
             let result;
             switch (this.recognitionMode) {
                 case 'iphone_level':
-                    result = await this.callIPhoneLevelAPI('process_iphone_level_attendance', {
+                    result = await this.callDirectIPhoneLevelAPI('process_iphone_level_attendance', {
+                        image: imageData
+                    });
+                    break;
+                case 'ultra_detailed':
+                    result = await this.callUltraDetailedAPI('process_ultra_detailed_attendance', {
                         image: imageData
                     });
                     break;
@@ -609,6 +614,59 @@ class iPhoneLevelFaceNet {
         });
         
         return await response.json();
+    }
+    
+    async callDirectIPhoneLevelAPI(action, data) {
+        const formData = new FormData();
+        formData.append('action', action);
+        
+        for (const [key, value] of Object.entries(data)) {
+            formData.append(key, value);
+        }
+        
+        // Direct processing without API layer
+        const startTime = performance.now();
+        const response = await fetch('index.php', {
+            method: 'POST',
+            body: formData
+        });
+        const endTime = performance.now();
+        
+        const result = await response.json();
+        
+        // Add processing time info
+        if (result.ok && result.data) {
+            result.data.processing_time = endTime - startTime;
+        }
+        
+        return result;
+    }
+    
+    async callUltraDetailedAPI(action, data) {
+        const formData = new FormData();
+        formData.append('action', action);
+        
+        for (const [key, value] of Object.entries(data)) {
+            formData.append(key, value);
+        }
+        
+        // Ultra detailed processing with maximum speed
+        const startTime = performance.now();
+        const response = await fetch('index.php', {
+            method: 'POST',
+            body: formData
+        });
+        const endTime = performance.now();
+        
+        const result = await response.json();
+        
+        // Add processing time info
+        if (result.ok && result.data) {
+            result.data.processing_time = endTime - startTime;
+            result.data.ultra_detailed_features = result.data.ultra_features;
+        }
+        
+        return result;
     }
     
     async callUltraAccurateAPI(action, data) {

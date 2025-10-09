@@ -1633,8 +1633,20 @@ class iPhoneLevelFaceNetService:
                         # Calculate similarity score
                         similarity_score = self._calculate_iphone_similarity(unique_features, user)
                         
-                        if similarity_score > best_score and similarity_score > 0.85:  # High threshold
-                            best_score = similarity_score
+                        # Multi-layer validation for maximum accuracy
+                        if similarity_score > best_score and similarity_score > 0.98:  # Ultra-high threshold for maximum accuracy
+                            # Additional validation: check feature consistency
+                            feature_consistency = self._validate_feature_consistency(unique_features, user)
+                            # Enhanced validation: check facial geometry consistency
+                            geometry_consistency = self._validate_geometry_consistency(unique_features, user)
+                            # Enhanced validation: check texture consistency
+                            texture_consistency = self._validate_texture_consistency(unique_features, user)
+                            
+                            # Combined validation score
+                            combined_validation = (feature_consistency * 0.4) + (geometry_consistency * 0.3) + (texture_consistency * 0.3)
+                            
+                            if combined_validation > 0.95:  # Ultra-high combined validation
+                                best_score = similarity_score
                             best_match = {
                                 'nim': user['nim'],
                                 'nama': user['nama'],
@@ -1749,3 +1761,374 @@ if __name__ == '__main__':
     
     print("\nService initialized successfully.")
     print("Ready for iPhone-level accurate attendance processing.")
+    
+    def _validate_feature_consistency(self, unique_features, user):
+        """Validate feature consistency for additional accuracy check."""
+        try:
+            # Get stored features for the user
+            stored_features = user.get('advanced_features')
+            if not stored_features:
+                return 0.0
+                
+            # Parse stored features
+            if isinstance(stored_features, str):
+                stored_features = json.loads(stored_features)
+                
+            # Compare key features for consistency
+            consistency_scores = []
+            
+            # Compare eye features
+            if 'eyes' in unique_features and 'eyes' in stored_features:
+                eye_consistency = self._compare_eye_consistency(
+                    unique_features['eyes'], 
+                    stored_features['eyes']
+                )
+                consistency_scores.append(eye_consistency)
+                
+            # Compare nose features
+            if 'nose' in unique_features and 'nose' in stored_features:
+                nose_consistency = self._compare_nose_consistency(
+                    unique_features['nose'], 
+                    stored_features['nose']
+                )
+                consistency_scores.append(nose_consistency)
+                
+            # Compare mouth features
+            if 'mouth' in unique_features and 'mouth' in stored_features:
+                mouth_consistency = self._compare_mouth_consistency(
+                    unique_features['mouth'], 
+                    stored_features['mouth']
+                )
+                consistency_scores.append(mouth_consistency)
+                
+            # Calculate overall consistency
+            if consistency_scores:
+                return np.mean(consistency_scores)
+            else:
+                return 0.0
+                
+        except Exception as e:
+            logger.error(f"Error validating feature consistency: {e}")
+            return 0.0
+            
+    def _compare_eye_consistency(self, eyes1, eyes2):
+        """Compare eye features for consistency."""
+        try:
+            if not eyes1 or not eyes2:
+                return 0.0
+                
+            # Compare left eye
+            left_eye1 = eyes1.get('left_eye', {})
+            left_eye2 = eyes2.get('left_eye', {})
+            left_consistency = self._compare_single_eye_consistency(left_eye1, left_eye2)
+            
+            # Compare right eye
+            right_eye1 = eyes1.get('right_eye', {})
+            right_eye2 = eyes2.get('right_eye', {})
+            right_consistency = self._compare_single_eye_consistency(right_eye1, right_eye2)
+            
+            return (left_consistency + right_consistency) / 2
+            
+        except Exception as e:
+            logger.error(f"Error comparing eye consistency: {e}")
+            return 0.0
+            
+    def _compare_single_eye_consistency(self, eye1, eye2):
+        """Compare single eye features for consistency."""
+        try:
+            if not eye1 or not eye2:
+                return 0.0
+                
+            consistency_scores = []
+            
+            # Compare key eye features
+            for feature in ['width', 'height', 'aspect_ratio', 'curvature', 'angle']:
+                if feature in eye1 and feature in eye2:
+                    val1 = eye1[feature]
+                    val2 = eye2[feature]
+                    if val1 > 0 and val2 > 0:
+                        consistency = 1 - abs(val1 - val2) / max(val1, val2)
+                        consistency_scores.append(consistency)
+                        
+            return np.mean(consistency_scores) if consistency_scores else 0.0
+            
+        except Exception as e:
+            logger.error(f"Error comparing single eye consistency: {e}")
+            return 0.0
+            
+    def _compare_nose_consistency(self, nose1, nose2):
+        """Compare nose features for consistency."""
+        try:
+            if not nose1 or not nose2:
+                return 0.0
+                
+            consistency_scores = []
+            
+            # Compare key nose features
+            for feature in ['width', 'height', 'aspect_ratio', 'bridge_curvature', 'tip_curvature']:
+                if feature in nose1 and feature in nose2:
+                    val1 = nose1[feature]
+                    val2 = nose2[feature]
+                    if val1 > 0 and val2 > 0:
+                        consistency = 1 - abs(val1 - val2) / max(val1, val2)
+                        consistency_scores.append(consistency)
+                        
+            return np.mean(consistency_scores) if consistency_scores else 0.0
+            
+        except Exception as e:
+            logger.error(f"Error comparing nose consistency: {e}")
+            return 0.0
+            
+    def _compare_mouth_consistency(self, mouth1, mouth2):
+        """Compare mouth features for consistency."""
+        try:
+            if not mouth1 or not mouth2:
+                return 0.0
+                
+            consistency_scores = []
+            
+            # Compare key mouth features
+            for feature in ['width', 'height', 'aspect_ratio', 'curvature', 'angle', 'lip_fullness']:
+                if feature in mouth1 and feature in mouth2:
+                    val1 = mouth1[feature]
+                    val2 = mouth2[feature]
+                    if val1 > 0 and val2 > 0:
+                        consistency = 1 - abs(val1 - val2) / max(val1, val2)
+                        consistency_scores.append(consistency)
+                        
+            return np.mean(consistency_scores) if consistency_scores else 0.0
+            
+        except Exception as e:
+            logger.error(f"Error comparing mouth consistency: {e}")
+            return 0.0
+            
+    def _validate_geometry_consistency(self, unique_features, user):
+        """Validate facial geometry consistency for enhanced accuracy."""
+        try:
+            stored_features = user.get('facial_geometry')
+            if not stored_features:
+                return 0.0
+                
+            if isinstance(stored_features, str):
+                stored_features = json.loads(stored_features)
+                
+            consistency_scores = []
+            
+            # Compare facial proportions
+            if 'proportions' in unique_features and 'proportions' in stored_features:
+                proportion_consistency = self._compare_proportion_consistency(
+                    unique_features['proportions'], 
+                    stored_features['proportions']
+                )
+                consistency_scores.append(proportion_consistency)
+                
+            # Compare facial symmetry
+            if 'symmetry' in unique_features and 'symmetry' in stored_features:
+                symmetry_consistency = self._compare_symmetry_consistency(
+                    unique_features['symmetry'], 
+                    stored_features['symmetry']
+                )
+                consistency_scores.append(symmetry_consistency)
+                
+            return np.mean(consistency_scores) if consistency_scores else 0.0
+            
+        except Exception as e:
+            logger.error(f"Error validating geometry consistency: {e}")
+            return 0.0
+            
+    def _validate_texture_consistency(self, unique_features, user):
+        """Validate skin texture consistency for enhanced accuracy."""
+        try:
+            stored_features = user.get('texture')
+            if not stored_features:
+                return 0.0
+                
+            if isinstance(stored_features, str):
+                stored_features = json.loads(stored_features)
+                
+            consistency_scores = []
+            
+            # Compare texture features
+            for feature in ['smoothness', 'contrast', 'uniformity', 'entropy']:
+                if feature in unique_features and feature in stored_features:
+                    val1 = unique_features[feature]
+                    val2 = stored_features[feature]
+                    if val1 > 0 and val2 > 0:
+                        consistency = 1 - abs(val1 - val2) / max(val1, val2)
+                        consistency_scores.append(consistency)
+                        
+            return np.mean(consistency_scores) if consistency_scores else 0.0
+            
+        except Exception as e:
+            logger.error(f"Error validating texture consistency: {e}")
+            return 0.0
+            
+    def _compare_proportion_consistency(self, proportions1, proportions2):
+        """Compare facial proportion consistency."""
+        try:
+            if not proportions1 or not proportions2:
+                return 0.0
+                
+            consistency_scores = []
+            
+            # Compare key proportions
+            for feature in ['face_width_to_height', 'eye_to_face_ratio', 'nose_to_face_ratio', 'mouth_to_face_ratio', 'golden_ratio_compliance']:
+                if feature in proportions1 and feature in proportions2:
+                    val1 = proportions1[feature]
+                    val2 = proportions2[feature]
+                    if val1 > 0 and val2 > 0:
+                        consistency = 1 - abs(val1 - val2) / max(val1, val2)
+                        consistency_scores.append(consistency)
+                        
+            return np.mean(consistency_scores) if consistency_scores else 0.0
+            
+        except Exception as e:
+            logger.error(f"Error comparing proportion consistency: {e}")
+            return 0.0
+            
+    def _compare_symmetry_consistency(self, symmetry1, symmetry2):
+        """Compare facial symmetry consistency."""
+        try:
+            if not symmetry1 or not symmetry2:
+                return 0.0
+                
+            consistency_scores = []
+            
+            # Compare key symmetry features
+            for feature in ['overall_symmetry', 'eye_symmetry', 'eyebrow_symmetry', 'nose_symmetry', 'mouth_symmetry']:
+                if feature in symmetry1 and feature in symmetry2:
+                    val1 = symmetry1[feature]
+                    val2 = symmetry2[feature]
+                    consistency = 1 - abs(val1 - val2)
+                    consistency_scores.append(consistency)
+                    
+            return np.mean(consistency_scores) if consistency_scores else 0.0
+            
+        except Exception as e:
+            logger.error(f"Error comparing symmetry consistency: {e}")
+            return 0.0
+            
+    def _enhanced_face_detection(self, gray_image):
+        """Enhanced face detection with multiple algorithms for better accuracy."""
+        try:
+            faces = []
+            
+            # Method 1: dlib face detector
+            if self.face_detector:
+                dlib_faces = self.face_detector(gray_image)
+                for face in dlib_faces:
+                    faces.append({
+                        'bbox': (face.left(), face.top(), face.right(), face.bottom()),
+                        'method': 'dlib',
+                        'confidence': 1.0
+                    })
+            
+            # Method 2: OpenCV Haar Cascade
+            try:
+                cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+                face_cascade = cv2.CascadeClassifier(cascade_path)
+                cv_faces = face_cascade.detectMultiScale(gray_image, 1.1, 4)
+                
+                for (x, y, w, h) in cv_faces:
+                    faces.append({
+                        'bbox': (x, y, x + w, y + h),
+                        'method': 'opencv',
+                        'confidence': 0.9
+                    })
+            except Exception as e:
+                logger.warning(f"OpenCV face detection failed: {e}")
+            
+            # Method 3: MTCNN (if available)
+            try:
+                from mtcnn import MTCNN
+                mtcnn = MTCNN()
+                mtcnn_faces = mtcnn.detect_faces(gray_image)
+                
+                for face in mtcnn_faces:
+                    bbox = face['box']
+                    faces.append({
+                        'bbox': (bbox[0], bbox[1], bbox[0] + bbox[2], bbox[1] + bbox[3]),
+                        'method': 'mtcnn',
+                        'confidence': face['confidence']
+                    })
+            except ImportError:
+                logger.info("MTCNN not available, skipping")
+            except Exception as e:
+                logger.warning(f"MTCNN face detection failed: {e}")
+            
+            return faces
+            
+        except Exception as e:
+            logger.error(f"Enhanced face detection failed: {e}")
+            return []
+            
+    def _select_best_face(self, faces, gray_image):
+        """Select the best face from detected faces based on quality metrics."""
+        try:
+            if not faces:
+                return None
+                
+            best_face = None
+            best_score = 0
+            
+            for face in faces:
+                bbox = face['bbox']
+                x1, y1, x2, y2 = bbox
+                
+                # Extract face region
+                face_region = gray_image[y1:y2, x1:x2]
+                
+                if face_region.size == 0:
+                    continue
+                    
+                # Calculate quality metrics
+                quality_score = self._calculate_face_quality(face_region, bbox)
+                
+                # Combine with detection confidence
+                combined_score = (quality_score * 0.7) + (face['confidence'] * 0.3)
+                
+                if combined_score > best_score:
+                    best_score = combined_score
+                    best_face = face
+                    
+            return best_face
+            
+        except Exception as e:
+            logger.error(f"Error selecting best face: {e}")
+            return faces[0] if faces else None
+            
+    def _calculate_face_quality(self, face_region, bbox):
+        """Calculate face quality score for better selection."""
+        try:
+            if face_region.size == 0:
+                return 0.0
+                
+            # Calculate size score
+            height, width = face_region.shape
+            size_score = min(1.0, min(height, width) / 100)
+            
+            # Calculate sharpness score
+            laplacian_var = cv2.Laplacian(face_region, cv2.CV_64F).var()
+            sharpness_score = min(1.0, laplacian_var / 1000)
+            
+            # Calculate lighting score
+            mean_brightness = np.mean(face_region)
+            lighting_score = 1 - abs(mean_brightness - 128) / 128
+            
+            # Calculate contrast score
+            contrast = np.std(face_region)
+            contrast_score = min(1.0, contrast / 64)
+            
+            # Calculate aspect ratio score
+            aspect_ratio = width / height if height > 0 else 0
+            ideal_ratio = 0.75  # Typical face aspect ratio
+            ratio_score = 1 - abs(aspect_ratio - ideal_ratio) / ideal_ratio
+            
+            # Combined quality score
+            quality_score = (size_score * 0.2) + (sharpness_score * 0.3) + (lighting_score * 0.2) + (contrast_score * 0.2) + (ratio_score * 0.1)
+            
+            return max(0, quality_score)
+            
+        except Exception as e:
+            logger.error(f"Error calculating face quality: {e}")
+            return 0.0
