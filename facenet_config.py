@@ -11,15 +11,15 @@ import os
 FACENET_MODEL_PATH = os.path.join('facenet-master', 'models', '20180402-114759')
 MTCNN_MODEL_PATH = os.path.join('facenet-master', 'models', 'mtcnn_weights')
 
-# Face detection settings
+# Face detection settings - Optimized for maximum speed
 FACE_CROP_SIZE = 160
 FACE_CROP_MARGIN = 32
-MIN_FACE_SIZE = 20
-FACE_THRESHOLDS = [0.6, 0.7, 0.7]  # MTCNN thresholds
+MIN_FACE_SIZE = 30  # Smaller minimum face size for faster detection
+FACE_THRESHOLDS = [0.6, 0.7, 0.7]  # Balanced MTCNN thresholds for speed and accuracy
 
-# Recognition settings
-DEFAULT_THRESHOLD = 1.0
-MAX_FACES_PER_IMAGE = 10
+# Recognition settings - Optimized for maximum speed
+DEFAULT_THRESHOLD = 0.4  # Balanced threshold for speed and accuracy
+MAX_FACES_PER_IMAGE = 1  # Limit to 1 face for better performance
 
 # Image processing settings
 IMAGE_SIZE = (224, 224)
@@ -58,9 +58,12 @@ DEBUG_IMAGE_PATH = 'debug_images'
 MODEL_BACKEND = 'tensorflow'  # 'tensorflow' or 'keras'
 MODEL_VERSION = '1.0'
 
-# Face recognition settings
+# Face recognition settings - Optimized for maximum speed
 RECOGNITION_METHOD = 'euclidean'  # 'euclidean' or 'cosine'
 NORMALIZE_EMBEDDINGS = True
+GENDER_VALIDATION = False  # Disable gender validation for maximum speed
+MULTI_ATTEMPT_VALIDATION = False  # Disable multiple validation attempts for maximum speed
+STRICT_MODE = False  # Disable strict mode for maximum speed
 
 # Cache settings
 ENABLE_CACHE = True

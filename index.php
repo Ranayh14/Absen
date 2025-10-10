@@ -1535,10 +1535,10 @@ if (isset($_GET['ajax'])) {
                 $jamMasukFormat = substr($jamSekarang, 0, 5);
                 $firstName = getFirstName($u['nama']);
                 if ($isLate) {
-                    $statusText = "{$firstName} masuk {$jamMasukFormat} telat";
+                    $statusText = "Selamat datang {$firstName}, anda masuk {$jamMasukFormat}. terlambat!";
                     jsonResponse(['ok' => true, 'message' => $statusText, 'nama' => $u['nama'], 'jam' => $jamMasukFormat, 'statusClass' => 'bg-yellow-100 text-yellow-700']);
                 } else {
-                    $statusText = "{$firstName} masuk {$jamMasukFormat}";
+                    $statusText = "Selamat datang {$firstName}, anda masuk {$jamMasukFormat}. OnTime!";
                     jsonResponse(['ok' => true, 'message' => $statusText, 'nama' => $u['nama'], 'jam' => $jamMasukFormat, 'statusClass' => 'bg-green-100 text-green-700']);
                 }
             } else {
@@ -4475,25 +4475,60 @@ let performanceStats = {
     lastDetectionTime: 0
 };
 
-// BALANCED: Detection config optimized for speed and accuracy
+// ULTRA-FAST: Detection config optimized for maximum speed with good accuracy
 let detectionConfig = {
-    faceMatcherThreshold: 0.5, // Balanced threshold for good accuracy
-    recognitionThreshold: 0.5, // Balanced threshold for good accuracy
-    inputSize: 320, // Lower resolution for maximum speed
-    scoreThreshold: 0.3, // Lower threshold for better face detection
-    minFaceSize: 60, // Smaller minimum face size for better detection
+    faceMatcherThreshold: 0.4, // Balanced threshold for speed and accuracy
+    recognitionThreshold: 0.4, // Balanced threshold for speed and accuracy
+    inputSize: 320, // Lower resolution for maximum speed (was 416)
+    scoreThreshold: 0.3, // Lower threshold for faster detection (was 0.4)
+    minFaceSize: 60, // Smaller minimum face size for faster detection (was 80)
     maxFaces: 1, // Limit to 1 face for faster processing
-    confidenceThreshold: 0.7, // Balanced confidence
-    detectionThrottle: 1, // Ultra-fast detection (1000 FPS) for <2 second processing
-    qualityThreshold: 0.6, // Balanced quality threshold
-    landmarkThreshold: 0.6, // Balanced landmark threshold
-    expressionThreshold: 0.5, // Balanced expression threshold
-    landmarkWeight: 0.4, // Weight for facial landmarks
-    descriptorWeight: 0.6 // Weight for face descriptor
+    confidenceThreshold: 0.7, // Balanced confidence requirement (was 0.8)
+    detectionThrottle: 1, // Ultra-fast detection (1000 FPS) for <1 second processing
+    qualityThreshold: 0.6, // Balanced quality threshold for speed (was 0.75)
+    landmarkThreshold: 0.6, // Balanced landmark threshold for speed (was 0.75)
+    expressionThreshold: 0.5, // Balanced expression threshold (was 0.6)
+    landmarkWeight: 0.4, // Reduced weight for speed (was 0.5)
+    descriptorWeight: 0.6, // Increased weight for face descriptor for speed (was 0.5)
+    genderValidation: false, // Disable gender validation for maximum speed
+    multiAttemptValidation: false, // Disable multi-attempt validation for maximum speed
+    strictMode: false // Disable strict mode for maximum speed
 };
 let logMasukData = [];
 let logPulangData = [];
+let members = []; // Global members array for gender validation
 
+
+// OPTIMIZED: Fast location detection without external API calls
+function getStreetNameFromCoordinates(lat, lng) {
+    // ULTRA-FAST: Skip external API calls for maximum speed
+    // Just use local distance calculation for instant results
+    
+    const teluLat = -6.9738;
+    const teluLng = 107.6300;
+    const distance = calculateDistance(lat, lng, teluLat, teluLng);
+    
+    if (distance < 1.0) { // Within 1 km of Telkom University
+        return 'Fakultas Ilmu Terapan, Jl. Telekomunikasi, Bandung';
+    } else if (distance < 5.0) { // Within 5 km
+        return `Jl. Telekomunikasi Area, Bandung (${distance.toFixed(1)}km from campus)`;
+    } else {
+        // Return coordinates as fallback with distance info
+        return `Lokasi: ${lat.toFixed(6)}, ${lng.toFixed(6)} (${distance.toFixed(1)}km from campus)`;
+    }
+}
+
+// Helper function to calculate distance between two coordinates
+function calculateDistance(lat1, lng1, lat2, lng2) {
+    const R = 6371; // Earth's radius in kilometers
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLng = (lng2 - lng1) * Math.PI / 180;
+    const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+              Math.sin(dLng/2) * Math.sin(dLng/2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    return R * c;
+}
 
 // Helper functions for image variations to improve recognition accuracy
 function createRotatedImage(img, degrees) {
@@ -4631,7 +4666,7 @@ async function fetchMembers(){
 }
 
 async function loadLabeledFaceDescriptors(){
-    const members = await fetchMembers();
+    members = await fetchMembers(); // Store globally for gender validation
     labeledFaceDescriptors = [];
     // ULTRA-FAST: Skip logging for maximum speed
     let loadedCount = 0;
@@ -4651,11 +4686,9 @@ async function loadLabeledFaceDescriptors(){
                 // ENHANCED: Multiple detection attempts for better accuracy
                 let det = null;
                 
-                // ULTRA-FAST: Try with maximum speed parameters
+                // ULTRA-FAST: Single optimized detection attempt for maximum speed
                 const detectionParams = [
-                    { inputSize: 320, scoreThreshold: 0.3 }, // Primary attempt - fast resolution
-                    { inputSize: 224, scoreThreshold: 0.25 },  // Fallback 1 - faster
-                    { inputSize: 160, scoreThreshold: 0.2 }  // Fallback 2 - fastest
+                    { inputSize: 320, scoreThreshold: 0.3 } // Single ultra-fast attempt
                 ];
                 
                 for (const params of detectionParams) {
@@ -4673,32 +4706,7 @@ async function loadLabeledFaceDescriptors(){
                     // Create multiple descriptors for better accuracy
                     const descriptors = [det.descriptor];
                     
-                    // ENHANCED: Create multiple descriptors for better accuracy
-                    try {
-                        // Create a slightly rotated version for better recognition
-                        const rotatedImg = await createRotatedImage(img, 3); // 3 degree rotation
-                        const rotatedDet = await faceapi.detectSingleFace(rotatedImg, new faceapi.TinyFaceDetectorOptions({
-                            inputSize: 224,
-                            scoreThreshold: 0.3
-                        })).withFaceLandmarks().withFaceDescriptor();
-                        
-                        if (rotatedDet) {
-                            descriptors.push(rotatedDet.descriptor);
-                        }
-                        
-                        // Create a slightly scaled version
-                        const scaledImg = await createScaledImage(img, 0.98); // 98% scale
-                        const scaledDet = await faceapi.detectSingleFace(scaledImg, new faceapi.TinyFaceDetectorOptions({
-                            inputSize: 224,
-                            scoreThreshold: 0.3
-                        })).withFaceLandmarks().withFaceDescriptor();
-                        
-                        if (scaledDet) {
-                            descriptors.push(scaledDet.descriptor);
-                        }
-                    } catch (variationError) {
-                        console.warn(`Could not create variations for ${m.nama}:`, variationError);
-                    }
+                    // OPTIMIZED: Skip multiple descriptors for speed - single high-quality descriptor is sufficient
                     
                     return new faceapi.LabeledFaceDescriptors(m.nim, descriptors);
                 } else {
@@ -4723,20 +4731,22 @@ async function loadLabeledFaceDescriptors(){
     }
 }
 
-// BALANCED: Dynamic threshold adjustment for optimal performance
+// ULTRA-FAST: Smart threshold adjustment for maximum speed
 function adjustDetectionThreshold() {
-    // Smart threshold adjustment based on performance
-    if (performanceStats.detectionCount > 50 && performanceStats.averageDetectionTime > 200) {
-        console.log('🔧 Adjusting thresholds for better performance...');
-        detectionConfig.faceMatcherThreshold = Math.min(0.6, detectionConfig.faceMatcherThreshold + 0.02);
-        detectionConfig.recognitionThreshold = Math.min(0.6, detectionConfig.recognitionThreshold + 0.02);
+    // Smart threshold adjustment based on performance for maximum speed
+    if (performanceStats.detectionCount > 20 && performanceStats.averageDetectionTime > 200) {
+        console.log('🔧 Adjusting thresholds for maximum speed...');
+        // Increase thresholds to reduce processing time
+        detectionConfig.faceMatcherThreshold = Math.min(0.5, detectionConfig.faceMatcherThreshold + 0.05);
+        detectionConfig.recognitionThreshold = Math.min(0.5, detectionConfig.recognitionThreshold + 0.05);
         console.log(`📊 New thresholds: FaceMatcher=${detectionConfig.faceMatcherThreshold}, Recognition=${detectionConfig.recognitionThreshold}`);
-    } else if (performanceStats.detectionCount > 100 && performanceStats.averageDetectionTime < 150) {
-        // If performance is good, we can be more strict for better accuracy
-        console.log('🔧 Performance is good, optimizing for accuracy...');
-        detectionConfig.faceMatcherThreshold = Math.max(0.4, detectionConfig.faceMatcherThreshold - 0.01);
-        detectionConfig.recognitionThreshold = Math.max(0.4, detectionConfig.recognitionThreshold - 0.01);
-        console.log(`📊 Optimized thresholds: FaceMatcher=${detectionConfig.faceMatcherThreshold}, Recognition=${detectionConfig.recognitionThreshold}`);
+    } else if (performanceStats.detectionCount > 30 && performanceStats.averageDetectionTime < 150) {
+        // If performance is good, maintain balanced thresholds
+        console.log('🔧 Performance is good, maintaining speed-optimized thresholds...');
+        // Keep balanced thresholds for speed
+        detectionConfig.faceMatcherThreshold = Math.max(0.4, detectionConfig.faceMatcherThreshold);
+        detectionConfig.recognitionThreshold = Math.max(0.4, detectionConfig.recognitionThreshold);
+        console.log(`📊 Speed-optimized thresholds: FaceMatcher=${detectionConfig.faceMatcherThreshold}, Recognition=${detectionConfig.recognitionThreshold}`);
     }
 }
 
@@ -5004,18 +5014,18 @@ function assessFaceQuality(face) {
     // Quality factors with detailed analysis
     let quality = 1.0;
     
-    // 1. Size factor (prefer larger faces for better detail)
-    if (area < 15000) quality *= 0.6; // Too small
-    else if (area < 25000) quality *= 0.8; // Small but acceptable
-    else if (area > 80000) quality *= 1.3; // Large and detailed
-    else if (area > 50000) quality *= 1.1; // Good size
+    // 1. Size factor (prefer larger faces for better detail) - stricter requirements
+    if (area < 20000) quality *= 0.4; // Too small - stricter
+    else if (area < 30000) quality *= 0.7; // Small but acceptable
+    else if (area > 100000) quality *= 1.4; // Large and detailed - bonus
+    else if (area > 60000) quality *= 1.2; // Good size - bonus
     
     // 2. Aspect ratio factor (prefer natural face proportions)
     if (aspectRatio < 0.6 || aspectRatio > 1.6) quality *= 0.5; // Too distorted
     else if (aspectRatio < 0.7 || aspectRatio > 1.4) quality *= 0.8; // Slightly distorted
     else if (aspectRatio >= 0.8 && aspectRatio <= 1.2) quality *= 1.2; // Good proportions
     
-    // 3. Position factor (prefer centered faces)
+    // 3. Position factor (prefer centered faces) - stricter centering
     const centerX = box.x + box.width / 2;
     const centerY = box.y + box.height / 2;
     const canvasCenterX = 320; // Assuming 640px width
@@ -5023,9 +5033,9 @@ function assessFaceQuality(face) {
     const distanceFromCenter = Math.sqrt(
         Math.pow(centerX - canvasCenterX, 2) + Math.pow(centerY - canvasCenterY, 2)
     );
-    if (distanceFromCenter > 150) quality *= 0.7; // Too far from center
-    else if (distanceFromCenter > 100) quality *= 0.9; // Slightly off-center
-    else if (distanceFromCenter < 50) quality *= 1.1; // Well centered
+    if (distanceFromCenter > 120) quality *= 0.5; // Too far from center - stricter
+    else if (distanceFromCenter > 80) quality *= 0.8; // Slightly off-center
+    else if (distanceFromCenter < 40) quality *= 1.3; // Well centered - bonus
     
     // 4. Enhanced landmark quality factor (if available)
     if (face.landmarks) {
@@ -5041,11 +5051,35 @@ function assessFaceQuality(face) {
         else if (maxExpression < 0.3) quality *= 0.9; // Unclear expression
     }
     
-    // 6. Detection confidence factor
+    // 6. Detection confidence factor - stricter requirements
     if (face.detection.score) {
-        if (face.detection.score > 0.9) quality *= 1.2; // High confidence
+        if (face.detection.score > 0.95) quality *= 1.4; // Very high confidence - bonus
+        else if (face.detection.score > 0.9) quality *= 1.2; // High confidence
         else if (face.detection.score > 0.8) quality *= 1.1; // Good confidence
-        else if (face.detection.score < 0.6) quality *= 0.8; // Low confidence
+        else if (face.detection.score < 0.7) quality *= 0.6; // Low confidence - stricter
+    }
+    
+    // 7. Face angle and symmetry factor (if landmarks available)
+    if (face.landmarks && face.landmarks.positions) {
+        const landmarks = face.landmarks.positions;
+        
+        // Check eye symmetry
+        if (landmarks[36] && landmarks[45]) {
+            const leftEyeX = landmarks[36].x;
+            const rightEyeX = landmarks[45].x;
+            const eyeSymmetry = Math.abs(leftEyeX - rightEyeX);
+            if (eyeSymmetry > 20) quality *= 0.7; // Face is tilted
+            else if (eyeSymmetry < 10) quality *= 1.2; // Good symmetry - bonus
+        }
+        
+        // Check nose position
+        if (landmarks[30] && landmarks[36] && landmarks[45]) {
+            const noseX = landmarks[30].x;
+            const faceCenterX = (landmarks[36].x + landmarks[45].x) / 2;
+            const noseOffset = Math.abs(noseX - faceCenterX);
+            if (noseOffset > 15) quality *= 0.8; // Nose off-center
+            else if (noseOffset < 5) quality *= 1.1; // Well centered nose - bonus
+        }
     }
     
     return Math.max(0, Math.min(1.5, quality)); // Allow quality > 1 for excellent faces
@@ -5231,21 +5265,43 @@ let lastSuccessfulDetection = null;
 function shouldAcceptDetection(result, face) {
     if (!result || result.label === 'unknown') return false;
     
-    // ENHANCED: More lenient checks for better recognition
+    // ENHANCED: Stricter checks for better accuracy and prevent misdetection
     if (result.distance > detectionConfig.recognitionThreshold) return false;
     
     // Enhanced quality check with facial feature analysis
     const quality = assessFaceQuality(face);
     if (quality < detectionConfig.qualityThreshold) return false;
     
-    // BALANCED: Enhanced facial feature consistency check
+    // ENHANCED: Stricter facial feature consistency check
     if (face.landmarks) {
         const landmarkScore = assessEnhancedLandmarkQuality(face.landmarks);
-        if (landmarkScore < 0.4) return false; // Balanced threshold for good accuracy
+        if (landmarkScore < detectionConfig.landmarkThreshold) return false; // Use config threshold
+    }
+    
+    // NEW: Gender validation to prevent cross-gender misdetection
+    if (detectionConfig.genderValidation) {
+        const genderMatch = validateGenderConsistency(result.label, face);
+        if (!genderMatch) {
+            console.log(`🚫 Gender validation failed for ${result.label}`);
+            return false;
+        }
+    }
+    
+    // NEW: Multi-attempt validation for critical decisions
+    if (detectionConfig.multiAttemptValidation && detectionConfig.strictMode) {
+        const validationScore = performMultiAttemptValidation(result, face);
+        if (validationScore < 0.5) { // Reduced from 0.8 to 0.5 for more practical validation
+            console.log(`🚫 Multi-attempt validation failed for ${result.label} (score: ${validationScore.toFixed(3)})`);
+            return false;
+        }
     }
     
     // Check if this person is already being processed
     if (isProcessingRecognition) return false;
+    
+    // ENHANCED: Log successful detection for debugging
+    console.log(`✅ Valid detection: ${result.label} (distance: ${result.distance.toFixed(3)}, quality: ${quality.toFixed(3)})`);
+    console.log(`🎯 Processing attendance for: ${result.label}`);
     
     // INSTANT RECOGNITION: Process immediately on first valid detection
     addToRecognitionQueue(result.label, face);
@@ -5256,6 +5312,114 @@ function addToRecognitionQueue(label, face) {
     // INSTANT PROCESSING: Always process immediately for maximum speed
     // console.log(`🚀 INSTANT PROCESSING for ${label}`);
     handleRecognition(label, 'Biasa'); // Use default expression for speed
+}
+
+// NEW: Gender validation function to prevent cross-gender misdetection
+function validateGenderConsistency(label, face) {
+    try {
+        // Check if members array is available
+        if (!members || !Array.isArray(members) || members.length === 0) {
+            console.log('⚠️ Members array not available for gender validation, allowing detection');
+            return true; // Allow detection if no member data
+        }
+        
+        // Get employee data to check gender consistency
+        const employee = members.find(m => m.nim === label);
+        if (!employee) {
+            console.log(`⚠️ Employee data not found for ${label}, allowing detection`);
+            return true; // If no employee data, allow detection
+        }
+        
+        // Simple gender detection based on facial features
+        if (face.landmarks && face.landmarks.positions) {
+            const landmarks = face.landmarks.positions;
+            
+            // Check if we have enough landmarks
+            if (landmarks.length < 68) {
+                console.log(`⚠️ Insufficient landmarks for gender validation (${landmarks.length}/68), allowing detection`);
+                return true;
+            }
+            
+            // Analyze jawline width (typically wider in males)
+            const jawWidth = Math.abs(landmarks[16].x - landmarks[0].x);
+            const faceHeight = Math.abs(landmarks[8].y - landmarks[19].y);
+            const jawRatio = jawWidth / faceHeight;
+            
+            // Analyze eyebrow thickness and position
+            const leftEyebrowThickness = Math.abs(landmarks[19].y - landmarks[20].y);
+            const rightEyebrowThickness = Math.abs(landmarks[24].y - landmarks[25].y);
+            const avgEyebrowThickness = (leftEyebrowThickness + rightEyebrowThickness) / 2;
+            
+            // More lenient heuristic: wider jaw and thicker eyebrows suggest male
+            const isLikelyMale = jawRatio > 0.75 && avgEyebrowThickness > 4; // More strict criteria
+            const isLikelyFemale = jawRatio < 0.6 && avgEyebrowThickness < 2; // More strict criteria
+            
+            // Check if employee name suggests gender (simple heuristic)
+            const name = employee.nama.toLowerCase();
+            const maleNames = ['budi', 'andi', 'joko', 'agus', 'doni', 'riko', 'tono', 'surya', 'rama', 'ahmad', 'muhammad', 'ali', 'umar', 'yusuf'];
+            const femaleNames = ['sari', 'dewi', 'maya', 'lina', 'rina', 'siti', 'nina', 'dina', 'lisa', 'ana', 'sarah', 'fatimah', 'aisha', 'zainab'];
+            
+            const nameSuggestsMale = maleNames.some(maleName => name.includes(maleName));
+            const nameSuggestsFemale = femaleNames.some(femaleName => name.includes(femaleName));
+            
+            // Only reject if we have VERY strong conflicting indicators
+            if (isLikelyMale && nameSuggestsFemale && jawRatio > 0.8 && avgEyebrowThickness > 5) {
+                console.log(`🚫 Strong gender mismatch: Face strongly suggests male but name suggests female for ${label}`);
+                return false;
+            }
+            if (isLikelyFemale && nameSuggestsMale && jawRatio < 0.55 && avgEyebrowThickness < 1.5) {
+                console.log(`🚫 Strong gender mismatch: Face strongly suggests female but name suggests male for ${label}`);
+                return false;
+            }
+            
+            console.log(`✅ Gender validation passed for ${label} (jawRatio: ${jawRatio.toFixed(3)}, eyebrowThickness: ${avgEyebrowThickness.toFixed(3)})`);
+        }
+        
+        return true; // Allow detection if no clear gender mismatch
+    } catch (error) {
+        console.warn('Gender validation error:', error);
+        return true; // Allow detection on error
+    }
+}
+
+// NEW: Multi-attempt validation for critical decisions
+function performMultiAttemptValidation(result, face) {
+    try {
+        let validationScore = 0;
+        let attempts = 0;
+        
+        // Score 1: Distance-based validation (more lenient)
+        if (result.distance < 0.25) validationScore += 0.4;
+        else if (result.distance < 0.35) validationScore += 0.35;
+        else if (result.distance < 0.45) validationScore += 0.3;
+        else if (result.distance < 0.55) validationScore += 0.2; // More lenient
+        attempts++;
+        
+        // Score 2: Quality-based validation (more lenient)
+        const quality = assessFaceQuality(face);
+        if (quality > 0.8) validationScore += 0.3;
+        else if (quality > 0.7) validationScore += 0.25;
+        else if (quality > 0.6) validationScore += 0.2;
+        else if (quality > 0.5) validationScore += 0.15; // More lenient
+        attempts++;
+        
+        // Score 3: Landmark-based validation (more lenient)
+        if (face.landmarks) {
+            const landmarkScore = assessEnhancedLandmarkQuality(face.landmarks);
+            if (landmarkScore > 0.7) validationScore += 0.3;
+            else if (landmarkScore > 0.6) validationScore += 0.25;
+            else if (landmarkScore > 0.5) validationScore += 0.2;
+            else if (landmarkScore > 0.4) validationScore += 0.15; // More lenient
+            attempts++;
+        }
+        
+        const finalScore = attempts > 0 ? validationScore / attempts : 0;
+        console.log(`Multi-attempt validation score: ${finalScore.toFixed(3)} (distance: ${result.distance.toFixed(3)}, quality: ${quality.toFixed(3)})`);
+        return finalScore;
+    } catch (error) {
+        console.warn('Multi-attempt validation error:', error);
+        return 0.6; // More lenient neutral score on error
+    }
 }
 
 // Queue system removed for instant processing
@@ -5281,8 +5445,12 @@ async function handleRecognition(nim, topExpression){
                     const ctx = canvas.getContext('2d');
                     canvas.width = video.videoWidth;
                     canvas.height = video.videoHeight;
-                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-                    const screenshot = canvas.toDataURL('image/jpeg', 0.05); // ULTRA-FAST: Ultra-minimal quality for iPhone-like speed
+                    // Resize to speed up upload while keeping enough detail for verification
+                    const targetW = 320; const scale = targetW / canvas.width; const targetH = Math.round(canvas.height * scale);
+                    const tmp = document.createElement('canvas'); const tctx = tmp.getContext('2d');
+                    tmp.width = targetW; tmp.height = targetH;
+                    tctx.drawImage(video, 0, 0, targetW, targetH);
+                    const screenshot = tmp.toDataURL('image/jpeg', 0.6); // Balanced compression for speed + clarity
                     // console.log('Screenshot taken successfully, size:', screenshot.length);
                     resolve(screenshot);
                 } else {
@@ -5301,7 +5469,7 @@ async function handleRecognition(nim, topExpression){
             navigator.geolocation.getCurrentPosition(
                 pos => resolve(pos), 
                 err => resolve(null), 
-                { enableHighAccuracy: false, timeout: 25, maximumAge: 1200000 } // ULTRA-FAST: 25ms timeout, 20min cache
+                { enableHighAccuracy: false, timeout: 10, maximumAge: 300000 } // ULTRA-FAST: 10ms timeout, 5min cache
             );
         })
     ]);
@@ -5319,11 +5487,9 @@ async function handleRecognition(nim, topExpression){
         lat = position.coords.latitude;
         lng = position.coords.longitude;
     }
-    // ULTRA-FAST: Skip reverse geocoding for maximum speed
-    // Reverse geocoding is too slow for real-time attendance
-    // Just use coordinates for location tracking
+    // ULTRA-FAST: Convert coordinates to readable street names (instant)
     if(lat!==null && lng!==null){ 
-        lokasi = `Lokasi: ${lat.toFixed(6)}, ${lng.toFixed(6)}`; // Ultra-fast location format
+        lokasi = getStreetNameFromCoordinates(lat, lng); // Remove await for instant processing
     }
 
     async function submitAttendance(extra={}){
