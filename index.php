@@ -3739,10 +3739,7 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                         <div></div>
                     </div>
                     <div class="mb-4 flex gap-2 flex-wrap">
-                        <button id="btn-open-absence" class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-lg">Input Keterangan Manual</button>
-                        <button id="btn-update-wfa-locations" class="bg-green-600 hover:bg-green-700 text-white font-semibold py-2 px-4 rounded-lg">Update Lokasi WFA</button>
-                        <button id="btn-create-backup" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded-lg">Buat Backup</button>
-                        <button id="btn-backup-status" class="bg-gray-600 hover:bg-gray-700 text-white font-semibold py-2 px-4 rounded-lg">Status Backup</button>
+                        <button id="btn-open-absence" class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-lg">Input Keterangan Manual</button>            
                     </div>
                     <div class="overflow-x-auto">
                         <table class="min-w-full bg-white bordered">
