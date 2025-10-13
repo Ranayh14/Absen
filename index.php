@@ -260,7 +260,13 @@ function seedAdmin(PDO $pdo, string $email, string $password): void {
 function seedDefaultSettings(PDO $pdo): void {
     $defaultSettings = [
         ['max_ontime_hour', '08', 'Jam maksimal untuk dianggap ontime (format 24 jam)'],
-        ['min_checkout_hour', '17', 'Jam minimal untuk bisa presensi pulang (format 24 jam)']
+        ['min_checkout_hour', '17', 'Jam minimal untuk bisa presensi pulang (format 24 jam)'],
+        ['wfo_address', 'Fakultas Ilmu Terapan, Jl. Telekomunikasi, Bandung', 'Nama alamat pusat WFO (akan di-geocode)'],
+        ['wfo_lat', '-6.9738', 'Latitude pusat WFO'],
+        ['wfo_lng', '107.6300', 'Longitude pusat WFO'],
+        ['wfo_radius_m', '1200', 'Radius wilayah WFO dalam meter'],
+        ['attendance_period_start', date('Y-01-01'), 'Tanggal mulai periode perhitungan absen (YYYY-MM-DD)'],
+        ['attendance_period_end', date('Y-12-31'), 'Tanggal akhir periode perhitungan absen (YYYY-MM-DD)']
     ];
     
     foreach ($defaultSettings as $setting) {
@@ -273,6 +279,104 @@ function seedDefaultSettings(PDO $pdo): void {
             $stmt->execute([':key' => $setting[0], ':value' => $setting[1], ':desc' => $setting[2]]);
         }
     }
+}
+
+/**
+ * Geocode a free-form address string to [lat, lng] using OpenStreetMap Nominatim.
+ * Returns ['lat' => float, 'lng' => float] or null on failure.
+ */
+function geocodeAddress(string $address): ?array {
+    $url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&addressdetails=0&q=' . urlencode($address);
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 4);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'User-Agent: AbsenApp/1.0 (XAMPP PHP)'
+    ]);
+    $resp = curl_exec($ch);
+    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    if ($code !== 200 || !$resp) return null;
+    $data = json_decode($resp, true);
+    if (!is_array($data) || empty($data) || !isset($data[0]['lat'], $data[0]['lon'])) return null;
+    return ['lat' => (float)$data[0]['lat'], 'lng' => (float)$data[0]['lon']];
+}
+
+/**
+ * Reverse geocode coordinates to address using OpenStreetMap Nominatim.
+ * Returns readable address string or null on failure.
+ */
+function reverseGeocodeAddress(float $lat, float $lng): ?string {
+    $url = 'https://nominatim.openstreetmap.org/reverse?format=json&lat=' . $lat . '&lon=' . $lng . '&addressdetails=1&accept-language=id';
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 5);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'User-Agent: AbsenApp/1.0 (XAMPP PHP)'
+    ]);
+    $resp = curl_exec($ch);
+    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    
+    if ($code !== 200 || !$resp) return null;
+    
+    $data = json_decode($resp, true);
+    if (!is_array($data) || !isset($data['address'])) return null;
+    
+    $address = $data['address'];
+    $displayName = $data['display_name'] ?? '';
+    
+    // Build readable address from components
+    $parts = [];
+    
+    // Try to get specific location names
+    if (isset($address['building']) && $address['building']) {
+        $parts[] = $address['building'];
+    } elseif (isset($address['house_name']) && $address['house_name']) {
+        $parts[] = $address['house_name'];
+    }
+    
+    if (isset($address['road']) && $address['road']) {
+        $parts[] = $address['road'];
+    } elseif (isset($address['pedestrian']) && $address['pedestrian']) {
+        $parts[] = $address['pedestrian'];
+    } elseif (isset($address['footway']) && $address['footway']) {
+        $parts[] = $address['footway'];
+    }
+    
+    if (isset($address['suburb']) && $address['suburb']) {
+        $parts[] = $address['suburb'];
+    } elseif (isset($address['neighbourhood']) && $address['neighbourhood']) {
+        $parts[] = $address['neighbourhood'];
+    }
+    
+    if (isset($address['city']) && $address['city']) {
+        $parts[] = $address['city'];
+    } elseif (isset($address['town']) && $address['town']) {
+        $parts[] = $address['town'];
+    } elseif (isset($address['village']) && $address['village']) {
+        $parts[] = $address['village'];
+    }
+    
+    if (isset($address['state']) && $address['state']) {
+        $parts[] = $address['state'];
+    }
+    
+    // If we have good parts, join them
+    if (!empty($parts)) {
+        return implode(', ', $parts);
+    }
+    
+    // Fallback to display_name if available
+    if ($displayName) {
+        // Clean up the display name
+        $cleanName = preg_replace('/,\s*Indonesia$/', '', $displayName);
+        return $cleanName;
+    }
+    
+    return null;
 }
 
 function getSetting(PDO $pdo, string $key, string $default = ''): string {
@@ -292,10 +396,19 @@ function setSetting(PDO $pdo, string $key, string $value): void {
  */
 function triggerDatabaseBackup(): void {
     try {
-        // Simple backup implementation
-        $backupResult = ['success' => true, 'message' => 'Backup completed'];
+        // Check if backup functions are available
+        if (!function_exists('createDatabaseBackup')) {
+            error_log("Backup functions not available");
+            return;
+        }
+        
+        // Create backup
+        $backupResult = createDatabaseBackup();
+        
         if (!$backupResult['success']) {
             error_log("Backup gagal: " . $backupResult['message']);
+        } else {
+            error_log("Backup berhasil: " . $backupResult['message'] . " (Size: " . formatBytes($backupResult['size']) . ")");
         }
     } catch (Exception $e) {
         error_log("Error dalam backup: " . $e->getMessage());
@@ -1498,27 +1611,33 @@ if (isset($_GET['ajax'])) {
                 $lng = isset($_POST['lng']) ? (float)$_POST['lng'] : null;
                 $lokasi = $_POST['lokasi'] ?? null;
                 $alasanWfa = null;
+                
+                // Convert coordinates to readable address if we have coordinates but no location name
+                if ($lat !== null && $lng !== null && (!$lokasi || strpos($lokasi, 'Lokasi:') === 0)) {
+                    $reverseGeocoded = reverseGeocodeAddress($lat, $lng);
+                    if ($reverseGeocoded) {
+                        $lokasi = $reverseGeocoded;
+                    }
+                }
 
-                // Ultra-fast processing - skip geofencing for maximum speed
-                $isInsideTelu = true; // Assume inside for speed
-                // $teluLat = -6.9738; // approx Telkom University Bandung
-                // $teluLng = 107.6300;
-                // $radiusMeters = 1200; // ~1.2km radius
-                // $isInsideTelu = false;
-                // if ($lat !== null && $lng !== null) {
-                //     // Haversine formula for distance
-                //     $earth = 6371000; // meters
-                //     $dLat = deg2rad($teluLat - $lat);
-                //     $dLng = deg2rad($teluLng - $lng);
-                //     $a = sin($dLat/2) * sin($dLat/2) + cos(deg2rad($lat)) * cos(deg2rad($teluLat)) * sin($dLng/2) * sin($dLng/2);
-                //     $c = 2 * atan2(sqrt($a), sqrt(1-$a));
-                //     $distance = $earth * $c;
-                //     $isInsideTelu = ($distance <= $radiusMeters);
-                // }
+                // Geofencing WFO based on settings
+                $wfoLat = (float)getSetting($pdo, 'wfo_lat', '-6.9738');
+                $wfoLng = (float)getSetting($pdo, 'wfo_lng', '107.6300');
+                $wfoRadius = (int)getSetting($pdo, 'wfo_radius_m', '1200'); // meters
+                $isInsideTelu = true; // default when no coordinates
+                if ($lat !== null && $lng !== null) {
+                    $earth = 6371000; // meters
+                    $dLat = deg2rad($wfoLat - $lat);
+                    $dLng = deg2rad($wfoLng - $lng);
+                    $a = sin($dLat/2) * sin($dLat/2) + cos(deg2rad($lat)) * cos(deg2rad($wfoLat)) * sin($dLng/2) * sin($dLng/2);
+                    $c = 2 * atan2(sqrt($a), sqrt(1-$a));
+                    $distance = $earth * $c;
+                    $isInsideTelu = ($distance <= max(0, $wfoRadius));
+                }
 
                 $ketVal = $isInsideTelu ? 'wfo' : 'wfa';
                 if (!$isInsideTelu) {
-                    $alasanWfa = $_POST['alasan_wfa'] ?? null;
+                    $alasanWfa = $_POST['wfa_reason'] ?? $_POST['alasan_wfa'] ?? null;
                     if (!$alasanWfa) {
                         jsonResponse(['ok' => false, 'need_reason' => true, 'message' => 'Di luar wilayah kantor. Harap isi alasan kerja di luar (WFA).'], 400);
                     }
@@ -1528,8 +1647,8 @@ if (isset($_GET['ajax'])) {
                 $ins = $pdo->prepare("INSERT INTO attendance (user_id, jam_masuk, jam_masuk_iso, ekspresi_masuk, screenshot_masuk, lokasi_masuk, lat_masuk, lng_masuk, status, ket, alasan_wfa) VALUES (:uid, :jam, :iso, :exp, :screenshot, :lokasi, :lat, :lng, :status, :ket, :alasan)");
                 $ins->execute([':uid' => $u['id'], ':jam' => $jamSekarang, ':iso' => $iso, ':exp' => $ekspresi, ':screenshot' => $screenshot, ':lokasi' => $lokasi, ':lat' => $lat, ':lng' => $lng, ':status' => $status, ':ket' => $ketVal, ':alasan' => $alasanWfa]);
                 
-                // ULTRA-FAST: Skip backup for maximum speed during attendance
-                // triggerDatabaseBackup();
+                // Trigger backup setelah presensi masuk
+                triggerDatabaseBackup();
                 
                 // ULTRA-FAST: Ultra-minimal response for maximum speed
                 $jamMasukFormat = substr($jamSekarang, 0, 5);
@@ -1567,6 +1686,15 @@ if (isset($_GET['ajax'])) {
                 $lat = isset($_POST['lat']) ? (float)$_POST['lat'] : null;
                 $lng = isset($_POST['lng']) ? (float)$_POST['lng'] : null;
                 $lokasi = $_POST['lokasi'] ?? null;
+                
+                // Convert coordinates to readable address if we have coordinates but no location name
+                if ($lat !== null && $lng !== null && (!$lokasi || strpos($lokasi, 'Lokasi:') === 0)) {
+                    $reverseGeocoded = reverseGeocodeAddress($lat, $lng);
+                    if ($reverseGeocoded) {
+                        $lokasi = $reverseGeocoded;
+                    }
+                }
+                
                 $upd = $pdo->prepare("UPDATE attendance SET jam_pulang=:jam, jam_pulang_iso=:iso, ekspresi_pulang=:exp, screenshot_pulang=:screenshot, lokasi_pulang=:lokasi, lat_pulang=:lat, lng_pulang=:lng WHERE id=:id");
                 $upd->execute([':jam' => $jamSekarang, ':iso' => $iso, ':exp' => $ekspresi, ':screenshot' => $screenshot, ':lokasi' => $lokasi, ':lat' => $lat, ':lng' => $lng, ':id' => $todayRow['id']]);
                 
@@ -2143,6 +2271,73 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         jsonResponse(['ok'=>true]);
     }
 
+    // Admin: update WFA location data to use readable addresses
+    if ($action === 'admin_update_wfa_locations' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        if (!isAdmin()) jsonResponse(['error' => 'Forbidden'], 403);
+        
+        // Get all WFA records with coordinate-based locations
+        $stmt = $pdo->prepare("SELECT id, lat_masuk, lng_masuk, lokasi_masuk, lat_pulang, lng_pulang, lokasi_pulang FROM attendance WHERE ket = 'wfa' AND (lokasi_masuk LIKE 'Lokasi:%' OR lokasi_pulang LIKE 'Lokasi:%')");
+        $stmt->execute();
+        $records = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        
+        $updated = 0;
+        foreach ($records as $record) {
+            $updates = [];
+            $params = [':id' => $record['id']];
+            
+            // Update masuk location if needed
+            if ($record['lat_masuk'] && $record['lng_masuk'] && strpos($record['lokasi_masuk'], 'Lokasi:') === 0) {
+                $newLocation = reverseGeocodeAddress($record['lat_masuk'], $record['lng_masuk']);
+                if ($newLocation) {
+                    $updates[] = 'lokasi_masuk = :lokasi_masuk';
+                    $params[':lokasi_masuk'] = $newLocation;
+                }
+            }
+            
+            // Update pulang location if needed
+            if ($record['lat_pulang'] && $record['lng_pulang'] && strpos($record['lokasi_pulang'], 'Lokasi:') === 0) {
+                $newLocation = reverseGeocodeAddress($record['lat_pulang'], $record['lng_pulang']);
+                if ($newLocation) {
+                    $updates[] = 'lokasi_pulang = :lokasi_pulang';
+                    $params[':lokasi_pulang'] = $newLocation;
+                }
+            }
+            
+            if (!empty($updates)) {
+                $sql = "UPDATE attendance SET " . implode(', ', $updates) . " WHERE id = :id";
+                $upd = $pdo->prepare($sql);
+                $upd->execute($params);
+                $updated++;
+            }
+        }
+        
+        jsonResponse(['ok' => true, 'message' => "Berhasil memperbarui {$updated} lokasi WFA menjadi nama jalan"]);
+    }
+
+    // Admin: get backup status
+    if ($action === 'get_backup_status' && $_SERVER['REQUEST_METHOD'] === 'GET') {
+        if (!isAdmin()) jsonResponse(['error' => 'Forbidden'], 403);
+        
+        if (!function_exists('getBackupInfo')) {
+            jsonResponse(['ok' => false, 'message' => 'Backup functions not available']);
+        }
+        
+        $backupInfo = getBackupInfo();
+        jsonResponse(['ok' => true, 'data' => $backupInfo]);
+    }
+
+    // Admin: create manual backup
+    if ($action === 'create_backup' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        if (!isAdmin()) jsonResponse(['error' => 'Forbidden'], 403);
+        
+        if (!function_exists('createDatabaseBackup')) {
+            jsonResponse(['ok' => false, 'message' => 'Backup functions not available']);
+        }
+        
+        $result = createDatabaseBackup();
+        jsonResponse($result);
+    }
+
     // Admin: get settings
     if ($action === 'get_settings' && $_SERVER['REQUEST_METHOD'] === 'GET') {
         if (!isAdmin()) jsonResponse(['error' => 'Forbidden'], 403);
@@ -2362,6 +2557,12 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         if (!isAdmin()) jsonResponse(['error' => 'Forbidden'], 403);
         $maxOntimeHour = trim($_POST['max_ontime_hour'] ?? '');
         $minCheckoutHour = trim($_POST['min_checkout_hour'] ?? '');
+        $wfoAddress = trim($_POST['wfo_address'] ?? '');
+        $wfoLat = trim($_POST['wfo_lat'] ?? '');
+        $wfoLng = trim($_POST['wfo_lng'] ?? '');
+        $wfoRadius = trim($_POST['wfo_radius_m'] ?? '');
+        $periodStart = trim($_POST['attendance_period_start'] ?? '');
+        $periodEnd = trim($_POST['attendance_period_end'] ?? '');
         
         if (!is_numeric($maxOntimeHour) || $maxOntimeHour < 0 || $maxOntimeHour > 23) {
             jsonResponse(['ok' => false, 'message' => 'Jam maksimal ontime harus berupa angka 0-23'], 400);
@@ -2372,6 +2573,20 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         
         setSetting($pdo, 'max_ontime_hour', $maxOntimeHour);
         setSetting($pdo, 'min_checkout_hour', $minCheckoutHour);
+        if ($wfoAddress !== '') {
+            setSetting($pdo, 'wfo_address', $wfoAddress);
+            // Best-effort geocode; don't fail settings if geocode fails
+            $geo = geocodeAddress($wfoAddress);
+            if ($geo) {
+                setSetting($pdo, 'wfo_lat', (string)$geo['lat']);
+                setSetting($pdo, 'wfo_lng', (string)$geo['lng']);
+            }
+        }
+        if ($wfoLat !== '' && is_numeric($wfoLat)) setSetting($pdo, 'wfo_lat', $wfoLat);
+        if ($wfoLng !== '' && is_numeric($wfoLng)) setSetting($pdo, 'wfo_lng', $wfoLng);
+        if ($wfoRadius !== '' && is_numeric($wfoRadius)) setSetting($pdo, 'wfo_radius_m', $wfoRadius);
+        if ($periodStart !== '') setSetting($pdo, 'attendance_period_start', $periodStart);
+        if ($periodEnd !== '') setSetting($pdo, 'attendance_period_end', $periodEnd);
         
         // Trigger backup setelah update settings
         triggerDatabaseBackup();
@@ -2480,8 +2695,16 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         if (!isAdmin()) jsonResponse(['error'=>'Forbidden'],403);
         
         $today = date('Y-m-d');
-        $monthStart = date('Y-m-01');
-        $monthEnd = date('Y-m-t');
+        // Use configured attendance period if set; fallback to current month
+        $periodStart = getSetting($pdo, 'attendance_period_start', '');
+        $periodEnd = getSetting($pdo, 'attendance_period_end', '');
+        if ($periodStart && $periodEnd) {
+            $monthStart = $periodStart;
+            $monthEnd = $periodEnd;
+        } else {
+            $monthStart = date('Y-m-01');
+            $monthEnd = date('Y-m-t');
+        }
         
         // Get today's late employees
         $todayLateStmt = $pdo->prepare("
@@ -2541,10 +2764,21 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         
         $absentToday = $totalEmployees - $presentToday;
         
-        // Get attendance trend for 1 year (August 2025 - August 2026)
+        // Get attendance trend based on configured period
         $trendData = [];
-        $startDate = '2025-08-01';
-        $endDate = '2026-08-31';
+        
+        // Use configured attendance period for trend data
+        $trendStart = getSetting($pdo, 'attendance_period_start', '');
+        $trendEnd = getSetting($pdo, 'attendance_period_end', '');
+        
+        if ($trendStart && $trendEnd) {
+            $startDate = $trendStart;
+            $endDate = $trendEnd;
+        } else {
+            // Fallback to current year if no period configured
+            $startDate = date('Y-01-01');
+            $endDate = date('Y-12-31');
+        }
         
         $currentDate = new DateTime($startDate);
         $endDateTime = new DateTime($endDate);
@@ -2843,6 +3077,17 @@ if ($page === 'logout') {
         .z-70 { z-index: 70; }
         .max-w-7xl { max-width: 80rem; }
         
+        /* Address search suggestions */
+        .suggestion-item {
+            transition: background-color 0.2s ease;
+        }
+        .suggestion-item:hover {
+            background-color: #f3f4f6;
+        }
+        .suggestion-item.active {
+            background-color: #dbeafe;
+        }
+        
         /* Landing page custom styles */
         .landing-panel {
             background: linear-gradient(135deg, #ffffff 0%, #f8fafc 50%, #f1f5f9 100%);
@@ -2991,7 +3236,13 @@ if ($page === 'logout') {
         }
     </style>
 </head>
-<body class="bg-gradient-to-br from-slate-50 via-gray-50 to-slate-100 text-gray-800">
+<?php
+    // Embed WFO settings in DOM for client-side helpers
+    $embedWfoLat = htmlspecialchars(getSetting($pdo, 'wfo_lat', '-6.9738'));
+    $embedWfoLng = htmlspecialchars(getSetting($pdo, 'wfo_lng', '107.6300'));
+    $embedWfoAddress = htmlspecialchars(getSetting($pdo, 'wfo_address', 'Pusat WFO'));
+?>
+<body class="bg-gradient-to-br from-slate-50 via-gray-50 to-slate-100 text-gray-800" data-wfo-lat="<?php echo $embedWfoLat; ?>" data-wfo-lng="<?php echo $embedWfoLng; ?>" data-wfo-address="<?php echo $embedWfoAddress; ?>">
 
 <?php 
 // Public landing page: presensi can be accessed without login
@@ -3487,8 +3738,11 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                         <div></div>
                         <div></div>
                     </div>
-                    <div class="mb-4">
+                    <div class="mb-4 flex gap-2 flex-wrap">
                         <button id="btn-open-absence" class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-lg">Input Keterangan Manual</button>
+                        <button id="btn-update-wfa-locations" class="bg-green-600 hover:bg-green-700 text-white font-semibold py-2 px-4 rounded-lg">Update Lokasi WFA</button>
+                        <button id="btn-create-backup" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded-lg">Buat Backup</button>
+                        <button id="btn-backup-status" class="bg-gray-600 hover:bg-gray-700 text-white font-semibold py-2 px-4 rounded-lg">Status Backup</button>
                     </div>
                     <div class="overflow-x-auto">
                         <table class="min-w-full bg-white bordered">
@@ -3600,6 +3854,45 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                                 </div>
                             </div>
                         </div>
+                        <div class="bg-gray-50 p-4 rounded-lg">
+                            <h3 class="text-lg font-semibold mb-4 text-gray-800">Pengaturan Wilayah WFO & Periode</h3>
+                            <div class="space-y-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">Alamat Pusat WFO</label>
+                                    <div class="relative">
+                                        <input type="text" id="wfo-address" placeholder="Ketik alamat untuk mencari..." 
+                                               class="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                                               autocomplete="off">
+                                        <div id="address-suggestions" class="absolute z-10 w-full bg-white border border-gray-300 rounded-lg shadow-lg hidden max-h-60 overflow-y-auto">
+                                            <!-- Suggestions will be populated here -->
+                                        </div>
+                                    </div>
+                                    <p class="text-xs text-gray-500 mt-1">Mulai ketik untuk mencari alamat. Pilih dari saran yang muncul.</p>
+                                    <div id="selected-address-info" class="mt-2 p-2 bg-green-50 border border-green-200 rounded-lg hidden">
+                                        <div class="text-sm text-green-700">
+                                            <strong>Alamat terpilih:</strong> <span id="selected-address-text"></span>
+                                        </div>
+                                        <div class="text-xs text-green-600 mt-1">
+                                            Koordinat: <span id="selected-coordinates"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">Radius WFO (meter)</label>
+                                    <input type="number" min="0" id="wfo-radius" class="w-32 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+                                </div>
+                                <div class="grid grid-cols-2 gap-4">
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-700 mb-2">Periode Mulai</label>
+                                        <input type="date" id="attendance-period-start" class="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-700 mb-2">Periode Selesai</label>
+                                        <input type="date" id="attendance-period-end" class="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                         
                         <div class="bg-blue-50 p-4 rounded-lg">
                             <h3 class="text-lg font-semibold mb-4 text-blue-800">Informasi</h3>
@@ -3671,7 +3964,7 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
 
                 <!-- Attendance Trend Chart -->
                 <div class="mb-8">
-                    <h3 class="text-lg font-semibold mb-4 text-gray-700">Tren Kehadiran 1 Tahun (Agustus 2025 - Agustus 2026)</h3>
+                    <h3 class="text-lg font-semibold mb-4 text-gray-700">Tren Kehadiran 1 Periode</h3>
                     <div class="bg-white p-4 rounded-lg shadow-sm">
                         <canvas id="attendanceTrendChart" width="400" height="200"></canvas>
                     </div>
@@ -4262,6 +4555,18 @@ async function api(url, data){
         if (!res.ok) {
             const errorText = await res.text();
             console.error('API Error Response:', errorText);
+            
+            // Try to parse error response as JSON to check for WFA requirement
+            try {
+                const errorJson = JSON.parse(errorText);
+                if (errorJson.need_reason) {
+                    // Return the error response directly instead of throwing
+                    return errorJson;
+                }
+            } catch (parseError) {
+                // If not JSON, continue with normal error handling
+            }
+            
             throw new Error(`HTTP error! status: ${res.status}, response: ${errorText}`);
         }
         
@@ -4282,19 +4587,6 @@ async function api(url, data){
         return json;
     } catch (error) {
         console.error('API call failed:', error);
-        
-        // Handle WFA modal specifically
-        if (error.message && error.message.includes('need_reason')) {
-            try {
-                const response = JSON.parse(error.message.split('response: ')[1]);
-                if (response.need_reason) {
-                    showWFAModal(response.message);
-                    return { ok: false, need_reason: true, message: response.message };
-                }
-            } catch (parseError) {
-                console.error('Error parsing WFA response:', parseError);
-            }
-        }
         
         // Perbaikan: Handle specific error types
         if (error.name === 'TypeError' && error.message.includes('fetch')) {
@@ -4498,23 +4790,146 @@ let logMasukData = [];
 let logPulangData = [];
 let members = []; // Global members array for gender validation
 
+// WFA Modal functions for landing page
 
-// OPTIMIZED: Fast location detection without external API calls
-function getStreetNameFromCoordinates(lat, lng) {
-    // ULTRA-FAST: Skip external API calls for maximum speed
-    // Just use local distance calculation for instant results
+function showWFAModal(message) {
+    // Create WFA modal if it doesn't exist
+    let wfaModal = document.getElementById('wfaModal');
+    if (!wfaModal) {
+        wfaModal = document.createElement('div');
+        wfaModal.id = 'wfaModal';
+        wfaModal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 hidden';
+        wfaModal.innerHTML = `
+            <div class="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+                <h3 class="text-lg font-semibold mb-4">Work From Anywhere (WFA)</h3>
+                <p class="text-gray-600 mb-4">${message}</p>
+                <div class="mb-4">
+                    <label class="block text-sm font-medium text-gray-700 mb-2">Alasan WFA:</label>
+                    <textarea id="wfaReason" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500" rows="3" placeholder="Masukkan alasan kerja di luar kantor..."></textarea>
+                </div>
+                <div class="flex space-x-3">
+                    <button id="wfaSubmit" class="flex-1 bg-indigo-600 text-white py-2 px-4 rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                        Submit
+                    </button>
+                    <button id="wfaCancel" class="flex-1 bg-gray-300 text-gray-700 py-2 px-4 rounded-lg hover:bg-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-500">
+                        Batal
+                    </button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(wfaModal);
+        
+        // Add event listeners
+        document.getElementById('wfaSubmit').addEventListener('click', () => {
+            const reason = document.getElementById('wfaReason').value.trim();
+            if (reason) {
+                wfaModal.classList.add('hidden');
+                // Store WFA reason for next attendance submission
+                window.pendingWFAReson = reason;
+                // Retry attendance submission
+                if (window.pendingAttendanceData) {
+                    submitAttendanceWithWFA(window.pendingAttendanceData, reason);
+                }
+            } else {
+                alert('Harap isi alasan WFA terlebih dahulu.');
+            }
+        });
+        
+        document.getElementById('wfaCancel').addEventListener('click', () => {
+            wfaModal.classList.add('hidden');
+            isProcessingRecognition = false;
+            // Clear pending data
+            window.pendingWFAReson = null;
+            window.pendingAttendanceData = null;
+        });
+    }
     
-    const teluLat = -6.9738;
-    const teluLng = 107.6300;
-    const distance = calculateDistance(lat, lng, teluLat, teluLng);
+    // Show modal
+    wfaModal.classList.remove('hidden');
+    document.getElementById('wfaReason').focus();
+}
+
+function submitAttendanceWithWFA(attendanceData, wfaReason) {
+    // Add WFA reason to attendance data
+    const dataWithWFA = {
+        ...attendanceData,
+        wfa_reason: wfaReason,
+        is_wfa: true
+    };
     
-    if (distance < 1.0) { // Within 1 km of Telkom University
-        return 'Fakultas Ilmu Terapan, Jl. Telekomunikasi, Bandung';
+    // Submit attendance with WFA reason
+    api('?ajax=save_attendance', dataWithWFA)
+        .then(response => {
+            if (response.ok) {
+                statusMessage('Presensi berhasil dengan alasan WFA!', 'bg-green-100 text-green-700');
+                // Clear pending data
+                window.pendingWFAReson = null;
+                window.pendingAttendanceData = null;
+                isProcessingRecognition = false;
+            } else {
+                statusMessage('Gagal menyimpan presensi: ' + (response.message || 'Unknown error'), 'bg-red-100 text-red-700');
+                isProcessingRecognition = false;
+            }
+        })
+        .catch(error => {
+            console.error('Error submitting attendance with WFA:', error);
+            statusMessage('Terjadi kesalahan saat menyimpan presensi.', 'bg-red-100 text-red-700');
+            isProcessingRecognition = false;
+        });
+}
+
+// Enhanced location detection with reverse geocoding
+async function getStreetNameFromCoordinates(lat, lng) {
+    // Read configured WFO center from embedded settings
+    const wfoLat = parseFloat(document.body.getAttribute('data-wfo-lat')||'-6.9738');
+    const wfoLng = parseFloat(document.body.getAttribute('data-wfo-lng')||'107.6300');
+    const wfoName = document.body.getAttribute('data-wfo-address')||'Pusat WFO';
+    const distance = calculateDistance(lat, lng, wfoLat, wfoLng);
+    
+    if (distance < 1.0) { // Within 1 km of WFO center
+        return wfoName;
     } else if (distance < 5.0) { // Within 5 km
-        return `Jl. Telekomunikasi Area, Bandung (${distance.toFixed(1)}km from campus)`;
+        return `${wfoName} (${distance.toFixed(1)}km dari pusat WFO)`;
     } else {
-        // Return coordinates as fallback with distance info
-        return `Lokasi: ${lat.toFixed(6)}, ${lng.toFixed(6)} (${distance.toFixed(1)}km from campus)`;
+        // Try reverse geocoding for better location names
+        try {
+            const response = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&addressdetails=1&accept-language=id&zoom=18`);
+            const data = await response.json();
+            
+            if (data && data.address) {
+                const address = data.address;
+                const parts = [];
+                
+                // Build readable address from components
+                if (address.building) parts.push(address.building);
+                else if (address.house_name) parts.push(address.house_name);
+                
+                if (address.road) parts.push(address.road);
+                else if (address.pedestrian) parts.push(address.pedestrian);
+                else if (address.footway) parts.push(address.footway);
+                
+                if (address.suburb) parts.push(address.suburb);
+                else if (address.neighbourhood) parts.push(address.neighbourhood);
+                
+                if (address.city) parts.push(address.city);
+                else if (address.town) parts.push(address.town);
+                else if (address.village) parts.push(address.village);
+                
+                if (parts.length > 0) {
+                    return parts.join(', ');
+                }
+                
+                // Fallback to display_name
+                if (data.display_name) {
+                    return data.display_name.replace(/, Indonesia$/, '');
+                }
+            }
+        } catch (error) {
+            console.warn('Reverse geocoding failed:', error);
+        }
+        
+        // Final fallback: coordinates with distance info
+        return `Lokasi: ${lat.toFixed(6)}, ${lng.toFixed(6)} (${distance.toFixed(1)}km dari kantor)`;
     }
 }
 
@@ -5487,9 +5902,9 @@ async function handleRecognition(nim, topExpression){
         lat = position.coords.latitude;
         lng = position.coords.longitude;
     }
-    // ULTRA-FAST: Convert coordinates to readable street names (instant)
+    // Convert coordinates to readable street names
     if(lat!==null && lng!==null){ 
-        lokasi = getStreetNameFromCoordinates(lat, lng); // Remove await for instant processing
+        lokasi = await getStreetNameFromCoordinates(lat, lng);
     }
 
     async function submitAttendance(extra={}){
@@ -5812,7 +6227,7 @@ const pages = { rekap: qs('#page-rekap'), 'laporan-bulanan': qs('#page-laporan-b
 qsa('.tab-link').forEach(btn=>{
     btn.addEventListener('click', ()=> showPage(btn.dataset.tab));
 });
-function showPage(name){ Object.values(pages).forEach(p=> p && (p.style.display='none')); if(pages[name]) pages[name].style.display='block'; if(name==='members') renderMembers(); if(name==='laporan') { loadStartupOptions(); renderLaporan(); } if(name==='rekap') initRekapPage(); if(name==='laporan-bulanan') renderMonthly(); if(name==='admin-monthly') renderAdminMonthly(); if(name==='dashboard') renderDashboard(); if(name==='settings') renderSettings(); }
+function showPage(name){ Object.values(pages).forEach(p=> p && (p.style.display='none')); if(pages[name]) pages[name].style.display='block'; if(name==='members') renderMembers(); if(name==='laporan') { loadStartupOptions(); renderLaporan(); } if(name==='rekap') initRekapPage(); if(name==='laporan-bulanan') renderMonthly(); if(name==='admin-monthly') renderAdminMonthly(); if(name==='dashboard') renderDashboard(); if(name==='settings') { renderSettings(); initAddressSearch(); } }
 
 // Ensure initial page sets after variables exist
 <?php if (isAdmin()): ?>
@@ -6374,12 +6789,12 @@ async function renderLaporan(){
             return timeStr.substring(0, 5);
         };
         
-        const jamMasuk = (att.ket === 'izin' || att.ket === 'sakit' || att.ket === 'wfa') ? '-' : formatTime(att.jam_masuk);
+        const jamMasuk = (att.ket === 'izin' || att.ket === 'sakit') ? '-' : formatTime(att.jam_masuk);
         const jamPulang = (att.ket === 'izin' || att.ket === 'sakit') ? '-' : formatTime(att.jam_pulang);
         
         // Create screenshot display functions
         const createScreenshotDisplay = (screenshotData, ekspresi, mode) => {
-            if (att.ket === 'izin' || att.ket === 'sakit' || (att.ket === 'wfa' && mode === 'pulang')) {
+            if (att.ket === 'izin' || att.ket === 'sakit') {
                 return '<div class="text-center">-</div>';
             }
             if (screenshotData) {
@@ -6477,6 +6892,88 @@ qs('#abs-save') && qs('#abs-save').addEventListener('click', async ()=>{
         showNotif(r.message||'Gagal simpan');
     }
 });
+
+// Update WFA locations button handler
+qs('#btn-update-wfa-locations') && qs('#btn-update-wfa-locations').addEventListener('click', async ()=>{
+    if (!confirm('Apakah Anda yakin ingin memperbarui semua lokasi WFA yang masih dalam bentuk koordinat menjadi nama jalan? Proses ini mungkin memakan waktu beberapa saat.')) {
+        return;
+    }
+    
+    const button = qs('#btn-update-wfa-locations');
+    const originalText = button.textContent;
+    button.textContent = 'Memproses...';
+    button.disabled = true;
+    
+    try {
+        const r = await api('?ajax=admin_update_wfa_locations', {});
+        if (r.ok) {
+            showNotif(r.message || 'Lokasi WFA berhasil diperbarui', true);
+            renderLaporan(); // Refresh the table
+        } else {
+            showNotif(r.message || 'Gagal memperbarui lokasi WFA', false);
+        }
+    } catch (error) {
+        showNotif('Terjadi kesalahan saat memperbarui lokasi WFA', false);
+        console.error('Error updating WFA locations:', error);
+    } finally {
+        button.textContent = originalText;
+        button.disabled = false;
+    }
+});
+
+// Backup management handlers
+qs('#btn-create-backup') && qs('#btn-create-backup').addEventListener('click', async ()=>{
+    if (!confirm('Apakah Anda yakin ingin membuat backup database? Proses ini mungkin memakan waktu beberapa saat.')) {
+        return;
+    }
+    
+    const button = qs('#btn-create-backup');
+    const originalText = button.textContent;
+    button.textContent = 'Membuat Backup...';
+    button.disabled = true;
+    
+    try {
+        const r = await api('?ajax=create_backup', {});
+        if (r.ok) {
+            showNotif(r.message || 'Backup berhasil dibuat', true);
+        } else {
+            showNotif(r.message || 'Gagal membuat backup', false);
+        }
+    } catch (error) {
+        showNotif('Terjadi kesalahan saat membuat backup', false);
+        console.error('Error creating backup:', error);
+    } finally {
+        button.textContent = originalText;
+        button.disabled = false;
+    }
+});
+
+qs('#btn-backup-status') && qs('#btn-backup-status').addEventListener('click', async ()=>{
+    try {
+        const r = await api('?ajax=get_backup_status', {});
+        if (r.ok && r.data) {
+            const data = r.data;
+            let message = '';
+            
+            if (data.exists) {
+                message = `Backup tersedia:\n`;
+                message += `File: ${data.file}\n`;
+                message += `Ukuran: ${data.size_formatted}\n`;
+                message += `Dibuat: ${data.created}`;
+            } else {
+                message = 'Tidak ada file backup tersedia';
+            }
+            
+            alert(message);
+        } else {
+            showNotif(r.message || 'Gagal mendapatkan status backup', false);
+        }
+    } catch (error) {
+        showNotif('Terjadi kesalahan saat mendapatkan status backup', false);
+        console.error('Error getting backup status:', error);
+    }
+});
+
 // Daily report review modal
 qs('#dr-close') && qs('#dr-close').addEventListener('click', ()=> qs('#dr-modal').classList.add('hidden'));
 qs('#dr-approve') && qs('#dr-approve').addEventListener('click', ()=> handleDrApproveDisapprove('approved'));
@@ -6777,7 +7274,6 @@ document.addEventListener('click', async (e)=>{
     }
 });
 
-let onConfirmCallback = null;
 function showWFAModal(message) {
     // Create WFA modal if it doesn't exist
     let wfaModal = document.getElementById('wfaModal');
@@ -6842,20 +7338,23 @@ function submitAttendanceWithWFA(attendanceData, wfaReason) {
     };
     
     // Submit attendance with WFA reason
-    api('save_attendance', dataWithWFA)
+    api('?ajax=save_attendance', dataWithWFA)
         .then(response => {
             if (response.ok) {
-                showSuccessMessage('Presensi berhasil dengan alasan WFA!');
+                statusMessage('Presensi berhasil dengan alasan WFA!', 'bg-green-100 text-green-700');
                 // Clear pending data
                 window.pendingWFAReson = null;
                 window.pendingAttendanceData = null;
+                isProcessingRecognition = false;
             } else {
-                showErrorMessage('Gagal menyimpan presensi: ' + (response.message || 'Unknown error'));
+                statusMessage('Gagal menyimpan presensi: ' + (response.message || 'Unknown error'), 'bg-red-100 text-red-700');
+                isProcessingRecognition = false;
             }
         })
         .catch(error => {
             console.error('Error submitting attendance with WFA:', error);
-            showErrorMessage('Terjadi kesalahan saat menyimpan presensi.');
+            statusMessage('Terjadi kesalahan saat menyimpan presensi.', 'bg-red-100 text-red-700');
+            isProcessingRecognition = false;
         });
 }
 
@@ -7795,10 +8294,261 @@ async function renderSettings() {
             const settings = result.data;
             qs('#max-ontime-hour').value = settings.max_ontime_hour?.value || '8';
             qs('#min-checkout-hour').value = settings.min_checkout_hour?.value || '17';
+            if(qs('#wfo-address')) qs('#wfo-address').value = settings.wfo_address?.value || '';
+            if(qs('#wfo-radius')) qs('#wfo-radius').value = settings.wfo_radius_m?.value || '1200';
+            if(qs('#attendance-period-start')) qs('#attendance-period-start').value = settings.attendance_period_start?.value || '';
+            if(qs('#attendance-period-end')) qs('#attendance-period-end').value = settings.attendance_period_end?.value || '';
         }
     } catch (error) {
         console.error('Error loading settings:', error);
         showNotif('Gagal memuat pengaturan', false);
+    }
+}
+
+// Address search functionality
+let addressSearchTimeout;
+let selectedAddress = null;
+
+// Initialize address search when settings page loads
+function initAddressSearch() {
+    const addressInput = qs('#wfo-address');
+    const suggestionsDiv = qs('#address-suggestions');
+    
+    if (!addressInput || !suggestionsDiv) return;
+    
+    addressInput.addEventListener('input', (e) => {
+        const query = e.target.value.trim();
+        
+        // Clear previous timeout
+        if (addressSearchTimeout) {
+            clearTimeout(addressSearchTimeout);
+        }
+        
+        // Hide suggestions if query is empty
+        if (query.length < 3) {
+            suggestionsDiv.classList.add('hidden');
+            return;
+        }
+        
+        // Debounce search
+        addressSearchTimeout = setTimeout(() => {
+            searchAddresses(query);
+        }, 300);
+    });
+    
+    // Hide suggestions when clicking outside
+    document.addEventListener('click', (e) => {
+        if (!addressInput.contains(e.target) && !suggestionsDiv.contains(e.target)) {
+            suggestionsDiv.classList.add('hidden');
+        }
+    });
+    
+    // Handle keyboard navigation
+    addressInput.addEventListener('keydown', (e) => {
+        const suggestions = suggestionsDiv.querySelectorAll('.suggestion-item');
+        const activeSuggestion = suggestionsDiv.querySelector('.suggestion-item.active');
+        
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            if (activeSuggestion) {
+                activeSuggestion.classList.remove('active');
+                const next = activeSuggestion.nextElementSibling;
+                if (next) {
+                    next.classList.add('active');
+                } else {
+                    suggestions[0]?.classList.add('active');
+                }
+            } else {
+                suggestions[0]?.classList.add('active');
+            }
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            if (activeSuggestion) {
+                activeSuggestion.classList.remove('active');
+                const prev = activeSuggestion.previousElementSibling;
+                if (prev) {
+                    prev.classList.add('active');
+                } else {
+                    suggestions[suggestions.length - 1]?.classList.add('active');
+                }
+            } else {
+                suggestions[suggestions.length - 1]?.classList.add('active');
+            }
+        } else if (e.key === 'Enter') {
+            e.preventDefault();
+            if (activeSuggestion) {
+                activeSuggestion.click();
+            }
+        } else if (e.key === 'Escape') {
+            suggestionsDiv.classList.add('hidden');
+        }
+    });
+}
+
+async function searchAddresses(query) {
+    try {
+        // Try multiple search strategies for better results
+        const searchQueries = [
+            // Original query
+            query,
+            // Add "Jakarta" for better context
+            `${query} Jakarta`,
+            // Add "Indonesia" for broader search
+            `${query} Indonesia`,
+            // Try with "Sekolah" prefix for schools
+            query.includes('SMP') || query.includes('SMA') || query.includes('SD') ? 
+                `Sekolah ${query}` : query
+        ];
+        
+        let allResults = [];
+        
+        // Search with multiple queries
+        for (const searchQuery of searchQueries) {
+            try {
+                const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(searchQuery)}&limit=3&countrycodes=id&addressdetails=1&bounded=1&viewbox=106.5,-6.5,107.0,-6.0`);
+                const results = await response.json();
+                allResults = allResults.concat(results);
+            } catch (err) {
+                console.warn('Search failed for query:', searchQuery, err);
+            }
+        }
+        
+        // Remove duplicates based on place_id
+        const uniqueResults = allResults.filter((result, index, self) => 
+            index === self.findIndex(r => r.place_id === result.place_id)
+        );
+        
+        // If no results found, try a broader search without country restriction
+        if (uniqueResults.length === 0) {
+            try {
+                const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5&addressdetails=1`);
+                const results = await response.json();
+                allResults = results;
+            } catch (err) {
+                console.warn('Broad search failed:', err);
+            }
+        }
+        
+        // If still no results, create a manual entry
+        if (allResults.length === 0) {
+            allResults = [{
+                display_name: query,
+                lat: '',
+                lon: '',
+                place_id: 'manual',
+                type: 'manual'
+            }];
+        }
+        
+        displayAddressSuggestions(allResults.slice(0, 5)); // Limit to 5 results
+        
+    } catch (error) {
+        console.error('Error searching addresses:', error);
+        // Fallback: show a simple suggestion
+        displayAddressSuggestions([{
+            display_name: query,
+            lat: '',
+            lon: '',
+            place_id: 'manual',
+            type: 'manual'
+        }]);
+    }
+}
+
+function displayAddressSuggestions(results) {
+    const suggestionsDiv = qs('#address-suggestions');
+    if (!suggestionsDiv) return;
+    
+    if (results.length === 0) {
+        suggestionsDiv.innerHTML = '<div class="p-3 text-gray-500 text-sm">Tidak ada hasil ditemukan</div>';
+    } else {
+        suggestionsDiv.innerHTML = results.map((result, index) => {
+            const isManual = result.type === 'manual' || result.place_id === 'manual';
+            const hasCoordinates = result.lat && result.lon;
+            
+            return `
+                <div class="suggestion-item p-3 hover:bg-gray-50 cursor-pointer border-b border-gray-100 ${index === 0 ? 'active' : ''}" 
+                     data-address="${result.display_name}" 
+                     data-lat="${result.lat || ''}" 
+                     data-lon="${result.lon || ''}">
+                    <div class="font-medium text-sm">${result.display_name}</div>
+                    ${hasCoordinates ? 
+                        `<div class="text-xs text-gray-500 mt-1">Koordinat: ${result.lat}, ${result.lon}</div>` : 
+                        `<div class="text-xs text-orange-500 mt-1">${isManual ? 'Manual entry - koordinat akan diisi otomatis' : 'Koordinat tidak tersedia'}</div>`
+                    }
+                    ${isManual ? '<div class="text-xs text-blue-500 mt-1">💡 Pilih untuk menggunakan alamat ini</div>' : ''}
+                </div>
+            `;
+        }).join('');
+        
+        // Add click handlers
+        suggestionsDiv.querySelectorAll('.suggestion-item').forEach(item => {
+            item.addEventListener('click', () => {
+                selectAddress(item);
+            });
+            
+            item.addEventListener('mouseenter', () => {
+                suggestionsDiv.querySelectorAll('.suggestion-item').forEach(i => i.classList.remove('active'));
+                item.classList.add('active');
+            });
+        });
+    }
+    
+    suggestionsDiv.classList.remove('hidden');
+}
+
+async function selectAddress(item) {
+    const address = item.dataset.address;
+    let lat = item.dataset.lat;
+    let lon = item.dataset.lon;
+    
+    // If no coordinates, try to geocode the address
+    if (!lat || !lon) {
+        try {
+            const geocodeResponse = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}&limit=1&addressdetails=1`);
+            const geocodeResults = await geocodeResponse.json();
+            
+            if (geocodeResults.length > 0) {
+                lat = geocodeResults[0].lat;
+                lon = geocodeResults[0].lon;
+            }
+        } catch (error) {
+            console.warn('Geocoding failed:', error);
+        }
+    }
+    
+    // Update input field
+    const addressInput = qs('#wfo-address');
+    if (addressInput) {
+        addressInput.value = address;
+    }
+    
+    // Store selected address data
+    selectedAddress = {
+        address: address,
+        lat: lat,
+        lon: lon
+    };
+    
+    // Show selected address info
+    const infoDiv = qs('#selected-address-info');
+    const addressText = qs('#selected-address-text');
+    const coordinatesSpan = qs('#selected-coordinates');
+    
+    if (infoDiv && addressText && coordinatesSpan) {
+        addressText.textContent = address;
+        if (lat && lon) {
+            coordinatesSpan.textContent = `${lat}, ${lon}`;
+        } else {
+            coordinatesSpan.textContent = 'Koordinat akan diisi otomatis saat disimpan';
+        }
+        infoDiv.classList.remove('hidden');
+    }
+    
+    // Hide suggestions
+    const suggestionsDiv = qs('#address-suggestions');
+    if (suggestionsDiv) {
+        suggestionsDiv.classList.add('hidden');
     }
 }
 
@@ -7808,6 +8558,18 @@ qs('#settings-form') && qs('#settings-form').addEventListener('submit', async (e
     
     const maxOntimeHour = qs('#max-ontime-hour').value;
     const minCheckoutHour = qs('#min-checkout-hour').value;
+    const wfoAddress = qs('#wfo-address')?.value || '';
+    const wfoRadius = qs('#wfo-radius')?.value || '';
+    const periodStart = qs('#attendance-period-start')?.value || '';
+    const periodEnd = qs('#attendance-period-end')?.value || '';
+    
+    // Use selected address coordinates if available
+    let wfoLat = '';
+    let wfoLon = '';
+    if (selectedAddress && selectedAddress.lat && selectedAddress.lon) {
+        wfoLat = selectedAddress.lat;
+        wfoLon = selectedAddress.lon;
+    }
     
     if (!maxOntimeHour || !minCheckoutHour) {
         showNotif('Semua field harus diisi', false);
@@ -7827,7 +8589,13 @@ qs('#settings-form') && qs('#settings-form').addEventListener('submit', async (e
     try {
         const response = await api('?ajax=update_settings', {
             max_ontime_hour: maxOntimeHour,
-            min_checkout_hour: minCheckoutHour
+            min_checkout_hour: minCheckoutHour,
+            wfo_address: wfoAddress,
+            wfo_lat: wfoLat,
+            wfo_lon: wfoLon,
+            wfo_radius_m: wfoRadius,
+            attendance_period_start: periodStart,
+            attendance_period_end: periodEnd
         });
         
         if (response.ok) {
