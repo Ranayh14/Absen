@@ -216,13 +216,23 @@ function ensureSchema(PDO $pdo): void {
             summary TEXT NULL,
             achievements JSON NULL,
             obstacles JSON NULL,
-            status ENUM('draft','submitted','approved','disapproved') DEFAULT 'draft',
+            status ENUM('draft','belum di approve','approved','disapproved') DEFAULT 'draft',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP NULL DEFAULT NULL,
             UNIQUE KEY uniq_user_month (user_id, year, month),
             CONSTRAINT fk_mr_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
     );
+    
+    // Update existing monthly_reports table to use new ENUM values
+    try {
+        $pdo->exec("ALTER TABLE monthly_reports MODIFY COLUMN status ENUM('draft','belum di approve','approved','disapproved') DEFAULT 'draft'");
+        // Update any existing 'submitted' status to 'belum di approve'
+        $pdo->exec("UPDATE monthly_reports SET status = 'belum di approve' WHERE status = 'submitted'");
+    } catch (PDOException $e) {
+        // Ignore if column doesn't exist or already updated
+        error_log("Monthly reports table update: " . $e->getMessage());
+    }
 }
 
 function verifyAttendanceTable(PDO $pdo): bool {
@@ -265,8 +275,10 @@ function seedDefaultSettings(PDO $pdo): void {
         ['wfo_lat', '-6.9738', 'Latitude pusat WFO'],
         ['wfo_lng', '107.6300', 'Longitude pusat WFO'],
         ['wfo_radius_m', '1200', 'Radius wilayah WFO dalam meter'],
-        ['attendance_period_start', date('Y-01-01'), 'Tanggal mulai periode perhitungan absen (YYYY-MM-DD)'],
-        ['attendance_period_end', date('Y-12-31'), 'Tanggal akhir periode perhitungan absen (YYYY-MM-DD)']
+        ['attendance_period_end', date('Y-12-31'), 'Tanggal akhir periode perhitungan absen (YYYY-MM-DD)'],
+        ['kpi_late_penalty_per_minute', '1', 'Pengurangan KPI per menit terlambat (%)'],
+        ['kpi_izin_sakit_score', '85', 'Nilai KPI untuk izin/sakit (%)'],
+        ['kpi_alpha_score', '0', 'Nilai KPI untuk alpha (%)']
     ];
     
     foreach ($defaultSettings as $setting) {
@@ -1175,6 +1187,433 @@ function processEnhancedAttendance($base64Image) {
     }
 }
 
+// KPI Calculation Functions
+function calculateKPIForEmployee(PDO $pdo, $userId, $periodStart = null, $periodEnd = null) {
+    try {
+        // Get KPI settings
+        $latePenaltyPerMinute = (float)getSetting($pdo, 'kpi_late_penalty_per_minute', '1');
+        $izinSakitScore = (float)getSetting($pdo, 'kpi_izin_sakit_score', '85');
+        $alphaScore = (float)getSetting($pdo, 'kpi_alpha_score', '0');
+        $maxOntimeHour = (int)getSetting($pdo, 'max_ontime_hour', '8');
+        
+        // Get employee data
+        $stmt = $pdo->prepare("SELECT nama, created_at FROM users WHERE id = ?");
+        $stmt->execute([$userId]);
+        $employee = $stmt->fetch();
+        if (!$employee) return null;
+        
+        // Get employee registration date
+        $employeeRegDate = $employee['created_at'];
+        
+        // Use employee registration date as period start if not provided
+        if (!$periodStart) {
+            $periodStart = $employeeRegDate;
+        }
+        if (!$periodEnd) {
+            $periodEnd = date('Y-m-d');
+        }
+        
+        // Special case: if employee registered on the same date as period start, 
+        // ensure we include that date in the calculation
+        $employeeRegDateOnly = date('Y-m-d', strtotime($employeeRegDate));
+        $periodStartOnly = date('Y-m-d', strtotime($periodStart));
+        
+        // If employee registered on the same date as period start, use that date
+        if ($employeeRegDateOnly == $periodStartOnly) {
+            $actualPeriodStart = $employeeRegDateOnly;
+        } else {
+            $actualPeriodStart = max($periodStart, $employeeRegDate);
+        }
+        
+        // Get all attendance records for the period
+        // Use the calculated actual period start
+        $stmt = $pdo->prepare("
+            SELECT 
+                DATE(jam_masuk_iso) as attendance_date,
+                jam_masuk_iso,
+                status,
+                CASE 
+                    WHEN status = 'terlambat' THEN 
+                        GREATEST(0, TIMESTAMPDIFF(MINUTE, 
+                            CONCAT(DATE(jam_masuk_iso), ' ', :max_hour, ':00:00'), 
+                            jam_masuk_iso
+                        ))
+                    ELSE 0 
+                END as late_minutes
+            FROM attendance 
+            WHERE user_id = :user_id 
+            AND jam_masuk_iso IS NOT NULL 
+            AND DATE(jam_masuk_iso) BETWEEN :period_start AND :period_end
+            ORDER BY attendance_date
+        ");
+        $stmt->execute([
+            'max_hour' => $maxOntimeHour,
+            'user_id' => $userId, 
+            'period_start' => $actualPeriodStart, 
+            'period_end' => $periodEnd
+        ]);
+        $attendanceRecords = $stmt->fetchAll();
+        
+        // Get izin/sakit records for the period from attendance table
+        $stmt = $pdo->prepare("
+            SELECT DATE(jam_masuk_iso) as izin_date, ket as status
+            FROM attendance 
+            WHERE user_id = :user_id 
+            AND ket IN ('izin', 'sakit')
+            AND DATE(jam_masuk_iso) BETWEEN :period_start AND :period_end
+            ORDER BY izin_date
+        ");
+        $stmt->execute([
+            'user_id' => $userId, 
+            'period_start' => $actualPeriodStart, 
+            'period_end' => $periodEnd
+        ]);
+        $izinRecords = $stmt->fetchAll();
+        
+        // Get izin/sakit records from attendance_notes table
+        // Use the full period range to ensure we don't miss any data
+        $stmt = $pdo->prepare("
+            SELECT date as izin_date, type as status
+            FROM attendance_notes 
+            WHERE user_id = :user_id 
+            AND type IN ('izin', 'sakit')
+            AND date BETWEEN :period_start AND :period_end
+            ORDER BY izin_date
+        ");
+        $stmt->execute([
+            'user_id' => $userId, 
+            'period_start' => $periodStart, 
+            'period_end' => $periodEnd
+        ]);
+        $izinNotesRecords = $stmt->fetchAll();
+        
+        // Debug: Test query without date filter to see if data exists
+        $stmt2 = $pdo->prepare("
+            SELECT date as izin_date, type as status
+            FROM attendance_notes 
+            WHERE user_id = :user_id 
+            AND type IN ('izin', 'sakit')
+            ORDER BY izin_date
+        ");
+        $stmt2->execute(['user_id' => $userId]);
+        $allIzinNotesRecords = $stmt2->fetchAll();
+        error_log("KPI Debug - All izin/sakit records for user $userId (no date filter): " . count($allIzinNotesRecords));
+        error_log("KPI Debug - All izin/sakit data: " . print_r($allIzinNotesRecords, true));
+        
+        // Debug: Check if attendance_notes table exists and has data
+        try {
+            $stmt3 = $pdo->prepare("SELECT COUNT(*) as total FROM attendance_notes WHERE type IN ('izin', 'sakit')");
+            $stmt3->execute();
+            $totalNotes = $stmt3->fetch();
+            error_log("KPI Debug - Total izin/sakit records in attendance_notes table: " . $totalNotes['total']);
+            
+            // Special debug for user 22
+            if ($userId == 22) {
+                error_log("KPI Debug - Special debug for user 22:");
+                error_log("- Period start: $periodStart");
+                error_log("- Period end: $periodEnd");
+                error_log("- Actual period start: $actualPeriodStart");
+                error_log("- Employee reg date: $employeeRegDate");
+                error_log("- Attendance notes records count: " . count($izinNotesRecords));
+                foreach ($izinNotesRecords as $record) {
+                    error_log("- Notes record: " . $record['izin_date'] . " = " . $record['status']);
+                }
+                
+                // Check all records for user 22 in attendance_notes
+                $stmt4 = $pdo->prepare("SELECT * FROM attendance_notes WHERE user_id = 22");
+                $stmt4->execute();
+                $allUser22Records = $stmt4->fetchAll();
+                error_log("KPI Debug - All attendance_notes records for user 22: " . count($allUser22Records));
+                foreach ($allUser22Records as $record) {
+                    error_log("- All records: " . $record['date'] . " = " . $record['type']);
+                }
+            }
+        } catch (Exception $e) {
+            error_log("KPI Debug - Error checking attendance_notes table: " . $e->getMessage());
+        }
+        
+        // Debug logging
+        error_log("KPI Debug - User ID: $userId, Period: $periodStart to $periodEnd, Actual Period: $actualPeriodStart to $periodEnd, Employee Reg Date: $employeeRegDate");
+        error_log("KPI Debug - Query executed: SELECT date as izin_date, type as status FROM attendance_notes WHERE user_id = $userId AND type IN ('izin', 'sakit') AND date BETWEEN '$periodStart' AND '$periodEnd'");
+        error_log("KPI Debug - Attendance izin records: " . count($izinRecords));
+        error_log("KPI Debug - Attendance notes izin records: " . count($izinNotesRecords));
+        error_log("KPI Debug - Attendance notes data: " . print_r($izinNotesRecords, true));
+        
+        // Create a map of izin/sakit dates from both tables
+        // Priority: attendance_notes first, then attendance table
+        $izinDates = [];
+        
+        // First, add izin/sakit from attendance_notes table (higher priority)
+        foreach ($izinNotesRecords as $record) {
+            // Convert employee registration date to date only for comparison
+            $employeeRegDateOnly = date('Y-m-d', strtotime($employeeRegDate));
+            
+            // Special case: if employee registered on the same date as izin/sakit, prioritize izin/sakit
+            if ($record['izin_date'] == $employeeRegDateOnly) {
+                $izinDates[$record['izin_date']] = $record['status'];
+                error_log("KPI Debug - Added attendance_notes izin (same day as registration): " . $record['izin_date'] . " = " . $record['status'] . " (employee reg: $employeeRegDateOnly)");
+            } else if ($record['izin_date'] > $employeeRegDateOnly) {
+                $izinDates[$record['izin_date']] = $record['status'];
+                error_log("KPI Debug - Added attendance_notes izin: " . $record['izin_date'] . " = " . $record['status'] . " (employee reg: $employeeRegDateOnly)");
+            } else {
+                error_log("KPI Debug - Skipped attendance_notes izin before registration: " . $record['izin_date'] . " (employee reg: $employeeRegDateOnly)");
+            }
+        }
+        
+        // Then, add izin/sakit from attendance table (only if not already in notes)
+        foreach ($izinRecords as $record) {
+            if (!isset($izinDates[$record['izin_date']])) {
+                $izinDates[$record['izin_date']] = $record['status'];
+                error_log("KPI Debug - Added attendance izin: " . $record['izin_date'] . " = " . $record['status']);
+            } else {
+                error_log("KPI Debug - Skipped attendance izin (already in notes): " . $record['izin_date'] . " = " . $record['status']);
+            }
+        }
+        
+        error_log("KPI Debug - Total izin dates: " . count($izinDates));
+        error_log("KPI Debug - Izin dates: " . print_r(array_keys($izinDates), true));
+        error_log("KPI Debug - Izin dates map: " . print_r($izinDates, true));
+        
+        // Generate all working days in the period
+        $workingDays = getWorkingDaysInPeriod($periodStart, $periodEnd);
+        
+        // Get current date for comparison
+        $currentDate = date('Y-m-d');
+        
+        // Debug logging for period
+        error_log("KPI Debug - Employee ID: $userId, Registration Date: $employeeRegDate, Period: $periodStart to $periodEnd, Total Working Days: " . count($workingDays));
+        
+        $ontimeCount = 0;
+        $lateCount = 0;
+        $izinSakitCount = 0;
+        $alphaCount = 0;
+        $totalLateMinutes = 0;
+        $actualWorkingDays = 0; // Count actual working days for this employee (only past dates)
+        $totalWorkingDaysInPeriod = 0; // Count all working days in period for this employee
+        
+        // Process each working day
+        foreach ($workingDays as $date) {
+            $dateStr = $date->format('Y-m-d');
+            
+            // Skip dates before employee registration
+            if ($dateStr < $employeeRegDateOnly) {
+                continue;
+            }
+            
+            // Count this as a working day for this employee (regardless of whether it's past or future)
+            $totalWorkingDaysInPeriod++;
+            
+            // Only count as actual working day if the date has already passed
+            // This prevents counting future dates in the denominator for KPI calculation
+            if ($dateStr <= $currentDate) {
+                $actualWorkingDays++;
+            }
+            
+            // Check if there's an attendance record for this date
+            $attendanceRecord = null;
+            foreach ($attendanceRecords as $record) {
+                if ($record['attendance_date'] === $dateStr) {
+                    $attendanceRecord = $record;
+                    break;
+                }
+            }
+            
+            // Only process dates that have already passed for KPI calculation
+            if ($dateStr <= $currentDate) {
+                // Check if it's izin/sakit first (from both tables, with priority already set)
+                // Special case: if employee registered on the same date as izin/sakit, prioritize izin/sakit
+                if (isset($izinDates[$dateStr]) && ($dateStr == $employeeRegDateOnly || $dateStr > $employeeRegDateOnly)) {
+                    $izinSakitCount++;
+                    error_log("KPI Debug - Found izin/sakit for date: $dateStr, type: " . $izinDates[$dateStr] . " (employee reg: $employeeRegDateOnly)");
+                } else if ($attendanceRecord) {
+                    // Check attendance status
+                    if ($attendanceRecord['status'] === 'ontime') {
+                        $ontimeCount++;
+                    } else {
+                        $lateCount++;
+                        $totalLateMinutes += $attendanceRecord['late_minutes'];
+                    }
+                } else {
+                    // No attendance and no izin/sakit = alpha (only for past dates)
+                    $alphaCount++;
+                    error_log("KPI Debug - Counted alpha for past date: $dateStr (current: $currentDate)");
+                }
+            } else {
+                error_log("KPI Debug - Skipped future date for KPI calculation: $dateStr (current: $currentDate)");
+            }
+        }
+        
+        // Calculate KPI score
+        $kpiScore = 0;
+        if ($actualWorkingDays > 0) {
+            // Base score from ontime attendance
+            $kpiScore += ($ontimeCount * 100);
+            
+            // Deduct for late attendance
+            $kpiScore -= ($totalLateMinutes * $latePenaltyPerMinute);
+            
+            // Add score for izin/sakit
+            $kpiScore += ($izinSakitCount * $izinSakitScore);
+            
+            // Add score for alpha (usually 0)
+            $kpiScore += ($alphaCount * $alphaScore);
+            
+            // Calculate average based on actual working days that have passed
+            $kpiScore = $kpiScore / $actualWorkingDays;
+            
+            // Ensure score is between 0 and 100
+            $kpiScore = max(0, min(100, $kpiScore));
+        }
+        
+        // Debug logging for KPI calculation
+        error_log("KPI Debug - KPI Calculation - OnTime: $ontimeCount, Late: $lateCount, Izin/Sakit: $izinSakitCount, Alpha: $alphaCount, Actual Working Days: $actualWorkingDays, Total Working Days: $totalWorkingDaysInPeriod");
+        error_log("KPI Debug - KPI Score before division: " . ($ontimeCount * 100 - $totalLateMinutes * $latePenaltyPerMinute + $izinSakitCount * $izinSakitScore + $alphaCount * $alphaScore));
+        error_log("KPI Debug - Final KPI Score: $kpiScore");
+        
+        // Debug logging for final counts
+        error_log("KPI Debug - Final counts - OnTime: $ontimeCount, Late: $lateCount, Izin/Sakit: $izinSakitCount, Alpha: $alphaCount, Actual Working Days: $actualWorkingDays");
+        
+        return [
+            'user_id' => $userId,
+            'nama' => $employee['nama'],
+            'total_working_days' => $totalWorkingDaysInPeriod, // Show total working days in period
+            'actual_working_days' => $actualWorkingDays, // Days that have passed for KPI calculation
+            'ontime_count' => $ontimeCount,
+            'late_count' => $lateCount,
+            'izin_sakit_count' => $izinSakitCount,
+            'alpha_count' => $alphaCount,
+            'total_late_minutes' => $totalLateMinutes,
+            'kpi_score' => round($kpiScore, 2),
+            'period_start' => $periodStart,
+            'period_end' => $periodEnd,
+            'employee_registration_date' => $employeeRegDate
+        ];
+        
+    } catch (Exception $e) {
+        error_log("KPI calculation error: " . $e->getMessage());
+        return null;
+    }
+}
+
+function getWorkingDaysInPeriod($startDate, $endDate) {
+    $workingDays = [];
+    $start = new DateTime($startDate);
+    $end = new DateTime($endDate);
+    
+    while ($start <= $end) {
+        // Skip weekends (Saturday = 6, Sunday = 0)
+        if ($start->format('N') < 6) {
+            $workingDays[] = clone $start;
+        }
+        $start->add(new DateInterval('P1D'));
+    }
+    
+    return $workingDays;
+}
+
+function getWorkingDaysInMonth($year, $month) {
+    $workingDays = 0;
+    $start = new DateTime("$year-$month-01");
+    $end = new DateTime("$year-$month-" . $start->format('t')); // Last day of month
+    
+    while ($start <= $end) {
+        // Skip weekends (Saturday = 6, Sunday = 0)
+        if ($start->format('N') < 6) {
+            $workingDays++;
+        }
+        $start->add(new DateInterval('P1D'));
+    }
+    
+    return $workingDays;
+}
+
+function getWorkingDaysInMonthUpToDate($year, $month, $day) {
+    $workingDays = 0;
+    $start = new DateTime("$year-$month-01");
+    $end = new DateTime("$year-$month-" . str_pad($day, 2, '0', STR_PAD_LEFT));
+    
+    // Subtract 1 day from end to exclude today (don't count today for alpha calculation)
+    $end->sub(new DateInterval('P1D'));
+    
+    while ($start <= $end) {
+        // Skip weekends (Saturday = 6, Sunday = 0)
+        if ($start->format('N') < 6) {
+            $workingDays++;
+        }
+        $start->add(new DateInterval('P1D'));
+    }
+    
+    return $workingDays;
+}
+
+function getEarliestEmployeeRegistrationDate(PDO $pdo) {
+    try {
+        $stmt = $pdo->prepare("SELECT MIN(created_at) as earliest_date FROM users WHERE role = 'pegawai'");
+        $stmt->execute();
+        $result = $stmt->fetch();
+        return $result ? $result['earliest_date'] : date('Y-01-01');
+    } catch (PDOException $e) {
+        error_log("Error getting earliest employee registration date: " . $e->getMessage());
+        return date('Y-01-01');
+    }
+}
+
+function getEmployeeRegistrationDate(PDO $pdo, $userId) {
+    try {
+        $stmt = $pdo->prepare("SELECT created_at FROM users WHERE id = :user_id AND role = 'pegawai'");
+        $stmt->execute([':user_id' => $userId]);
+        $result = $stmt->fetch();
+        return $result ? $result['created_at'] : null;
+    } catch (PDOException $e) {
+        error_log("Error getting employee registration date: " . $e->getMessage());
+        return null;
+    }
+}
+
+function getAllKPIData(PDO $pdo, $customPeriodStart = null, $customPeriodEnd = null) {
+    try {
+        $periodStart = $customPeriodStart ?? getEarliestEmployeeRegistrationDate($pdo);
+        $periodEnd = $customPeriodEnd ?? date('Y-m-d'); // Use current date instead of period end
+        
+        // Get all employees
+        $stmt = $pdo->prepare("SELECT id, nama FROM users WHERE role = 'pegawai' ORDER BY nama");
+        $stmt->execute();
+        $employees = $stmt->fetchAll();
+        
+        // If no employees, return empty data
+        if (empty($employees)) {
+            return [
+                'period_start' => $periodStart,
+                'period_end' => $periodEnd,
+                'kpi_data' => []
+            ];
+        }
+        
+        $kpiData = [];
+        foreach ($employees as $employee) {
+            $kpi = calculateKPIForEmployee($pdo, $employee['id'], $periodStart, $periodEnd);
+            if ($kpi) {
+                $kpiData[] = $kpi;
+            }
+        }
+        
+        // Sort by KPI score descending
+        usort($kpiData, function($a, $b) {
+            return $b['kpi_score'] <=> $a['kpi_score'];
+        });
+        
+        return [
+            'period_start' => $periodStart,
+            'period_end' => $periodEnd,
+            'kpi_data' => $kpiData
+        ];
+        
+    } catch (Exception $e) {
+        error_log("Get all KPI data error: " . $e->getMessage());
+        return null;
+    }
+}
+
 // ----- AJAX ENDPOINTS -----
 if (isset($_GET['ajax'])) {
     $action = $_GET['ajax'];
@@ -1398,15 +1837,15 @@ if (isset($_GET['ajax'])) {
                     'nim' => $note['nim'],
                     'nama' => $note['nama'],
                     'startup' => $note['startup'],
-                    'jam_masuk' => '-',
-                    'jam_masuk_iso' => $note['date'] . ' 00:00:00',
+                    'jam_masuk' => date('H:i', strtotime($note['created_at'])),
+                    'jam_masuk_iso' => $note['created_at'],
                     'ekspresi_masuk' => null,
                     'screenshot_masuk' => null,
                     'lokasi_masuk' => null,
                     'lat_masuk' => null,
                     'lng_masuk' => null,
-                    'jam_pulang' => '-',
-                    'jam_pulang_iso' => null,
+                    'jam_pulang' => date('H:i', strtotime($note['created_at'])),
+                    'jam_pulang_iso' => $note['created_at'],
                     'ekspresi_pulang' => null,
                     'screenshot_pulang' => null,
                     'lokasi_pulang' => null,
@@ -1453,15 +1892,15 @@ if (isset($_GET['ajax'])) {
                     'nim' => $note['nim'],
                     'nama' => $note['nama'],
                     'startup' => $note['startup'],
-                    'jam_masuk' => '-',
-                    'jam_masuk_iso' => $note['date'] . ' 00:00:00',
+                    'jam_masuk' => date('H:i', strtotime($note['created_at'])),
+                    'jam_masuk_iso' => $note['created_at'],
                     'ekspresi_masuk' => null,
                     'screenshot_masuk' => null,
                     'lokasi_masuk' => null,
                     'lat_masuk' => null,
                     'lng_masuk' => null,
-                    'jam_pulang' => '-',
-                    'jam_pulang_iso' => null,
+                    'jam_pulang' => date('H:i', strtotime($note['created_at'])),
+                    'jam_pulang_iso' => $note['created_at'],
                     'ekspresi_pulang' => null,
                     'screenshot_pulang' => null,
                     'lokasi_pulang' => null,
@@ -1556,13 +1995,12 @@ if (isset($_GET['ajax'])) {
                 jsonResponse(['ok' => false, 'message' => $statusText, 'statusClass' => 'bg-red-100 text-red-700'], 400);
             }
     
-            // Ultra-fast query - only select needed fields
+            // Ultra-fast query - check for any attendance record today (including izin/sakit)
             $todayCheck = $pdo->prepare("
-                SELECT id, jam_masuk_iso, jam_pulang_iso FROM attendance 
+                SELECT id, jam_masuk_iso, jam_pulang_iso, ket FROM attendance 
                 WHERE user_id = :uid 
                 AND DATE(jam_masuk_iso) = :today 
                 AND jam_masuk_iso IS NOT NULL
-                AND jam_pulang_iso IS NULL
                 ORDER BY jam_masuk_iso DESC 
                 LIMIT 1
             ");
@@ -1661,9 +2099,15 @@ if (isset($_GET['ajax'])) {
                     jsonResponse(['ok' => true, 'message' => $statusText, 'nama' => $u['nama'], 'jam' => $jamMasukFormat, 'statusClass' => 'bg-green-100 text-green-700']);
                 }
             } else {
+                // Check if user has izin/sakit today
+                if ($todayRow['ket'] === 'izin' || $todayRow['ket'] === 'sakit') {
+                    $statusText = "Anda sudah mengajukan {$todayRow['ket']} hari ini. Tidak bisa melakukan presensi.";
+                    jsonResponse(['ok' => false, 'message' => $statusText, 'statusClass' => 'bg-red-100 text-red-700']);
+            } else {
                 $masukTime = new DateTime($todayRow['jam_masuk_iso']);
                 $statusText = "Anda sudah presensi masuk pada " . $masukTime->format('d/m/Y H:i') . " dan belum pulang.";
                 jsonResponse(['ok' => false, 'message' => $statusText, 'statusClass' => 'bg-yellow-100 text-yellow-700']);
+                }
             }
         } else {
             // Check if within check-out time window using settings
@@ -1716,10 +2160,38 @@ if (isset($_GET['ajax'])) {
         if (strpos($id, 'note_') === 0) {
             // Extract the actual ID from 'note_123' format
             $actualId = (int)substr($id, 5);
+            
+            // Get the attendance_notes record to get user_id and date
+            $stmt = $pdo->prepare("SELECT user_id, date FROM attendance_notes WHERE id=:id");
+            $stmt->execute([':id' => $actualId]);
+            $note = $stmt->fetch();
+            
+            if ($note) {
+                // Delete related daily report
+                $pdo->prepare("DELETE FROM daily_reports WHERE user_id=:user_id AND report_date=:date")->execute([
+                    ':user_id' => $note['user_id'],
+                    ':date' => $note['date']
+                ]);
+            }
+            
             $pdo->prepare("DELETE FROM attendance_notes WHERE id=:id")->execute([':id' => $actualId]);
         } else {
             // Regular attendance record
             $actualId = (int)$id;
+            
+            // Get the attendance record to get user_id and date
+            $stmt = $pdo->prepare("SELECT user_id, DATE(jam_masuk_iso) as report_date FROM attendance WHERE id=:id");
+            $stmt->execute([':id' => $actualId]);
+            $attendance = $stmt->fetch();
+            
+            if ($attendance) {
+                // Delete related daily report
+                $pdo->prepare("DELETE FROM daily_reports WHERE user_id=:user_id AND report_date=:date")->execute([
+                    ':user_id' => $attendance['user_id'],
+                    ':date' => $attendance['report_date']
+                ]);
+            }
+            
             $pdo->prepare("DELETE FROM attendance WHERE id=:id")->execute([':id' => $actualId]);
         }
         
@@ -2219,8 +2691,12 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
             $jam_masuk_iso = $date . ' ' . $jam_masuk . ':00';
             $jam_pulang_iso = $date . ' ' . $jam_pulang . ':00';
         } else {
-            // For Izin/Sakit, use a default timestamp
-            $jam_masuk_iso = $date . ' 08:00:00';
+            // For Izin/Sakit, use current time when inputting
+            $now = new DateTime('now', new DateTimeZone('Asia/Jakarta'));
+            $jam_masuk_iso = $now->format('Y-m-d H:i:s');
+            $jam_pulang_iso = $now->format('Y-m-d H:i:s');
+            $jam_masuk = $now->format('H:i');
+            $jam_pulang = $now->format('H:i');
         }
 
         // Avoid duplicates for day
@@ -2561,14 +3037,25 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         $wfoLat = trim($_POST['wfo_lat'] ?? '');
         $wfoLng = trim($_POST['wfo_lng'] ?? '');
         $wfoRadius = trim($_POST['wfo_radius_m'] ?? '');
-        $periodStart = trim($_POST['attendance_period_start'] ?? '');
         $periodEnd = trim($_POST['attendance_period_end'] ?? '');
+        $kpiLatePenalty = trim($_POST['kpi_late_penalty'] ?? '');
+        $kpiIzinSakit = trim($_POST['kpi_izin_sakit'] ?? '');
+        $kpiAlpha = trim($_POST['kpi_alpha'] ?? '');
         
         if (!is_numeric($maxOntimeHour) || $maxOntimeHour < 0 || $maxOntimeHour > 23) {
             jsonResponse(['ok' => false, 'message' => 'Jam maksimal ontime harus berupa angka 0-23'], 400);
         }
         if (!is_numeric($minCheckoutHour) || $minCheckoutHour < 0 || $minCheckoutHour > 23) {
             jsonResponse(['ok' => false, 'message' => 'Jam minimal checkout harus berupa angka 0-23'], 400);
+        }
+        if ($kpiLatePenalty !== '' && (!is_numeric($kpiLatePenalty) || $kpiLatePenalty < 0 || $kpiLatePenalty > 100)) {
+            jsonResponse(['ok' => false, 'message' => 'Pengurangan KPI per menit terlambat harus berupa angka 0-100'], 400);
+        }
+        if ($kpiIzinSakit !== '' && (!is_numeric($kpiIzinSakit) || $kpiIzinSakit < 0 || $kpiIzinSakit > 100)) {
+            jsonResponse(['ok' => false, 'message' => 'Nilai KPI izin/sakit harus berupa angka 0-100'], 400);
+        }
+        if ($kpiAlpha !== '' && (!is_numeric($kpiAlpha) || $kpiAlpha < 0 || $kpiAlpha > 100)) {
+            jsonResponse(['ok' => false, 'message' => 'Nilai KPI alpha harus berupa angka 0-100'], 400);
         }
         
         setSetting($pdo, 'max_ontime_hour', $maxOntimeHour);
@@ -2585,8 +3072,10 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         if ($wfoLat !== '' && is_numeric($wfoLat)) setSetting($pdo, 'wfo_lat', $wfoLat);
         if ($wfoLng !== '' && is_numeric($wfoLng)) setSetting($pdo, 'wfo_lng', $wfoLng);
         if ($wfoRadius !== '' && is_numeric($wfoRadius)) setSetting($pdo, 'wfo_radius_m', $wfoRadius);
-        if ($periodStart !== '') setSetting($pdo, 'attendance_period_start', $periodStart);
         if ($periodEnd !== '') setSetting($pdo, 'attendance_period_end', $periodEnd);
+        if ($kpiLatePenalty !== '') setSetting($pdo, 'kpi_late_penalty_per_minute', $kpiLatePenalty);
+        if ($kpiIzinSakit !== '') setSetting($pdo, 'kpi_izin_sakit_score', $kpiIzinSakit);
+        if ($kpiAlpha !== '') setSetting($pdo, 'kpi_alpha_score', $kpiAlpha);
         
         // Trigger backup setelah update settings
         triggerDatabaseBackup();
@@ -2695,8 +3184,8 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         if (!isAdmin()) jsonResponse(['error'=>'Forbidden'],403);
         
         $today = date('Y-m-d');
-        // Use configured attendance period if set; fallback to current month
-        $periodStart = getSetting($pdo, 'attendance_period_start', '');
+        // Use earliest employee registration date as period start
+        $periodStart = getEarliestEmployeeRegistrationDate($pdo);
         $periodEnd = getSetting($pdo, 'attendance_period_end', '');
         if ($periodStart && $periodEnd) {
             $monthStart = $periodStart;
@@ -2767,8 +3256,8 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         // Get attendance trend based on configured period
         $trendData = [];
         
-        // Use configured attendance period for trend data
-        $trendStart = getSetting($pdo, 'attendance_period_start', '');
+        // Use earliest employee registration date for trend data
+        $trendStart = getEarliestEmployeeRegistrationDate($pdo);
         $trendEnd = getSetting($pdo, 'attendance_period_end', '');
         
         if ($trendStart && $trendEnd) {
@@ -2788,19 +3277,28 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
             $month = $currentDate->format('m');
             $monthName = $currentDate->format('M Y');
             
-            // Get monthly statistics
-            $presentStmt = $pdo->prepare("
-                SELECT COUNT(DISTINCT user_id) as present 
+            // Skip future months (months that haven't started yet)
+            $currentMonth = date('Y-m');
+            $currentMonthDate = $currentDate->format('Y-m');
+            if ($currentMonthDate > $currentMonth) {
+                $currentDate->add(new DateInterval('P1M'));
+                continue;
+            }
+            
+            // Count ontime occurrences (not distinct users)
+            $ontimeStmt = $pdo->prepare("
+                SELECT COUNT(*) as ontime 
                 FROM attendance 
                 WHERE YEAR(jam_masuk_iso) = :year 
                 AND MONTH(jam_masuk_iso) = :month 
-                AND (ket = 'wfo' OR ket = 'wfa')
+                AND status = 'ontime'
             ");
-            $presentStmt->execute([':year' => $year, ':month' => $month]);
-            $present = $presentStmt->fetch()['present'];
+            $ontimeStmt->execute([':year' => $year, ':month' => $month]);
+            $ontime = $ontimeStmt->fetch()['ontime'];
             
+            // Count late occurrences (not distinct users)
             $lateStmt = $pdo->prepare("
-                SELECT COUNT(DISTINCT user_id) as late 
+                SELECT COUNT(*) as late 
                 FROM attendance 
                 WHERE YEAR(jam_masuk_iso) = :year 
                 AND MONTH(jam_masuk_iso) = :month 
@@ -2809,12 +3307,132 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
             $lateStmt->execute([':year' => $year, ':month' => $month]);
             $late = $lateStmt->fetch()['late'];
             
+            // Count izin and sakit occurrences from both tables
+            // First from attendance table
+            $izinSakitStmt = $pdo->prepare("
+                SELECT COUNT(*) as izin_sakit 
+                FROM attendance 
+                WHERE YEAR(jam_masuk_iso) = :year 
+                AND MONTH(jam_masuk_iso) = :month 
+                AND ket IN ('izin', 'sakit')
+            ");
+            $izinSakitStmt->execute([':year' => $year, ':month' => $month]);
+            $izinSakitFromAttendance = $izinSakitStmt->fetch()['izin_sakit'];
+            
+            // Then from attendance_notes table
+            $izinSakitNotesStmt = $pdo->prepare("
+                SELECT COUNT(*) as izin_sakit 
+                FROM attendance_notes 
+                WHERE YEAR(date) = :year 
+                AND MONTH(date) = :month 
+                AND type IN ('izin', 'sakit')
+            ");
+            $izinSakitNotesStmt->execute([':year' => $year, ':month' => $month]);
+            $izinSakitFromNotes = $izinSakitNotesStmt->fetch()['izin_sakit'];
+            
+            // Total izin/sakit (from both tables)
+            $izinSakit = $izinSakitFromAttendance + $izinSakitFromNotes;
+            
+            // Calculate alpha occurrences
+            // For current month, only count working days up to today
+            // For past months, count all working days in the month
+            if ($currentMonthDate == $currentMonth) {
+                // Current month: only count working days up to today
+                $today = new DateTime();
+                $totalWorkingDaysInMonth = getWorkingDaysInMonthUpToDate($year, $month, $today->format('d'));
+                
+                // Debug for October 2025
+                if ($month == 10 && $year == 2025) {
+                    error_log("Trend Debug - October 2025 working days calculation:");
+                    error_log("- Today: " . $today->format('Y-m-d'));
+                    error_log("- Today day: " . $today->format('d'));
+                    error_log("- Working days up to yesterday: $totalWorkingDaysInMonth");
+                    
+                    // Manual calculation for verification
+                    $manualCount = 0;
+                    $start = new DateTime("2025-10-01");
+                    $end = new DateTime("2025-10-15"); // Yesterday (16-1=15)
+                    while ($start <= $end) {
+                        if ($start->format('N') < 6) { // Skip weekends
+                            $manualCount++;
+                        }
+                        $start->add(new DateInterval('P1D'));
+                    }
+                    error_log("- Manual count (Oct 1-15): $manualCount");
+                }
+            } else {
+                // Past months: count all working days in the month
+                $totalWorkingDaysInMonth = getWorkingDaysInMonth($year, $month);
+            }
+            
+            // Get total employees who were registered during this month
+            $monthEnd = sprintf('%04d-%02d-%02d', $year, $month, date('t', strtotime(sprintf('%04d-%02d-01', $year, $month))));
+            
+            // For current month, use current date as end date
+            $todayDate = date('Y-m-d');
+            if ($monthEnd > $todayDate) {
+                $monthEnd = $todayDate;
+            }
+            
+            $employeesStmt = $pdo->prepare("
+                SELECT COUNT(*) as total_employees_in_month
+                FROM users 
+                WHERE role = 'pegawai' 
+                AND created_at <= :month_end
+                AND DATE(created_at) < :month_start
+            ");
+            $monthStart = sprintf('%04d-%02d-01', $year, $month);
+            $employeesStmt->execute([':month_end' => $monthEnd, ':month_start' => $monthStart]);
+            $totalEmployeesInMonth = $employeesStmt->fetch()['total_employees_in_month'];
+            
+            // Debug: Check individual employee registration dates for October
+            if ($month == 10 && $year == 2025) {
+                $debugStmt = $pdo->prepare("
+                    SELECT id, nama, created_at 
+                    FROM users 
+                    WHERE role = 'pegawai' 
+                    AND created_at <= :month_end
+                    ORDER BY created_at
+                ");
+                $debugStmt->execute([':month_end' => $monthEnd]);
+                $allEmployees = $debugStmt->fetchAll();
+                error_log("Trend Debug - All employees in October: " . count($allEmployees));
+                foreach ($allEmployees as $emp) {
+                    error_log("- Employee: " . $emp['nama'] . " (ID: " . $emp['id'] . ") registered: " . $emp['created_at']);
+                }
+            }
+            
+            // Calculate total possible attendance for this month
+            $totalPossibleAttendance = $totalWorkingDaysInMonth * $totalEmployeesInMonth;
+            
+            // Calculate alpha: total possible - (ontime + late + izin/sakit)
+            $alpha = $totalPossibleAttendance - ($ontime + $late + $izinSakit);
+            
+            // Debug logging for October
+            if ($month == 10 && $year == 2025) {
+                error_log("Trend Debug October 2025:");
+                error_log("- Total working days: $totalWorkingDaysInMonth");
+                error_log("- Total employees: $totalEmployeesInMonth");
+                error_log("- Total possible attendance: $totalPossibleAttendance");
+                error_log("- OnTime: $ontime");
+                error_log("- Late: $late");
+                error_log("- Izin/Sakit from attendance: $izinSakitFromAttendance");
+                error_log("- Izin/Sakit from notes: $izinSakitFromNotes");
+                error_log("- Total Izin/Sakit: $izinSakit");
+                error_log("- Alpha: $alpha");
+                error_log("- Total absent: " . ($izinSakit + max(0, $alpha)));
+                error_log("- Expected calculation: 16 employees × 11 days = 176, 176 - 44 - 21 = 111, +1 = 112");
+            }
+            
+            // Total absent = izin + sakit + alpha
+            $absent = $izinSakit + max(0, $alpha);
+            
             $trendData[] = [
                 'date' => $currentDate->format('Y-m'),
                 'day' => $monthName,
-                'present' => $present,
+                'present' => $ontime,
                 'late' => $late,
-                'absent' => $totalEmployees - $present
+                'absent' => $absent
             ];
             
             $currentDate->add(new DateInterval('P1M'));
@@ -2833,6 +3451,41 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
                     'absent_today' => $absentToday
                 ]
             ]
+        ]);
+    }
+
+    // Admin: get KPI data
+    if ($action === 'get_kpi_data') {
+        if (!isAdmin()) jsonResponse(['error' => 'Forbidden'], 403);
+        
+        // Get filter parameters
+        $filterType = $_GET['filter_type'] ?? 'period';
+        $month = (int)($_GET['month'] ?? 0);
+        $year = (int)($_GET['year'] ?? 0);
+        
+        if ($filterType === 'monthly' && $month > 0 && $year > 0) {
+            // Calculate month start and end dates
+            $monthStart = sprintf('%04d-%02d-01', $year, $month);
+            $monthEnd = date('Y-m-t', strtotime($monthStart)); // Last day of month
+            
+            // For current month, use current date as end date
+            $todayDate = date('Y-m-d');
+            if ($monthEnd > $todayDate) {
+                $monthEnd = $todayDate;
+            }
+            
+            $kpiData = getAllKPIData($pdo, $monthStart, $monthEnd);
+        } else {
+            // Use full period
+            $kpiData = getAllKPIData($pdo);
+        }
+        
+        if ($kpiData === null) {
+            jsonResponse(['ok' => false, 'message' => 'Gagal memuat data KPI'], 500);
+        }
+        jsonResponse([
+            'ok' => true,
+            'data' => $kpiData
         ]);
     }
 
@@ -2991,7 +3644,11 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         $summary=$_POST['summary']??'';
         $achievements=$_POST['achievements']??'[]';
         $obstacles=$_POST['obstacles']??'[]';
-        $submit=(bool)($_POST['submit']??false);
+        $submit = isset($_POST['submit']) ? filter_var($_POST['submit'], FILTER_VALIDATE_BOOLEAN) : false;
+        
+        // Debug logging for submit parameter
+        error_log("Raw POST submit: " . ($_POST['submit'] ?? 'not set'));
+        error_log("Filtered submit: " . ($submit ? 'true' : 'false'));
         
         // Validate year and month
         if($year <= 0 || $month <= 0 || $month > 12) {
@@ -3002,10 +3659,17 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         $stmt->execute([':u'=>$uid, ':y'=>$year, ':m'=>$month]);
         $row=$stmt->fetch();
         if($row && in_array($row['status'], ['approved','disapproved'], true)) jsonResponse(['ok'=>false,'message'=>'Sudah final, tidak bisa diedit'],400);
-        $newStatus=$submit?'submitted':'draft';
+        $newStatus=$submit?'belum di approve':'draft';
+        
+        // Debug logging
+        error_log("Monthly Report Save - User: $uid, Year: $year, Month: $month, Submit: " . ($submit ? 'true' : 'false') . ", New Status: $newStatus");
+        error_log("POST data submit value: " . ($_POST['submit'] ?? 'not set'));
+        error_log("Boolean submit value: " . ($submit ? 'true' : 'false'));
+        
         if($row){
             $upd=$pdo->prepare("UPDATE monthly_reports SET summary=:s, achievements=:a, obstacles=:o, status=:st, updated_at=NOW() WHERE id=:id");
-            $upd->execute([':s'=>$summary, ':a'=>$achievements, ':o'=>$obstacles, ':st'=>$newStatus, ':id'=>$row['id']]);
+            $result = $upd->execute([':s'=>$summary, ':a'=>$achievements, ':o'=>$obstacles, ':st'=>$newStatus, ':id'=>$row['id']]);
+            error_log("Monthly Report Update - Result: " . ($result ? 'success' : 'failed') . ", Rows affected: " . $upd->rowCount());
             
             // Trigger backup setelah update monthly report
             triggerDatabaseBackup();
@@ -3013,12 +3677,14 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
             jsonResponse(['ok'=>true,'id'=>$row['id']]);
         }else{
             $ins=$pdo->prepare("INSERT INTO monthly_reports (user_id, year, month, summary, achievements, obstacles, status) VALUES (:u,:y,:m,:s,:a,:o,:st)");
-            $ins->execute([':u'=>$uid, ':y'=>$year, ':m'=>$month, ':s'=>$summary, ':a'=>$achievements, ':o'=>$obstacles, ':st'=>$newStatus]);
+            $result = $ins->execute([':u'=>$uid, ':y'=>$year, ':m'=>$month, ':s'=>$summary, ':a'=>$achievements, ':o'=>$obstacles, ':st'=>$newStatus]);
+            $newId = $pdo->lastInsertId();
+            error_log("Monthly Report Insert - Result: " . ($result ? 'success' : 'failed') . ", New ID: $newId");
             
             // Trigger backup setelah insert monthly report
             triggerDatabaseBackup();
             
-            jsonResponse(['ok'=>true,'id'=>$pdo->lastInsertId()]);
+            jsonResponse(['ok'=>true,'id'=>$newId]);
         }
     }
 
@@ -3258,7 +3924,7 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
             <div class="relative">
                 <button id="btn-profile" class="flex items-center gap-3 px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors">
                     <span class="text-sm text-gray-700">Akun</span>
-                    <img src="generate-avatar.php?background=64748b&color=ffffff&name=A&size=32" class="w-8 h-8 rounded-full" alt="profile">
+                    <img src="generate-avatar.php?background=64748b&color=ffffff&name=A&size=32" class="w-8 h-8 rounded-full" alt="profile" style="object-fit: contain;">
                 </button>
                 <div id="dropdown-profile" class="absolute right-0 mt-2 bg-white rounded-lg shadow-lg border border-gray-200 hidden min-w-max">
                     <a href="?page=login" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 whitespace-nowrap">Login</a>
@@ -3429,9 +4095,9 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                 <div>
                     <h3 class="text-lg font-semibold mb-4 text-gray-200">Kontak</h3>
                     <div class="space-y-2 text-gray-400">
-                        <p>📧 info@presensi.com</p>
-                        <p>📞 +62 123 456 7890</p>
-                        <p>📍 Jakarta, Indonesia</p>
+                        <p>📧 hr.kolab@gmail.com</p>
+                        <p>📞 +62 878 9000 4465</p>
+                        <p>📍 Bandung, Indonesia</p>
                     </div>
                 </div>
             </div>
@@ -3494,11 +4160,16 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                         <video id="reg-video" autoplay playsinline class="w-full h-full object-cover rounded-lg"></video>
                     </div>
                     <canvas id="reg-canvas" class="hidden"></canvas>
-                    <img id="reg-foto-preview" class="mt-2 h-32 w-32 object-cover rounded-lg hidden">
+                    <img id="reg-foto-preview" class="mt-2 mb-2 h-32 w-32 object-cover rounded-lg hidden mx-auto">
                     <input type="hidden" name="foto" id="reg-foto-data">
-                    <div class="flex gap-2">
+                    <input type="file" id="reg-photo-file-input" accept="image/*" class="hidden">
+                    <div class="flex gap-2 mb-2">
                         <button type="button" id="reg-start-camera" class="flex-1 bg-indigo-500 hover:bg-indigo-600 text-white font-semibold py-2 rounded-lg">Buka Kamera</button>
+                        <button type="button" id="reg-upload-photo" class="flex-1 bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2 rounded-lg">Upload Foto</button>
+                    </div>
+                    <div class="flex gap-2">
                         <button type="button" id="reg-take-photo" class="flex-1 bg-green-500 hover:bg-green-600 text-white font-semibold py-2 rounded-lg hidden">Ambil Foto</button>
+                        <button type="button" id="reg-remove-photo" class="flex-1 bg-red-500 hover:bg-red-600 text-white font-semibold py-2 rounded-lg hidden">Hapus Foto</button>
                     </div>
                 </div>
                 <div>
@@ -3525,7 +4196,7 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
             <div class="relative">
                 <button id="btn-profile" class="flex items-center gap-3 px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg">
                     <span class="text-sm text-gray-700"><?php echo htmlspecialchars($_SESSION['user']['nama'] ?? 'Akun'); ?></span>
-                    <img src="generate-avatar.php?background=6366f1&color=fff&name=<?php echo urlencode($_SESSION['user']['nama'] ?? 'A'); ?>&size=32" class="w-8 h-8 rounded-full" alt="profile">
+                    <img src="generate-avatar.php?background=6366f1&color=fff&name=<?php echo urlencode($_SESSION['user']['nama'] ?? 'A'); ?>&size=32" class="w-8 h-8 rounded-full" alt="profile" style="object-fit: contain;">
                 </button>
                 <div id="dropdown-profile" class="absolute right-0 mt-2 bg-white rounded-lg shadow-lg border hidden min-w-max">
                     <?php if(isset($_SESSION['user'])): ?>
@@ -3877,16 +4548,35 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                                 <div>
                                     <label class="block text-sm font-medium text-gray-700 mb-2">Radius WFO (meter)</label>
                                     <input type="number" min="0" id="wfo-radius" class="w-32 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
-                                </div>
-                                <div class="grid grid-cols-2 gap-4">
-                                    <div>
-                                        <label class="block text-sm font-medium text-gray-700 mb-2">Periode Mulai</label>
-                                        <input type="date" id="attendance-period-start" class="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
                                     </div>
                                     <div>
                                         <label class="block text-sm font-medium text-gray-700 mb-2">Periode Selesai</label>
                                         <input type="date" id="attendance-period-end" class="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
-                                    </div>
+                                    <p class="text-xs text-gray-500 mt-1">Periode mulai otomatis berdasarkan tanggal registrasi pegawai pertama</p>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="bg-gray-50 p-4 rounded-lg">
+                            <h3 class="text-lg font-semibold mb-4 text-gray-800">Pengaturan KPI Absen</h3>
+                            <div class="space-y-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">Pengurangan KPI per Menit Terlambat (%)</label>
+                                    <input type="number" min="0" max="100" step="0.1" id="kpi-late-penalty" 
+                                           class="w-32 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+                                    <p class="text-xs text-gray-500 mt-1">Default: 1% per menit terlambat</p>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">Nilai KPI untuk Izin/Sakit (%)</label>
+                                    <input type="number" min="0" max="100" step="0.1" id="kpi-izin-sakit" 
+                                           class="w-32 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+                                    <p class="text-xs text-gray-500 mt-1">Default: 85% per izin/sakit</p>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">Nilai KPI untuk Alpha (%)</label>
+                                    <input type="number" min="0" max="100" step="0.1" id="kpi-alpha" 
+                                           class="w-32 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+                                    <p class="text-xs text-gray-500 mt-1">Default: 0% per alpha</p>
                                 </div>
                             </div>
                         </div>
@@ -3959,9 +4649,66 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                     </div>
                 </div>
 
+                <!-- KPI Absen Section -->
+                <div class="mb-8">
+                    <h3 class="text-lg font-semibold mb-4 text-gray-700">Penilaian KPI Absen</h3>
+                    <div class="bg-white p-4 rounded-lg shadow-sm">
+                        <div class="mb-4">
+                            <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-4">
+                                <div class="flex flex-col sm:flex-row items-start sm:items-center gap-4">
+                                    <span class="text-sm text-gray-600">Periode: <span id="kpi-period-range"></span></span>
+                                    <div class="flex items-center gap-2">
+                                        <label class="text-sm text-gray-600">Filter:</label>
+                                        <select id="kpi-filter-type" class="px-3 py-1 border border-gray-300 rounded text-sm">
+                                            <option value="period">Periode Lengkap</option>
+                                            <option value="monthly">Per Bulan</option>
+                                        </select>
+                                        <select id="kpi-filter-month" class="px-3 py-1 border border-gray-300 rounded text-sm hidden">
+                                            <option value="">Pilih Bulan</option>
+                                        </select>
+                                        <select id="kpi-filter-year" class="px-3 py-1 border border-gray-300 rounded text-sm hidden">
+                                            <option value="">Pilih Tahun</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <button id="refresh-kpi" class="px-3 py-1 bg-indigo-600 text-white text-sm rounded hover:bg-indigo-700 transition">
+                                    Refresh
+                                </button>
+                            </div>
+                        </div>
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-sm">
+                                <thead class="bg-gray-50">
+                                    <tr>
+                                        <th class="px-4 py-3 text-left font-medium text-gray-700">No</th>
+                                        <th class="px-4 py-3 text-left font-medium text-gray-700">Nama Pegawai</th>
+                                        <th class="px-4 py-3 text-center font-medium text-gray-700">Total Hari Kerja</th>
+                                        <th class="px-4 py-3 text-center font-medium text-gray-700">Ontime</th>
+                                        <th class="px-4 py-3 text-center font-medium text-gray-700">Terlambat</th>
+                                        <th class="px-4 py-3 text-center font-medium text-gray-700">Izin/Sakit</th>
+                                        <th class="px-4 py-3 text-center font-medium text-gray-700">Alpha</th>
+                                        <th class="px-4 py-3 text-center font-medium text-gray-700">KPI Score</th>
+                                        <th class="px-4 py-3 text-center font-medium text-gray-700">Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="kpi-table-body" class="divide-y divide-gray-200">
+                                    <!-- Data will be populated here -->
+                                </tbody>
+                            </table>
+                        </div>
+                        <div id="kpi-loading" class="text-center py-8 text-gray-500">
+                            <div class="inline-block animate-spin rounded-full h-6 w-6 border-b-2 border-indigo-600"></div>
+                            <p class="mt-2">Memuat data KPI...</p>
+                        </div>
+                        <div id="kpi-empty" class="text-center py-8 text-gray-500 hidden">
+                            <p>Tidak ada data KPI untuk ditampilkan</p>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Attendance Trend Chart -->
                 <div class="mb-8">
-                    <h3 class="text-lg font-semibold mb-4 text-gray-700">Tren Kehadiran 1 Periode</h3>
+                    <h3 class="text-lg font-semibold mb-4 text-gray-700">Tren Kejadian Kehadiran 1 Periode</h3>
                     <div class="bg-white p-4 rounded-lg shadow-sm">
                         <canvas id="attendanceTrendChart" width="400" height="200"></canvas>
                     </div>
@@ -4690,11 +5437,14 @@ if (loginForm) {
 // Register camera
 const regStart = qs('#reg-start-camera');
 const regTake = qs('#reg-take-photo');
+const regUpload = qs('#reg-upload-photo');
+const regRemove = qs('#reg-remove-photo');
 const regVideo = qs('#reg-video');
 const regCanvas = qs('#reg-canvas');
 const regPreview = qs('#reg-foto-preview');
 const regVidContainer = qs('#reg-video-container');
 const regFotoData = qs('#reg-foto-data');
+const regPhotoFileInput = qs('#reg-photo-file-input');
 let regStream = null;
 
 if (regStart) {
@@ -4723,6 +5473,64 @@ if (regTake) {
         regTake.classList.add('hidden');
         regStart.classList.remove('hidden');
         regStart.textContent = 'Ambil Ulang Foto';
+        regRemove.classList.remove('hidden');
+    });
+}
+
+// Upload photo functionality
+if (regUpload) {
+    regUpload.addEventListener('click', ()=>{
+        regPhotoFileInput.click();
+    });
+}
+
+if (regPhotoFileInput) {
+    regPhotoFileInput.addEventListener('change', (e)=>{
+        const file = e.target.files[0];
+        if (file) {
+            // Validate file type
+            if (!file.type.startsWith('image/')) {
+                showNotif('File harus berupa gambar', false);
+                return;
+            }
+            
+            // Validate file size (max 5MB)
+            if (file.size > 5 * 1024 * 1024) {
+                showNotif('Ukuran file maksimal 5MB', false);
+                return;
+            }
+            
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const dataUrl = e.target.result;
+                regPreview.src = dataUrl;
+                regPreview.classList.remove('hidden');
+                regFotoData.value = dataUrl;
+                regRemove.classList.remove('hidden');
+                regStart.textContent = 'Buka Kamera';
+            };
+            reader.readAsDataURL(file);
+        }
+    });
+}
+
+// Remove photo functionality
+if (regRemove) {
+    regRemove.addEventListener('click', ()=>{
+        regPreview.src = '';
+        regPreview.classList.add('hidden');
+        regFotoData.value = '';
+        regRemove.classList.add('hidden');
+        regPhotoFileInput.value = '';
+        regStart.textContent = 'Buka Kamera';
+        
+        // Stop camera if running
+        if(regStream){ 
+            regStream.getTracks().forEach(t=>t.stop()); 
+            regStream=null; 
+        }
+        regVidContainer.classList.add('hidden');
+        regTake.classList.add('hidden');
     });
 }
 
@@ -4828,7 +5636,7 @@ function showWFAModal(message) {
                     submitAttendanceWithWFA(window.pendingAttendanceData, reason);
                 }
             } else {
-                alert('Harap isi alasan WFA terlebih dahulu.');
+                showNotif('Harap isi alasan WFA terlebih dahulu.', false);
             }
         });
         
@@ -6283,7 +7091,7 @@ async function renderMembers(){
     filtered.forEach(m=>{
         const tr = document.createElement('tr'); tr.className='border-b hover:bg-gray-50';
         tr.innerHTML = `
-            <td class="py-2 px-4"><img src="${m.foto_base64||''}" alt="Foto ${m.nama||''}" class="h-12 w-12 object-cover rounded-full"></td>
+            <td class="py-2 px-4"><img src="${m.foto_base64||''}" alt="Foto ${m.nama||''}" class="h-12 w-12 rounded-full" style="object-fit: contain;"></td>
             <td class="py-2 px-4">${m.nim||''}</td>
             <td class="py-2 px-4">${m.nama||''}</td>
             <td class="py-2 px-4">${m.prodi||''}</td>
@@ -6589,6 +7397,187 @@ document.addEventListener('click', async (e)=>{
         }
     }
     
+    // Handle view monthly report for pegawai
+    if(btnViewMonth){
+        const data = JSON.parse(btnViewMonth.getAttribute('data-json').replace(/&apos;/g, "'"));
+        if(!data) { showNotif('Data laporan tidak ditemukan', false); return; }
+        
+        // Create modal if it doesn't exist
+        let modal = qs('#monthly-pegawai-view-modal');
+        if(!modal) {
+            modal = document.createElement('div');
+            modal.id = 'monthly-pegawai-view-modal';
+            modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden';
+            modal.innerHTML = `
+                <div class="bg-white p-6 rounded-lg shadow-2xl w-full max-w-6xl max-h-[90vh] overflow-y-auto">
+                    <div class="flex justify-between items-center mb-4">
+                        <h3 id="monthly-pegawai-view-title" class="text-xl font-bold"></h3>
+                        <button onclick="this.closest('#monthly-pegawai-view-modal').classList.add('hidden')" class="text-gray-500 hover:text-gray-700">✕</button>
+                    </div>
+                    <div class="space-y-6">
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                            <div>
+                                <h4 class="font-semibold text-gray-700 mb-2">Status Laporan:</h4>
+                                <div id="monthly-pegawai-view-status" class="text-sm"></div>
+                            </div>
+                            <div>
+                                <h4 class="font-semibold text-gray-700 mb-2">Tanggal Dibuat:</h4>
+                                <div id="monthly-pegawai-view-created" class="text-sm text-gray-600"></div>
+                            </div>
+                        </div>
+                        <div>
+                            <h4 class="font-semibold text-gray-700 mb-2">Ringkasan Pekerjaan:</h4>
+                            <div class="bg-gray-50 p-3 rounded border">
+                                <p id="monthly-pegawai-view-summary" class="text-gray-600 whitespace-pre-wrap"></p>
+                            </div>
+                        </div>
+                        <div>
+                            <h4 class="font-semibold text-gray-700 mb-2">Pencapaian dan Hasil Kerja:</h4>
+                            <div class="overflow-x-auto">
+                                <table class="min-w-full bg-white bordered">
+                                    <thead class="bg-gray-200">
+                                        <tr>
+                                            <th class="py-2 px-4">No</th>
+                                            <th class="py-2 px-4">Pencapaian</th>
+                                            <th class="py-2 px-4">Detail</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="monthly-pegawai-view-achievements-table"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <div>
+                            <h4 class="font-semibold text-gray-700 mb-2">Kendala:</h4>
+                            <div class="overflow-x-auto">
+                                <table class="min-w-full bg-white bordered">
+                                    <thead class="bg-gray-200">
+                                        <tr>
+                                            <th class="py-2 px-4">No</th>
+                                            <th class="py-2 px-4">Kendala</th>
+                                            <th class="py-2 px-4">Solusi</th>
+                                            <th class="py-2 px-4">Catatan</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="monthly-pegawai-view-obstacles-table"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <div class="flex justify-end gap-2 mt-6">
+                            <button onclick="this.closest('#monthly-pegawai-view-modal').classList.add('hidden')" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded">Tutup</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+        }
+        
+        const monthName = (m) => ['Januari','Februari','Maret','April','Mei','Juni','Juli','Agustus','September','Oktober','November','Desember'][m-1];
+        
+        // Fill modal data
+        const titleElement = qs('#monthly-pegawai-view-title');
+        const statusElement = qs('#monthly-pegawai-view-status');
+        const createdElement = qs('#monthly-pegawai-view-created');
+        const summaryElement = qs('#monthly-pegawai-view-summary');
+        
+        if (titleElement) {
+            titleElement.textContent = `Laporan Bulanan - ${monthName(parseInt(data.month))} ${data.year}`;
+        }
+        
+        if (statusElement) {
+            const statusMap = {
+                'draft': '<span class="badge badge-gray">Draft</span>',
+                'belum di approve': '<span class="badge badge-blue">Belum di Approve</span>',
+                'approved': '<span class="badge badge-green">Di-approve</span>',
+                'disapproved': '<span class="badge badge-red">Tidak di-approve</span>'
+            };
+            statusElement.innerHTML = statusMap[data.status] || '<span class="badge badge-gray">Unknown</span>';
+        }
+        
+        if (createdElement) {
+            const createdDate = new Date(data.created_at || data.updated_at);
+            createdElement.textContent = createdDate.toLocaleDateString('id-ID', {
+                weekday: 'long',
+                year: 'numeric',
+                month: 'long',
+                day: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit'
+            });
+        }
+        
+        if (summaryElement) {
+            summaryElement.textContent = data.summary || '(Tidak ada ringkasan)';
+        }
+        
+        // Parse achievements and fill table
+        let achievements = [];
+        try {
+            achievements = JSON.parse(data.achievements || '[]');
+        } catch (e) {
+            achievements = [];
+        }
+        
+        const achievementsTable = qs('#monthly-pegawai-view-achievements-table');
+        if (achievementsTable) {
+            if (achievements.length > 0) {
+                achievementsTable.innerHTML = achievements.map((a, index) => {
+                    const achievement = typeof a === 'object' ? (a.achievement || '') : a;
+                    const detail = typeof a === 'object' ? (a.detail || '') : '';
+                    return `
+                        <tr class="border-b hover:bg-gray-50">
+                            <td class="py-2 px-4 text-center">${index + 1}</td>
+                            <td class="py-2 px-4">${achievement}</td>
+                            <td class="py-2 px-4">${detail}</td>
+                        </tr>
+                    `;
+                }).join('');
+            } else {
+                achievementsTable.innerHTML = `
+                    <tr class="border-b">
+                        <td colspan="3" class="py-2 px-4 text-center text-gray-500">Tidak ada data pencapaian</td>
+                    </tr>
+                `;
+            }
+        }
+        
+        // Parse obstacles and fill table
+        let obstacles = [];
+        try {
+            obstacles = JSON.parse(data.obstacles || '[]');
+        } catch (e) {
+            obstacles = [];
+        }
+        
+        const obstaclesTable = qs('#monthly-pegawai-view-obstacles-table');
+        if (obstaclesTable) {
+            if (obstacles.length > 0) {
+                obstaclesTable.innerHTML = obstacles.map((o, index) => {
+                    const obstacle = typeof o === 'object' ? (o.obstacle || '') : o;
+                    const solution = typeof o === 'object' ? (o.solution || '') : '';
+                    const note = typeof o === 'object' ? (o.note || '') : '';
+                    return `
+                        <tr class="border-b hover:bg-gray-50">
+                            <td class="py-2 px-4 text-center">${index + 1}</td>
+                            <td class="py-2 px-4">${obstacle}</td>
+                            <td class="py-2 px-4">${solution}</td>
+                            <td class="py-2 px-4">${note}</td>
+                        </tr>
+                    `;
+                }).join('');
+            } else {
+                obstaclesTable.innerHTML = `
+                    <tr class="border-b">
+                        <td colspan="4" class="py-2 px-4 text-center text-gray-500">Tidak ada data kendala</td>
+                    </tr>
+                `;
+            }
+        }
+        
+        if (modal) {
+            modal.classList.remove('hidden');
+        }
+    }
+    
     if(btnAmApprove){
         const id = btnAmApprove.getAttribute('data-id'); const status = 'approved';
         showConfirmModal('Yakin set status laporan bulanan?', async ()=>{ await api('?ajax=admin_set_monthly_status', { id, status }); renderAdminMonthly(); });
@@ -6786,8 +7775,8 @@ async function renderLaporan(){
             return timeStr.substring(0, 5);
         };
         
-        const jamMasuk = (att.ket === 'izin' || att.ket === 'sakit') ? '-' : formatTime(att.jam_masuk);
-        const jamPulang = (att.ket === 'izin' || att.ket === 'sakit') ? '-' : formatTime(att.jam_pulang);
+        const jamMasuk = formatTime(att.jam_masuk);
+        const jamPulang = formatTime(att.jam_pulang);
         
         // Create screenshot display functions
         const createScreenshotDisplay = (screenshotData, ekspresi, mode) => {
@@ -6892,9 +7881,7 @@ qs('#abs-save') && qs('#abs-save').addEventListener('click', async ()=>{
 
 // Update WFA locations button handler
 qs('#btn-update-wfa-locations') && qs('#btn-update-wfa-locations').addEventListener('click', async ()=>{
-    if (!confirm('Apakah Anda yakin ingin memperbarui semua lokasi WFA yang masih dalam bentuk koordinat menjadi nama jalan? Proses ini mungkin memakan waktu beberapa saat.')) {
-        return;
-    }
+    showConfirmModal('Apakah Anda yakin ingin memperbarui semua lokasi WFA yang masih dalam bentuk koordinat menjadi nama jalan? Proses ini mungkin memakan waktu beberapa saat.', async () => {
     
     const button = qs('#btn-update-wfa-locations');
     const originalText = button.textContent;
@@ -6916,13 +7903,12 @@ qs('#btn-update-wfa-locations') && qs('#btn-update-wfa-locations').addEventListe
         button.textContent = originalText;
         button.disabled = false;
     }
+    });
 });
 
 // Backup management handlers
 qs('#btn-create-backup') && qs('#btn-create-backup').addEventListener('click', async ()=>{
-    if (!confirm('Apakah Anda yakin ingin membuat backup database? Proses ini mungkin memakan waktu beberapa saat.')) {
-        return;
-    }
+    showConfirmModal('Apakah Anda yakin ingin membuat backup database? Proses ini mungkin memakan waktu beberapa saat.', async () => {
     
     const button = qs('#btn-create-backup');
     const originalText = button.textContent;
@@ -6943,6 +7929,7 @@ qs('#btn-create-backup') && qs('#btn-create-backup').addEventListener('click', a
         button.textContent = originalText;
         button.disabled = false;
     }
+    });
 });
 
 qs('#btn-backup-status') && qs('#btn-backup-status').addEventListener('click', async ()=>{
@@ -6961,7 +7948,7 @@ qs('#btn-backup-status') && qs('#btn-backup-status').addEventListener('click', a
                 message = 'Tidak ada file backup tersedia';
             }
             
-            alert(message);
+            showNotif(message, false);
         } else {
             showNotif(r.message || 'Gagal mendapatkan status backup', false);
         }
@@ -7310,7 +8297,7 @@ function showWFAModal(message) {
                     submitAttendanceWithWFA(window.pendingAttendanceData, reason);
                 }
             } else {
-                alert('Harap isi alasan WFA terlebih dahulu.');
+                showNotif('Harap isi alasan WFA terlebih dahulu.', false);
             }
         });
         
@@ -7770,37 +8757,69 @@ if (rekapControls) {
     });
 }
 
-const drUserModal = document.createElement('div');
-drUserModal.id='dr-user-modal';
-drUserModal.className='fixed inset-0 bg-black/50 hidden items-center justify-center z-50';
-drUserModal.innerHTML = `
+// Modal View Laporan Harian (hanya lihat, tidak bisa edit)
+const drUserViewModal = document.createElement('div');
+drUserViewModal.id='dr-user-view-modal';
+drUserViewModal.className='fixed inset-0 bg-black/50 hidden items-center justify-center z-50';
+drUserViewModal.innerHTML = `
     <div class="bg-white p-6 rounded-lg shadow-2xl w-full max-w-2xl">
         <h3 class="text-xl font-bold mb-2">Laporan Harian</h3>
-        <div class="text-sm text-gray-500 mb-2" id="dr-user-date"></div>
+        <div class="text-sm text-gray-500 mb-2" id="dr-user-view-date"></div>
         
-        <!-- Bukti Izin/Sakit Section -->
-        <div id="dr-user-bukti-section" class="mb-4 hidden">
+        <!-- Bukti Izin/Sakit Section (View Only) -->
+        <div id="dr-user-view-bukti-section" class="mb-4 hidden">
         <label class="block text-sm text-gray-600 mb-2">Bukti Izin/Sakit:</label>
-        <div id="dr-user-bukti-container" class="mb-2">
+            <div id="dr-user-view-bukti-container" class="mb-2">
             <!-- Bukti image will be inserted here -->
         </div>
-        <div id="dr-user-bukti-actions" class="flex gap-2 hidden">
-            <button type="button" id="dr-user-edit-bukti" class="bg-yellow-500 hover:bg-yellow-600 text-white px-3 py-1 rounded text-sm">Edit Bukti</button>
-            <button type="button" id="dr-user-delete-bukti" class="bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded text-sm">Hapus Bukti</button>
         </div>
+        
+        <div id="dr-user-view-content" class="whitespace-pre-wrap border p-3 rounded bg-gray-50 mb-4 min-h-[200px]"></div>
+        
+        <div id="dr-user-view-evaluation-container" class="mt-4 hidden">
+            <h4 class="text-sm font-bold text-gray-700 mb-1">Evaluasi Admin:</h4>
+            <p id="dr-user-view-evaluation" class="whitespace-pre-wrap border p-3 rounded bg-gray-100"></p>
     </div>
     
-        <textarea id="dr-user-content" class="w-full border rounded p-2" rows="8" placeholder="Tulis detail pekerjaan hari ini..."></textarea>
-        <div id="dr-evaluation-container" class="mt-4 hidden">
+        <div class="flex justify-end gap-2 mt-4">
+            <button id="dr-user-view-cancel" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded">Tutup</button>
+        </div>
+    </div>`;
+document.body.appendChild(drUserViewModal);
+
+// Modal Edit Laporan Harian (bisa edit, tanpa tombol hapus bukti)
+const drUserEditModal = document.createElement('div');
+drUserEditModal.id='dr-user-edit-modal';
+drUserEditModal.className='fixed inset-0 bg-black/50 hidden items-center justify-center z-50';
+drUserEditModal.innerHTML = `
+    <div class="bg-white p-6 rounded-lg shadow-2xl w-full max-w-2xl">
+        <h3 class="text-xl font-bold mb-2">Edit Laporan Harian</h3>
+        <div class="text-sm text-gray-500 mb-2" id="dr-user-edit-date"></div>
+        
+        <!-- Bukti Izin/Sakit Section (Edit Mode) -->
+        <div id="dr-user-edit-bukti-section" class="mb-4 hidden">
+            <label class="block text-sm text-gray-600 mb-2">Bukti Izin/Sakit:</label>
+            <div id="dr-user-edit-bukti-container" class="mb-2">
+                <!-- Bukti image will be inserted here -->
+            </div>
+            <div id="dr-user-edit-bukti-actions" class="flex gap-2 hidden">
+                <button type="button" id="dr-user-edit-bukti-btn" class="bg-yellow-500 hover:bg-yellow-600 text-white px-3 py-1 rounded text-sm">Ganti Bukti</button>
+            </div>
+        </div>
+        
+        <textarea id="dr-user-edit-content" class="w-full border rounded p-2" rows="8" placeholder="Tulis detail pekerjaan hari ini..."></textarea>
+        
+        <div id="dr-user-edit-evaluation-container" class="mt-4 hidden">
         <h4 class="text-sm font-bold text-gray-700 mb-1">Evaluasi Admin:</h4>
-        <p id="dr-user-evaluation" class="whitespace-pre-wrap border p-3 rounded bg-gray-100"></p>
+            <p id="dr-user-edit-evaluation" class="whitespace-pre-wrap border p-3 rounded bg-gray-100"></p>
     </div>
+        
     <div class="flex justify-end gap-2 mt-4">
-        <button id="dr-user-cancel" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded">Batal</button>
-        <button id="dr-user-save" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded">Simpan</button>
+            <button id="dr-user-edit-cancel" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded">Batal</button>
+            <button id="dr-user-edit-save" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded">Simpan</button>
     </div>
     </div>`;
-document.body.appendChild(drUserModal);
+document.body.appendChild(drUserEditModal);
 
 // Izin/Sakit modal handlers
 const izinSakitModal = qs('#izin-sakit-modal');
@@ -7902,32 +8921,78 @@ document.addEventListener('click', async (e) => {
     }
 });
 
-document.addEventListener('click', async (e)=>{
-    const target = e.target.closest('.btn-create-dr, .btn-edit-dr, .btn-view-dr');
-    if(target){
-        const date = target.getAttribute('data-date');
-        qs('#dr-user-date').textContent = 'Tanggal: '+date;
-        const isView = target.classList.contains('btn-view-dr');
-        const ta = qs('#dr-user-content');
-        ta.value = '';
-        ta.disabled = false;
-        qs('#dr-user-save').style.display = 'inline-block';
-        qs('#dr-evaluation-container').classList.add('hidden');
+// Fungsi untuk membuka modal view laporan harian
+async function openDailyReportViewModal(date) {
+    qs('#dr-user-view-date').textContent = 'Tanggal: ' + date;
         
         const r = await api('?ajax=get_rekap', { month: new Date(date).getMonth()+1, year: new Date(date).getFullYear() });
         const item = (r.data||[]).find(x=> x.date===date);
+    
         if(item && item.daily_report){
-            ta.value = item.daily_report.content||'';
-            if(item.daily_report.status==='approved' || isView){
-                ta.disabled=true;
-                qs('#dr-user-save').style.display='none';
+        qs('#dr-user-view-content').textContent = item.daily_report.content||'';
                 if (item.daily_report.evaluation) {
-                    qs('#dr-user-evaluation').textContent = item.daily_report.evaluation;
-                    qs('#dr-evaluation-container').classList.remove('hidden');
+            qs('#dr-user-view-evaluation').textContent = item.daily_report.evaluation;
+            qs('#dr-user-view-evaluation-container').classList.remove('hidden');
+        } else {
+            qs('#dr-user-view-evaluation-container').classList.add('hidden');
                 }
             } else {
-                qs('#dr-evaluation-container').classList.add('hidden');
+        qs('#dr-user-view-content').textContent = 'Belum ada laporan harian untuk tanggal ini.';
+        qs('#dr-user-view-evaluation-container').classList.add('hidden');
+    }
+    
+    // Cek apakah ada bukti izin/sakit untuk tanggal ini
+    if (item && (item.ket === 'izin' || item.ket === 'sakit')) {
+        // Get attendance data to find bukti
+        const attendanceData = await api('?ajax=get_attendance');
+        if (attendanceData.ok && attendanceData.data) {
+            const todayRecord = attendanceData.data.find(att => 
+                att.jam_masuk_iso && 
+                att.jam_masuk_iso.slice(0, 10) === date &&
+                (att.ket === 'izin' || att.ket === 'sakit') &&
+                att.bukti_izin_sakit
+            );
+            
+            if (todayRecord) {
+                // Tampilkan bukti izin/sakit (view only)
+                qs('#dr-user-view-bukti-section').classList.remove('hidden');
+                qs('#dr-user-view-bukti-container').innerHTML = `
+                    <div class="flex justify-center">
+                        <img src="${todayRecord.bukti_izin_sakit}" alt="Bukti ${todayRecord.ket}" class="max-w-full max-h-64 object-contain rounded border shadow-lg" style="max-width: 100%; height: auto;">
+                    </div>
+                    <p class="text-sm text-gray-600 mt-2 text-center">Bukti ${todayRecord.ket.toUpperCase()}</p>
+                `;
+            } else {
+                qs('#dr-user-view-bukti-section').classList.add('hidden');
             }
+        }
+    } else {
+        qs('#dr-user-view-bukti-section').classList.add('hidden');
+    }
+    
+    qs('#dr-user-view-modal').classList.remove('hidden'); 
+    qs('#dr-user-view-modal').classList.add('flex');
+}
+
+// Fungsi untuk membuka modal edit laporan harian
+async function openDailyReportEditModal(date) {
+    qs('#dr-user-edit-date').textContent = 'Tanggal: ' + date;
+    qs('#dr-user-edit-modal').dataset.date = date;
+    
+    const r = await api('?ajax=get_rekap', { month: new Date(date).getMonth()+1, year: new Date(date).getFullYear() });
+    const item = (r.data||[]).find(x=> x.date===date);
+    
+    if(item && item.daily_report){
+        qs('#dr-user-edit-content').value = item.daily_report.content||'';
+        if (item.daily_report.evaluation) {
+            qs('#dr-user-edit-evaluation').textContent = item.daily_report.evaluation;
+            qs('#dr-user-edit-evaluation-container').classList.remove('hidden');
+        } else {
+            qs('#dr-user-edit-evaluation-container').classList.add('hidden');
+        }
+    } else {
+        qs('#dr-user-edit-content').value = '';
+        qs('#dr-user-edit-evaluation-container').classList.add('hidden');
         }
         
         // Cek apakah ada bukti izin/sakit untuk tanggal ini
@@ -7943,78 +9008,95 @@ document.addEventListener('click', async (e)=>{
                 );
                 
                 if (todayRecord) {
-                    // Tampilkan bukti izin/sakit
-                    qs('#dr-user-bukti-section').classList.remove('hidden');
-                    qs('#dr-user-bukti-container').innerHTML = `
+                // Tampilkan bukti izin/sakit (edit mode)
+                qs('#dr-user-edit-bukti-section').classList.remove('hidden');
+                qs('#dr-user-edit-bukti-container').innerHTML = `
                         <div class="flex justify-center">
                             <img src="${todayRecord.bukti_izin_sakit}" alt="Bukti ${todayRecord.ket}" class="max-w-full max-h-64 object-contain rounded border shadow-lg" style="max-width: 100%; height: auto;">
                         </div>
                         <p class="text-sm text-gray-600 mt-2 text-center">Bukti ${todayRecord.ket.toUpperCase()}</p>
                     `;
-                    // Show edit/delete buttons
-                    qs('#dr-user-bukti-actions').classList.remove('hidden');
-                    qs('#dr-user-edit-bukti').dataset.date = date;
-                    qs('#dr-user-delete-bukti').dataset.date = date;
+                // Show edit button
+                qs('#dr-user-edit-bukti-actions').classList.remove('hidden');
+                qs('#dr-user-edit-bukti-btn').dataset.date = date;
                 } else {
-                    qs('#dr-user-bukti-section').classList.add('hidden');
-                    qs('#dr-user-bukti-actions').classList.add('hidden');
+                qs('#dr-user-edit-bukti-section').classList.add('hidden');
+                qs('#dr-user-edit-bukti-actions').classList.add('hidden');
                 }
             }
         } else {
-            qs('#dr-user-bukti-section').classList.add('hidden');
+        qs('#dr-user-edit-bukti-section').classList.add('hidden');
+        qs('#dr-user-edit-bukti-actions').classList.add('hidden');
+    }
+    
+    qs('#dr-user-edit-modal').classList.remove('hidden'); 
+    qs('#dr-user-edit-modal').classList.add('flex');
+}
+
+// Event listener untuk tombol laporan harian
+document.addEventListener('click', async (e)=>{
+    const target = e.target.closest('.btn-create-dr, .btn-edit-dr, .btn-view-dr');
+    if(target){
+        const date = target.getAttribute('data-date');
+        const isView = target.classList.contains('btn-view-dr');
+        const isEdit = target.classList.contains('btn-edit-dr');
+        
+        if (isView) {
+            await openDailyReportViewModal(date);
+        } else if (isEdit) {
+            await openDailyReportEditModal(date);
+        } else {
+            // Create new report - use edit modal
+            await openDailyReportEditModal(date);
         }
-        drUserModal.classList.remove('hidden'); 
-        drUserModal.classList.add('flex');
-        drUserModal.dataset.date = date;
     }
 });
-qs('#dr-user-cancel') && qs('#dr-user-cancel').addEventListener('click', ()=>{ drUserModal.classList.add('hidden'); drUserModal.classList.remove('flex'); });
-qs('#dr-user-save') && qs('#dr-user-save').addEventListener('click', async ()=>{
-    const date = drUserModal.dataset.date; const content = qs('#dr-user-content').value;
-    const r = await api('?ajax=save_daily_report', { date, content });
-    if(r.ok){ drUserModal.classList.add('hidden'); drUserModal.classList.remove('flex'); initRekapPage(); } else { showNotif(r.message||'Gagal simpan'); }
+// Event handlers untuk modal view laporan harian
+qs('#dr-user-view-cancel') && qs('#dr-user-view-cancel').addEventListener('click', ()=>{ 
+    qs('#dr-user-view-modal').classList.add('hidden'); 
+    qs('#dr-user-view-modal').classList.remove('flex'); 
 });
 
-// Event handler untuk edit bukti izin/sakit
-qs('#dr-user-edit-bukti') && qs('#dr-user-edit-bukti').addEventListener('click', () => {
-    const date = qs('#dr-user-edit-bukti').dataset.date;
+// Event handlers untuk modal edit laporan harian
+qs('#dr-user-edit-cancel') && qs('#dr-user-edit-cancel').addEventListener('click', ()=>{ 
+    qs('#dr-user-edit-modal').classList.add('hidden'); 
+    qs('#dr-user-edit-modal').classList.remove('flex'); 
+});
+
+qs('#dr-user-edit-save') && qs('#dr-user-edit-save').addEventListener('click', async ()=>{
+    const date = qs('#dr-user-edit-modal').dataset.date; 
+    const content = qs('#dr-user-edit-content').value;
+    const r = await api('?ajax=save_daily_report', { date, content });
+    if(r.ok){ 
+        qs('#dr-user-edit-modal').classList.add('hidden'); 
+        qs('#dr-user-edit-modal').classList.remove('flex'); 
+        initRekapPage(); 
+    } else { 
+        showNotif(r.message||'Gagal simpan'); 
+    }
+});
+
+// Event handler untuk ganti bukti izin/sakit (modal edit)
+qs('#dr-user-edit-bukti-btn') && qs('#dr-user-edit-bukti-btn').addEventListener('click', () => {
+    const date = qs('#dr-user-edit-bukti-btn').dataset.date;
     // Open edit bukti modal
     qs('#edit-bukti-modal').classList.remove('hidden');
     qs('#edit-bukti-modal').classList.add('flex');
     qs('#edit-bukti-save').dataset.date = date;
     
-    // Show current bukti
-    const currentImg = qs('#dr-user-bukti-container img');
+    // Show current bukti if exists
+    const currentImg = qs('#dr-user-edit-bukti-container img');
     if (currentImg) {
         qs('#edit-bukti-current').classList.remove('hidden');
         qs('#edit-bukti-current-img').src = currentImg.src;
+    } else {
+        // If no current bukti, hide current section
+        qs('#edit-bukti-current').classList.add('hidden');
     }
-});
-
-// Event handler untuk hapus bukti izin/sakit
-qs('#dr-user-delete-bukti') && qs('#dr-user-delete-bukti').addEventListener('click', async () => {
-    const date = qs('#dr-user-delete-bukti').dataset.date;
     
-    if (confirm('Apakah Anda yakin ingin menghapus bukti ini?')) {
-        try {
-            const r = await api('?ajax=update_bukti_izin_sakit', {
-                date: date,
-                action_type: 'delete'
-            });
-            
-            if (r.ok) {
-                showNotif('Bukti berhasil dihapus');
-                // Hide bukti section
-                qs('#dr-user-bukti-section').classList.add('hidden');
-                qs('#dr-user-bukti-actions').classList.add('hidden');
-            } else {
-                showNotif(r.message || 'Gagal menghapus bukti', false);
-            }
-        } catch (error) {
-            console.error('Error deleting bukti:', error);
-            showNotif('Terjadi kesalahan', false);
-        }
-    }
+    // Reset file input and preview
+    qs('#edit-bukti-file').value = '';
+    qs('#edit-bukti-preview').classList.add('hidden');
 });
 
 // Event handler untuk modal edit bukti
@@ -8067,17 +9149,10 @@ qs('#edit-bukti-save') && qs('#edit-bukti-save').addEventListener('click', async
                 qs('#edit-bukti-current').classList.add('hidden');
                 
                 // Refresh the daily report modal to show updated bukti
-                const drModal = qs('#dr-user-modal');
-                if (drModal && !drModal.classList.contains('hidden')) {
-                    // Trigger a refresh of the bukti display
-                    const currentDate = drModal.dataset.date;
-                    if (currentDate) {
-                        // Re-trigger the daily report modal to refresh bukti
-                        const btn = document.createElement('button');
-                        btn.className = 'btn-edit-dr';
-                        btn.setAttribute('data-date', currentDate);
-                        btn.click();
-                    }
+                const drEditModal = qs('#dr-user-edit-modal');
+                if (drEditModal && !drEditModal.classList.contains('hidden')) {
+                    // Simply refresh the page to show updated data
+                    location.reload();
                 }
             } else {
                 showNotif(r.message || 'Gagal memperbarui bukti', false);
@@ -8165,7 +9240,7 @@ async function renderMonthly() {
         if (item) { // Jika laporan sudah ada
             const isApproved = item.status === 'approved';
             const isDraft = item.status === 'draft';
-            const isSubmitted = item.status === 'submitted';
+            const isSubmitted = item.status === 'belum di approve';
             
             if (isApproved) {
                 // Jika sudah di-approve, hanya bisa view (regardless of timeframe)
@@ -8177,7 +9252,7 @@ async function renderMonthly() {
                     actionBtn += ` <button class="btn-edit-month text-yellow-600 font-bold ml-2" data-json='${JSON.stringify(item).replace(/'/g, "&apos;")}'><i class="fi fi-sr-pen-square"></i> Edit Draft</button>`;
                 }
             } else if (isSubmitted) {
-                // Jika submitted, bisa view dan edit (jika dalam timeframe)
+                // Jika belum di approve, bisa view dan edit (jika dalam timeframe)
                 actionBtn = `<button class="btn-view-month text-blue-600 font-bold" data-json='${JSON.stringify(item).replace(/'/g, "&apos;")}'><i class="fi fi-ss-eye"></i> Lihat</button>`;
                 if (isEditableTime) {
                     actionBtn += ` <button class="btn-edit-month text-yellow-600 font-bold ml-2" data-json='${JSON.stringify(item).replace(/'/g, "&apos;")}'><i class="fi fi-sr-pen-square"></i> Edit</button>`;
@@ -8198,7 +9273,7 @@ async function renderMonthly() {
             } else if (isDraft) {
                 statusBadge = `<span class="badge badge-gray">Draft</span>`;
             } else if (isSubmitted) {
-                statusBadge = `<span class="badge badge-blue">Submitted</span>`;
+                statusBadge = `<span class="badge badge-blue">Belum di Approve</span>`;
             } else {
                 statusBadge = `<span class="badge badge-gray">${item.status}</span>`;
             }
@@ -8256,14 +9331,16 @@ async function renderAdminMonthly(){
     const payload = { term: qs('#am-search')?.value||'', startup: qs('#am-startup')?.value||'', month: qs('#am-month')?.value||'', year: qs('#am-year')?.value||'' };
     const r = await api('?ajax=admin_get_monthly_reports', payload);
     const j = r.data||[];
-    if(j.length===0){ body.innerHTML = `<tr><td colspan="6" class="text-center py-4">Tidak ada data.</td></tr>`; return; }
+    // Filter out draft reports from admin view
+    const filteredReports = j.filter(it => it.status !== 'draft');
+    if(filteredReports.length===0){ body.innerHTML = `<tr><td colspan="6" class="text-center py-4">Tidak ada data.</td></tr>`; return; }
     const monthName=(m)=>['Januari','Februari','Maret','April','Mei','Juni','Juli','Agustus','September','Oktober','November','Desember'][m-1];
-    j.forEach(it=>{
+    filteredReports.forEach(it=>{
         const tr=document.createElement('tr'); tr.className='border-b hover:bg-gray-50';
         const label = `${monthName(parseInt(it.month))} ${it.year}`;
         const detailBtn = `<button class="btn-view-month-detail text-blue-600 font-bold text-center" data-id="${it.id}"><i class="fi fi-ss-eye text-xl"></i></button>`;
-        const statusBadge = it.status==='approved'? `<span class="badge badge-green">Di-approve</span>`:(it.status==='disapproved'?`<span class="badge badge-red">Tidak di-approve</span>`:`<span class="badge badge-gray">Belum di-approve</span>`);
-        const actions = (it.status === 'draft' || it.status === 'submitted' || it.status === 'approved' || it.status === 'disapproved') ?
+        const statusBadge = it.status==='approved'? `<span class="badge badge-green">Di-approve</span>`:(it.status==='disapproved'?`<span class="badge badge-red">Tidak di-approve</span>`:`<span class="badge badge-blue">Belum di Approve</span>`);
+        const actions = (it.status === 'belum di approve' || it.status === 'approved' || it.status === 'disapproved') ?
             `<button class="btn-am-approve bg-emerald-600 hover:bg-emerald-700 text-white px-2 py-1 rounded mr-1" data-id="${it.id}">Approve</button>
             <button class="btn-am-disapprove bg-red-500 hover:bg-red-600 text-white px-2 py-1 rounded" data-id="${it.id}">Disapprove</button>` : '';
 
@@ -8293,8 +9370,10 @@ async function renderSettings() {
             qs('#min-checkout-hour').value = settings.min_checkout_hour?.value || '17';
             if(qs('#wfo-address')) qs('#wfo-address').value = settings.wfo_address?.value || '';
             if(qs('#wfo-radius')) qs('#wfo-radius').value = settings.wfo_radius_m?.value || '1200';
-            if(qs('#attendance-period-start')) qs('#attendance-period-start').value = settings.attendance_period_start?.value || '';
             if(qs('#attendance-period-end')) qs('#attendance-period-end').value = settings.attendance_period_end?.value || '';
+            if(qs('#kpi-late-penalty')) qs('#kpi-late-penalty').value = settings.kpi_late_penalty_per_minute?.value || '1';
+            if(qs('#kpi-izin-sakit')) qs('#kpi-izin-sakit').value = settings.kpi_izin_sakit_score?.value || '85';
+            if(qs('#kpi-alpha')) qs('#kpi-alpha').value = settings.kpi_alpha_score?.value || '0';
         }
     } catch (error) {
         console.error('Error loading settings:', error);
@@ -8557,8 +9636,10 @@ qs('#settings-form') && qs('#settings-form').addEventListener('submit', async (e
     const minCheckoutHour = qs('#min-checkout-hour').value;
     const wfoAddress = qs('#wfo-address')?.value || '';
     const wfoRadius = qs('#wfo-radius')?.value || '';
-    const periodStart = qs('#attendance-period-start')?.value || '';
     const periodEnd = qs('#attendance-period-end')?.value || '';
+    const kpiLatePenalty = qs('#kpi-late-penalty')?.value || '';
+    const kpiIzinSakit = qs('#kpi-izin-sakit')?.value || '';
+    const kpiAlpha = qs('#kpi-alpha')?.value || '';
     
     // Use selected address coordinates if available
     let wfoLat = '';
@@ -8591,8 +9672,10 @@ qs('#settings-form') && qs('#settings-form').addEventListener('submit', async (e
             wfo_lat: wfoLat,
             wfo_lon: wfoLon,
             wfo_radius_m: wfoRadius,
-            attendance_period_start: periodStart,
-            attendance_period_end: periodEnd
+            attendance_period_end: periodEnd,
+            kpi_late_penalty: kpiLatePenalty,
+            kpi_izin_sakit: kpiIzinSakit,
+            kpi_alpha: kpiAlpha
         });
         
         if (response.ok) {
@@ -8609,6 +9692,9 @@ qs('#settings-form') && qs('#settings-form').addEventListener('submit', async (e
 qs('#reset-settings') && qs('#reset-settings').addEventListener('click', () => {
     qs('#max-ontime-hour').value = '8';
     qs('#min-checkout-hour').value = '17';
+    if(qs('#kpi-late-penalty')) qs('#kpi-late-penalty').value = '1';
+    if(qs('#kpi-izin-sakit')) qs('#kpi-izin-sakit').value = '85';
+    if(qs('#kpi-alpha')) qs('#kpi-alpha').value = '0';
     showNotif('Pengaturan direset ke default', true);
 });
 
@@ -8637,6 +9723,9 @@ async function renderDashboard() {
         renderTodayLateChart(data.today_late);
         renderMonthlyPerformanceCharts(data.monthly_stats);
         renderAttendanceTrendChart(data.attendance_trend);
+        
+        // Load KPI data
+        loadKPIData();
         
     } catch (error) {
         console.error('Error loading dashboard:', error);
@@ -8676,7 +9765,7 @@ function renderTodayLateChart(todayLateData) {
                             <div class="relative">
                                 <img src="${item.foto_base64 || 'generate-avatar.php?background=ef4444&color=fff&name=' + encodeURIComponent(item.nama) + '&size=64'}" 
                                      alt="${item.nama}" 
-                                     class="w-16 h-16 rounded-full object-cover border-2 border-red-300">
+                                     class="w-16 h-16 rounded-full border-2 border-red-300" style="object-fit: contain;">
                                 <div class="absolute -top-2 -right-2 bg-red-500 text-white text-xs rounded-full w-6 h-6 flex items-center justify-center font-bold">
                                     ${index + 1}
                                 </div>
@@ -8728,7 +9817,7 @@ function renderMonthlyPerformanceCharts(monthlyStats) {
                                     <div class="relative">
                                         <img src="${item.foto_base64 || 'generate-avatar.php?background=ef4444&color=fff&name=' + encodeURIComponent(item.nama) + '&size=48'}" 
                                              alt="${item.nama}" 
-                                             class="w-12 h-12 rounded-full object-cover border-2 border-red-300">
+                                             class="w-12 h-12 rounded-full border-2 border-red-300" style="object-fit: contain;">
                                         <div class="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center font-bold">
                                             ${index + 1}
                                         </div>
@@ -8790,7 +9879,7 @@ function renderMonthlyPerformanceCharts(monthlyStats) {
                                              style="background: conic-gradient(${colors[index]} 0deg ${percentage * 3.6}deg, #e5e7eb ${percentage * 3.6}deg 360deg)">
                                             <img src="${item.foto_base64 || 'generate-avatar.php?background=22c55e&color=fff&name=' + encodeURIComponent(item.nama) + '&size=48'}" 
                                                  alt="${item.nama}" 
-                                                 class="w-12 h-12 rounded-full object-cover border-2 border-white">
+                                                 class="w-12 h-12 rounded-full border-2 border-white" style="object-fit: contain;">
                                         </div>
                                         <div class="absolute -top-2 -right-2 bg-green-500 text-white text-xs rounded-full w-6 h-6 flex items-center justify-center font-bold">
                                             ${index + 1}
@@ -8843,7 +9932,7 @@ function renderAttendanceTrendChart(trendData) {
             labels: labels,
             datasets: [
                 {
-                    label: 'On-Time',
+                    label: 'Kejadian On-Time',
                     data: presentData,
                     borderColor: '#22c55e',
                     backgroundColor: 'rgba(34, 197, 94, 0.1)',
@@ -8856,27 +9945,27 @@ function renderAttendanceTrendChart(trendData) {
                     pointRadius: 6
                 },
                 {
-                    label: 'Terlambat',
+                    label: 'Kejadian Terlambat',
                     data: lateData,
-                    borderColor: '#ef4444',
-                    backgroundColor: 'rgba(239, 68, 68, 0.1)',
-                    borderWidth: 3,
-                    fill: true,
-                    tension: 0.4,
-                    pointBackgroundColor: '#ef4444',
-                    pointBorderColor: '#ffffff',
-                    pointBorderWidth: 2,
-                    pointRadius: 6
-                },
-                {
-                    label: 'Tidak Hadir',
-                    data: absentData,
                     borderColor: '#f59e0b',
                     backgroundColor: 'rgba(245, 158, 11, 0.1)',
                     borderWidth: 3,
                     fill: true,
                     tension: 0.4,
                     pointBackgroundColor: '#f59e0b',
+                    pointBorderColor: '#ffffff',
+                    pointBorderWidth: 2,
+                    pointRadius: 6
+                },
+                {
+                    label: 'Kejadian Tidak Hadir',
+                    data: absentData,
+                    borderColor: '#ef4444',
+                    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                    borderWidth: 3,
+                    fill: true,
+                    tension: 0.4,
+                    pointBackgroundColor: '#ef4444',
                     pointBorderColor: '#ffffff',
                     pointBorderWidth: 2,
                     pointRadius: 6
@@ -8942,6 +10031,205 @@ function renderAttendanceTrendChart(trendData) {
     });
 }
 
+// KPI Functions
+async function loadKPIData() {
+    try {
+        console.log('Loading KPI data...');
+        
+        // Get filter parameters
+        const filterType = kpiFilterType ? kpiFilterType.value : 'period';
+        const month = kpiFilterMonth ? kpiFilterMonth.value : '';
+        const year = kpiFilterYear ? kpiFilterYear.value : '';
+        
+        // Build query parameters
+        const params = new URLSearchParams();
+        if (filterType === 'monthly' && month && year) {
+            params.append('filter_type', 'monthly');
+            params.append('month', month);
+            params.append('year', year);
+        } else {
+            params.append('filter_type', 'period');
+        }
+        
+        const response = await fetch(`?ajax=get_kpi_data&${params.toString()}`);
+        const result = await response.json();
+        
+        console.log('KPI response:', result);
+        
+        if (!result.ok) {
+            console.error('KPI API error:', result.message);
+            showNotif('Gagal memuat data KPI: ' + (result.message || 'Unknown error'), false);
+            return;
+        }
+        
+        if (!result.data || !result.data.kpi_data) {
+            console.error('No KPI data in response');
+            showNotif('Tidak ada data KPI tersedia', false);
+            return;
+        }
+        
+        console.log('KPI data loaded:', result.data.kpi_data.length, 'employees');
+        renderKPITable(result.data);
+        
+    } catch (error) {
+        console.error('Error loading KPI data:', error);
+        showNotif('Gagal memuat data KPI: ' + error.message, false);
+    }
+}
+
+function renderKPITable(kpiData) {
+    const tbody = qs('#kpi-table-body');
+    const loading = qs('#kpi-loading');
+    const empty = qs('#kpi-empty');
+    const periodRange = qs('#kpi-period-range');
+    
+    if (!tbody || !loading || !empty || !periodRange) return;
+    
+    // Hide loading
+    loading.style.display = 'none';
+    
+    // Update period range
+    const filterType = kpiFilterType ? kpiFilterType.value : 'period';
+    if (filterType === 'monthly') {
+        const month = kpiFilterMonth ? kpiFilterMonth.value : '';
+        const year = kpiFilterYear ? kpiFilterYear.value : '';
+        const monthNames = ['', 'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+        periodRange.textContent = `${monthNames[month]} ${year}`;
+    } else {
+        periodRange.textContent = `${kpiData.period_start} - ${kpiData.period_end}`;
+    }
+    
+    // // Add note about individual employee periods
+    // const periodNote = document.createElement('p');
+    // periodNote.className = 'text-xs text-gray-500 mt-1';
+    // periodNote.textContent = filterType === 'monthly' 
+    //     ? 'Perhitungan KPI untuk bulan yang dipilih (disesuaikan dengan tanggal registrasi masing-masing pegawai)'
+    //     : 'Periode perhitungan disesuaikan dengan tanggal registrasi masing-masing pegawai';
+    // periodRange.parentNode.appendChild(periodNote);
+    
+    // if (!kpiData.kpi_data || kpiData.kpi_data.length === 0) {
+    //     empty.style.display = 'block';
+    //     tbody.innerHTML = '';
+    //     return;
+    // }
+    
+    // Hide empty message
+    empty.style.display = 'none';
+    
+    // Render table rows
+    tbody.innerHTML = kpiData.kpi_data.map((employee, index) => {
+        const statusClass = getKPIStatusClass(employee.kpi_score);
+        const statusText = getKPIStatusText(employee.kpi_score);
+        
+        return `
+            <tr class="hover:bg-gray-50">
+                <td class="px-4 py-3 text-gray-900">${index + 1}</td>
+                <td class="px-4 py-3 text-gray-900 font-medium">${employee.nama}</td>
+                <td class="px-4 py-3 text-center text-gray-700">${employee.total_working_days}</td>
+                <td class="px-4 py-3 text-center text-green-600 font-semibold">${employee.ontime_count}</td>
+                <td class="px-4 py-3 text-center text-red-600 font-semibold">${employee.late_count}</td>
+                <td class="px-4 py-3 text-center text-yellow-600 font-semibold">${employee.izin_sakit_count}</td>
+                <td class="px-4 py-3 text-center text-gray-600 font-semibold">${employee.alpha_count}</td>
+                <td class="px-4 py-3 text-center">
+                    <span class="px-2 py-1 rounded-full text-sm font-semibold ${statusClass}">
+                        ${employee.kpi_score}%
+                    </span>
+                </td>
+                <td class="px-4 py-3 text-center">
+                    <span class="text-sm ${statusClass}">${statusText}</span>
+                </td>
+            </tr>
+        `;
+    }).join('');
+}
+
+function getKPIStatusClass(score) {
+    if (score >= 90) return 'bg-green-100 text-green-800';
+    if (score >= 80) return 'bg-blue-100 text-blue-800';
+    if (score >= 70) return 'bg-yellow-100 text-yellow-800';
+    if (score >= 60) return 'bg-orange-100 text-orange-800';
+    return 'bg-red-100 text-red-800';
+}
+
+function getKPIStatusText(score) {
+    if (score >= 90) return 'Excellent';
+    if (score >= 80) return 'Good';
+    if (score >= 70) return 'Fair';
+    if (score >= 60) return 'Poor';
+    return 'Very Poor';
+}
+
+// Refresh KPI button handler
+qs('#refresh-kpi') && qs('#refresh-kpi').addEventListener('click', () => {
+    qs('#kpi-loading').style.display = 'block';
+    qs('#kpi-empty').style.display = 'none';
+    loadKPIData();
+});
+
+// KPI Filter handlers
+const kpiFilterType = qs('#kpi-filter-type');
+const kpiFilterMonth = qs('#kpi-filter-month');
+const kpiFilterYear = qs('#kpi-filter-year');
+
+// Initialize month and year options
+function initKPIFilterOptions() {
+    if (!kpiFilterMonth || !kpiFilterYear) return;
+    
+    // Populate months
+    const months = [
+        'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
+        'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'
+    ];
+    
+    kpiFilterMonth.innerHTML = '<option value="">Pilih Bulan</option>';
+    months.forEach((month, index) => {
+        const option = document.createElement('option');
+        option.value = index + 1;
+        option.textContent = month;
+        kpiFilterMonth.appendChild(option);
+    });
+    
+    // Populate years (current year and previous 2 years)
+    const currentYear = new Date().getFullYear();
+    kpiFilterYear.innerHTML = '<option value="">Pilih Tahun</option>';
+    for (let year = currentYear; year >= currentYear - 2; year--) {
+        const option = document.createElement('option');
+        option.value = year;
+        option.textContent = year;
+        kpiFilterYear.appendChild(option);
+    }
+}
+
+// Show/hide month and year filters based on filter type
+kpiFilterType && kpiFilterType.addEventListener('change', (e) => {
+    const isMonthly = e.target.value === 'monthly';
+    if (kpiFilterMonth) kpiFilterMonth.classList.toggle('hidden', !isMonthly);
+    if (kpiFilterYear) kpiFilterYear.classList.toggle('hidden', !isMonthly);
+    
+    if (isMonthly) {
+        // Set current month and year as default
+        const now = new Date();
+        if (kpiFilterMonth) kpiFilterMonth.value = now.getMonth() + 1;
+        if (kpiFilterYear) kpiFilterYear.value = now.getFullYear();
+    }
+});
+
+// Load KPI data when month/year changes
+kpiFilterMonth && kpiFilterMonth.addEventListener('change', () => {
+    if (kpiFilterType && kpiFilterType.value === 'monthly') {
+        loadKPIData();
+    }
+});
+
+kpiFilterYear && kpiFilterYear.addEventListener('change', () => {
+    if (kpiFilterType && kpiFilterType.value === 'monthly') {
+        loadKPIData();
+    }
+});
+
+// Initialize filter options on page load
+initKPIFilterOptions();
+
 document.addEventListener('click', async (e)=>{
     if(e.target.classList.contains('btn-am-approve')||e.target.classList.contains('btn-am-disapprove')){
         const id = e.target.getAttribute('data-id'); const status = e.target.classList.contains('btn-am-approve') ? 'approved' : 'disapproved';
@@ -8952,7 +10240,7 @@ document.addEventListener('click', async (e)=>{
 
 // Tambahkan event listener untuk tombol-tombol di tabel laporan bulanan
 document.addEventListener('click', async (e) => {
-    const target = e.target.closest('.btn-create-month, .btn-edit-month, .btn-view-month, .page-btn');
+    const target = e.target.closest('.btn-create-month, .btn-edit-month, .page-btn');
     if (!target) return;
 
     if (target.classList.contains('page-btn')) {
@@ -8965,7 +10253,7 @@ document.addEventListener('click', async (e) => {
     pageMonthlyForm.classList.remove('hidden');
     pageMonthlyForm.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
-    const isViewOnly = target.classList.contains('btn-view-month');
+    const isViewOnly = false; // Hanya untuk create dan edit
     
     let year, month, reportData = null;
 
@@ -8973,11 +10261,11 @@ document.addEventListener('click', async (e) => {
         year = parseInt(target.dataset.year);
         month = parseInt(target.dataset.month);
         qs('#monthly-form-title').textContent = `Buat Laporan Bulan ${monthName(month-1)} ${year}`;
-    } else { // Edit atau View
+    } else { // Edit
         reportData = JSON.parse(target.dataset.json.replace(/&apos;/g, "'"));
         year = parseInt(reportData.year) || 0;
         month = parseInt(reportData.month) || 0;
-        qs('#monthly-form-title').textContent = `${isViewOnly ? 'Lihat' : 'Edit'} Laporan Bulan ${monthName(month-1)} ${year}`;
+        qs('#monthly-form-title').textContent = `Edit Laporan Bulan ${monthName(month-1)} ${year}`;
     }
 
     // Set info pegawai di form
@@ -9002,18 +10290,18 @@ document.addEventListener('click', async (e) => {
         addObstacleRow();
     }
     
-    // Atur visibilitas tombol dan field jika view-only
+    // Semua field dapat diedit untuk create dan edit
     const fields = qsa('#form-monthly-report input, #form-monthly-report textarea, #form-monthly-report button');
     fields.forEach(field => {
         // Jangan disable tombol kembali
         if(field.id !== 'btn-back-to-monthly-list') {
-            field.disabled = isViewOnly;
+            field.disabled = false;
         }
     });
 
-    // Sembunyikan tombol simpan jika view-only
-    qs('#btn-save-draft').style.display = isViewOnly ? 'none' : 'inline-block';
-    qs('button[type="submit"]', qs('#form-monthly-report')).style.display = isViewOnly ? 'none' : 'inline-block';
+    // Tampilkan semua tombol simpan
+    qs('#btn-save-draft').style.display = 'inline-block';
+    qs('button[type="submit"]', qs('#form-monthly-report')).style.display = 'inline-block';
 });
 
 // Register Service Worker for offline functionality
