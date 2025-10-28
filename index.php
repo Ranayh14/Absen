@@ -121,6 +121,36 @@ function ensureSchema(PDO $pdo): void {
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
     );
     
+    // manual_holidays table for admin-defined off days (e.g., demo/disaster)
+    $pdo->exec(
+        "CREATE TABLE IF NOT EXISTS manual_holidays (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            date DATE NOT NULL UNIQUE,
+            name VARCHAR(255) NOT NULL,
+            created_by INT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX(date),
+            CONSTRAINT fk_manual_holidays_creator FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+    );
+    
+    // employee_work_schedule table for individual work schedules
+    $pdo->exec(
+        "CREATE TABLE IF NOT EXISTS employee_work_schedule (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id INT NOT NULL,
+            day_of_week ENUM('monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday') NOT NULL,
+            is_working_day BOOLEAN DEFAULT TRUE,
+            start_time TIME DEFAULT '08:00:00',
+            end_time TIME DEFAULT '17:00:00',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX(user_id),
+            CONSTRAINT fk_schedule_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            UNIQUE KEY unique_user_day (user_id, day_of_week)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+    );
+    
     // Add missing columns if they don't exist (for existing databases)
     $requiredColumns = [
         'ekspresi_masuk' => "ALTER TABLE attendance ADD COLUMN ekspresi_masuk VARCHAR(50) NULL AFTER jam_masuk_iso",
@@ -128,7 +158,7 @@ function ensureSchema(PDO $pdo): void {
         'screenshot_masuk' => "ALTER TABLE attendance ADD COLUMN screenshot_masuk LONGTEXT NULL AFTER ekspresi_masuk",
         'screenshot_pulang' => "ALTER TABLE attendance ADD COLUMN screenshot_pulang LONGTEXT NULL AFTER ekspresi_pulang",
         'status' => "ALTER TABLE attendance ADD COLUMN status ENUM('ontime','terlambat') DEFAULT 'ontime' AFTER ekspresi_pulang",
-        'ket' => "ALTER TABLE attendance ADD COLUMN ket ENUM('wfo','izin','sakit','alpha','wfa') DEFAULT 'wfo' AFTER status",
+        'ket' => "ALTER TABLE attendance ADD COLUMN ket ENUM('wfo','izin','sakit','alpha','wfa','overtime') DEFAULT 'wfo' AFTER status",
         'lokasi_masuk' => "ALTER TABLE attendance ADD COLUMN lokasi_masuk VARCHAR(255) NULL AFTER screenshot_masuk",
         'lat_masuk' => "ALTER TABLE attendance ADD COLUMN lat_masuk DECIMAL(10,7) NULL AFTER lokasi_masuk",
         'lng_masuk' => "ALTER TABLE attendance ADD COLUMN lng_masuk DECIMAL(10,7) NULL AFTER lat_masuk",
@@ -167,11 +197,41 @@ function ensureSchema(PDO $pdo): void {
         }
     }
     
-    // Update ket column enum to use WFO/WFA
+    // Update ket column enum to include 'overtime'
     try { 
-        $pdo->exec("ALTER TABLE attendance MODIFY ket ENUM('wfo', 'izin', 'sakit', 'alpha', 'wfa') DEFAULT 'wfo'"); 
+        $pdo->exec("ALTER TABLE attendance MODIFY ket ENUM('wfo','izin','sakit','alpha','wfa','overtime') DEFAULT 'wfo'"); 
     } catch (PDOException $e) {
         // Ignore error if column doesn't exist or enum is already correct
+    }
+
+    // Fix manual_holidays table structure if needed
+    try {
+        // Check if table exists
+        $checkTable = $pdo->query("SHOW TABLES LIKE 'manual_holidays'");
+        if ($checkTable->rowCount() > 0) {
+            // Check if created_by column exists
+            $checkColumn = $pdo->query("SHOW COLUMNS FROM manual_holidays LIKE 'created_by'");
+            if ($checkColumn->rowCount() == 0) {
+                // Add created_by column if it doesn't exist
+                $pdo->exec("ALTER TABLE manual_holidays ADD COLUMN created_by INT NULL AFTER name");
+                $pdo->exec("ALTER TABLE manual_holidays ADD CONSTRAINT fk_manual_holidays_creator FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL");
+            }
+        } else {
+            // Table doesn't exist, create it
+            $pdo->exec("
+                CREATE TABLE manual_holidays (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    date DATE NOT NULL UNIQUE,
+                    name VARCHAR(255) NOT NULL,
+                    created_by INT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    INDEX(date),
+                    CONSTRAINT fk_manual_holidays_creator FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            ");
+        }
+    } catch (PDOException $e) {
+        error_log("Error fixing manual_holidays table: " . $e->getMessage());
     }
 
     // Daily reports table
@@ -275,10 +335,18 @@ function seedDefaultSettings(PDO $pdo): void {
         ['wfo_lat', '-6.9738', 'Latitude pusat WFO'],
         ['wfo_lng', '107.6300', 'Longitude pusat WFO'],
         ['wfo_radius_m', '1200', 'Radius wilayah WFO dalam meter'],
+        // WFO detection via IP API settings
+        ['wfo_mode', 'api', 'Mode deteksi WFO: api atau coordinate'],
+        ['wfo_api_provider', 'ipinfo', 'Provider IP API: ipinfo | ipapi | ip-api'],
+        ['wfo_api_token', '', 'Token API (opsional tergantung provider)'],
+        ['wfo_api_org_keywords', 'Telkom University, Yayasan Pendidikan Telkom, Telkom University Bandung', 'Daftar kata kunci organisasi yang dianggap WFO (dipisah koma)'],
+        ['wfo_api_asn_list', '', 'Daftar ASN yang dianggap WFO (contoh: AS7713), dipisah koma'],
+        ['wfo_api_cidr_list', '', 'Daftar CIDR yang dianggap WFO (contoh: 103.23.44.0/22), dipisah koma'],
         ['attendance_period_end', date('Y-12-31'), 'Tanggal akhir periode perhitungan absen (YYYY-MM-DD)'],
         ['kpi_late_penalty_per_minute', '1', 'Pengurangan KPI per menit terlambat (%)'],
         ['kpi_izin_sakit_score', '85', 'Nilai KPI untuk izin/sakit (%)'],
-        ['kpi_alpha_score', '0', 'Nilai KPI untuk alpha (%)']
+        ['kpi_alpha_score', '0', 'Nilai KPI untuk alpha (%)'],
+        ['kpi_overtime_bonus', '5', 'Bonus KPI untuk overtime (%)']
     ];
     
     foreach ($defaultSettings as $setting) {
@@ -389,6 +457,115 @@ function reverseGeocodeAddress(float $lat, float $lng): ?string {
     }
     
     return null;
+}
+
+/** Check if IP within CIDR */
+function ipInCidr(string $ip, string $cidr): bool {
+    if (!str_contains($cidr, '/')) return false;
+    [$subnet, $mask] = explode('/', $cidr, 2);
+    $mask = (int)$mask;
+    if (!filter_var($ip, FILTER_VALIDATE_IP) || !filter_var($subnet, FILTER_VALIDATE_IP)) return false;
+    $ipLong = ip2long($ip);
+    $subnetLong = ip2long($subnet);
+    $maskLong = -1 << (32 - $mask);
+    $subnetBase = $subnetLong & $maskLong;
+    return ($ipLong & $maskLong) === $subnetBase;
+}
+
+/**
+ * Fetch public IP info from provider
+ */
+function fetchPublicIpInfo(string $ip, string $provider, string $token = ''): array {
+    $url = '';
+    $headers = ['User-Agent: AbsenApp/1.0 (XAMPP PHP)'];
+    if ($provider === 'ipinfo') {
+        $url = 'https://ipinfo.io/' . urlencode($ip) . '/json' . ($token ? ('?token=' . urlencode($token)) : '');
+    } elseif ($provider === 'ipapi') {
+        $url = 'https://ipapi.co/' . urlencode($ip) . '/json/';
+        if ($token) $headers[] = 'Authorization: Bearer ' . $token;
+    } else { // ip-api
+        $url = 'http://ip-api.com/json/' . urlencode($ip) . '?fields=status,message,org,as,asname,query';
+    }
+
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 5);
+    if (!empty($headers)) curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+    $resp = curl_exec($ch);
+    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    if ($code !== 200 || !$resp) return [];
+    $data = json_decode($resp, true);
+    if (!is_array($data)) return [];
+
+    // Normalize fields
+    $org = '';
+    $asn = '';
+    if ($provider === 'ipinfo') {
+        $org = $data['company']['name'] ?? ($data['org'] ?? '');
+        $asn = isset($data['org']) ? strtoupper(strtok($data['org'], ' ')) : '';
+    } elseif ($provider === 'ipapi') {
+        $org = $data['org'] ?? ($data['company'] ?? '');
+        $asn = strtoupper($data['asn'] ?? ($data['as'] ?? ''));
+    } else { // ip-api
+        $org = $data['org'] ?? ($data['asname'] ?? '');
+        $asn = strtoupper($data['as'] ?? '');
+        if ($asn && !str_starts_with($asn, 'AS')) {
+            $asn = strtoupper(strtok($asn, ' '));
+        }
+    }
+
+    return [
+        'org' => (string)$org,
+        'asn' => (string)$asn,
+        'raw' => $data,
+    ];
+}
+
+/**
+ * Detect WFO by external IP information API
+ * Returns true if public IP belongs to allowed org/ASN/CIDR list
+ */
+function isWfoByApi(PDO $pdo, ?string $publicIp = null): bool {
+    $provider = strtolower(trim(getSetting($pdo, 'wfo_api_provider', 'ipinfo')));
+    $token = trim(getSetting($pdo, 'wfo_api_token', ''));
+    $orgKeywords = array_filter(array_map('trim', explode(',', getSetting($pdo, 'wfo_api_org_keywords', 'Telkom University'))));
+    $asnList = array_filter(array_map('trim', explode(',', getSetting($pdo, 'wfo_api_asn_list', ''))));
+    $cidrList = array_filter(array_map('trim', explode(',', getSetting($pdo, 'wfo_api_cidr_list', ''))));
+
+    // Determine client public IP if not provided
+    if (!$publicIp) {
+        $publicIp = $_POST['public_ip'] ?? $_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['HTTP_CF_CONNECTING_IP'] ?? $_SERVER['REMOTE_ADDR'] ?? '';
+        if ($publicIp && strpos($publicIp, ',') !== false) {
+            $parts = explode(',', $publicIp);
+            $publicIp = trim($parts[0]);
+        }
+    }
+    if (!$publicIp || !filter_var($publicIp, FILTER_VALIDATE_IP)) {
+        return false; // cannot determine
+    }
+
+    $info = fetchPublicIpInfo($publicIp, $provider, $token);
+    $org = strtolower($info['org'] ?? '');
+    $asn = strtoupper($info['asn'] ?? '');
+
+    // Match org keywords
+    foreach ($orgKeywords as $kw) {
+        if ($kw !== '' && str_contains($org, strtolower($kw))) return true;
+    }
+
+    // Match ASN
+    foreach ($asnList as $a) {
+        if ($a !== '' && strtoupper(trim($a)) === $asn) return true;
+    }
+
+    // Match CIDR ranges
+    foreach ($cidrList as $cidr) {
+        if ($cidr !== '' && ipInCidr($publicIp, $cidr)) return true;
+    }
+
+    return false;
 }
 
 function getSetting(PDO $pdo, string $key, string $default = ''): string {
@@ -1194,7 +1371,7 @@ function calculateKPIForEmployee(PDO $pdo, $userId, $periodStart = null, $period
         $latePenaltyPerMinute = (float)getSetting($pdo, 'kpi_late_penalty_per_minute', '1');
         $izinSakitScore = (float)getSetting($pdo, 'kpi_izin_sakit_score', '85');
         $alphaScore = (float)getSetting($pdo, 'kpi_alpha_score', '0');
-        $maxOntimeHour = (int)getSetting($pdo, 'max_ontime_hour', '8');
+        $overtimeBonus = (float)getSetting($pdo, 'kpi_overtime_bonus', '5');
         
         // Get employee data
         $stmt = $pdo->prepare("SELECT nama, created_at FROM users WHERE id = ?");
@@ -1205,37 +1382,38 @@ function calculateKPIForEmployee(PDO $pdo, $userId, $periodStart = null, $period
         // Get employee registration date
         $employeeRegDate = $employee['created_at'];
         
-        // Use employee registration date as period start if not provided
+        // Determine KPI start: use per-employee start setting if available, else registration date
         if (!$periodStart) {
-            $periodStart = $employeeRegDate;
+            // Try settings override
+            try{
+                $k = 'work_start_date_user_'.$userId;
+                $st = $pdo->prepare("SELECT setting_value FROM settings WHERE setting_key=:k LIMIT 1");
+                $st->execute([':k'=>$k]);
+                $val = $st->fetchColumn();
+                if($val){ $periodStart = $val; } else { $periodStart = $employeeRegDate; }
+            }catch(Exception $e){ $periodStart = $employeeRegDate; }
         }
         if (!$periodEnd) {
             $periodEnd = date('Y-m-d');
         }
         
-        // Special case: if employee registered on the same date as period start, 
-        // ensure we include that date in the calculation
+        // Debug logging for period
+        error_log("KPI Debug - User $userId: Period start: $periodStart, Period end: $periodEnd");
+        
+        // Get employee registration date only
         $employeeRegDateOnly = date('Y-m-d', strtotime($employeeRegDate));
-        $periodStartOnly = date('Y-m-d', strtotime($periodStart));
         
-        // If employee registered on the same date as period start, use that date
-        if ($employeeRegDateOnly == $periodStartOnly) {
-            $actualPeriodStart = $employeeRegDateOnly;
-        } else {
-            $actualPeriodStart = max($periodStart, $employeeRegDate);
-        }
-        
-        // Get all attendance records for the period
-        // Use the calculated actual period start
+        // Get attendance records for the period (WFO, WFA, Overtime only)
         $stmt = $pdo->prepare("
             SELECT 
                 DATE(jam_masuk_iso) as attendance_date,
                 jam_masuk_iso,
                 status,
+                ket,
                 CASE 
                     WHEN status = 'terlambat' THEN 
                         GREATEST(0, TIMESTAMPDIFF(MINUTE, 
-                            CONCAT(DATE(jam_masuk_iso), ' ', :max_hour, ':00:00'), 
+                            CONCAT(DATE(jam_masuk_iso), ' 08:00:00'), 
                             jam_masuk_iso
                         ))
                     ELSE 0 
@@ -1244,34 +1422,17 @@ function calculateKPIForEmployee(PDO $pdo, $userId, $periodStart = null, $period
             WHERE user_id = :user_id 
             AND jam_masuk_iso IS NOT NULL 
             AND DATE(jam_masuk_iso) BETWEEN :period_start AND :period_end
+            AND ket IN ('wfo', 'wfa', 'overtime')
             ORDER BY attendance_date
         ");
         $stmt->execute([
-            'max_hour' => $maxOntimeHour,
             'user_id' => $userId, 
-            'period_start' => $actualPeriodStart, 
+            'period_start' => $periodStart, 
             'period_end' => $periodEnd
         ]);
         $attendanceRecords = $stmt->fetchAll();
         
-        // Get izin/sakit records for the period from attendance table
-        $stmt = $pdo->prepare("
-            SELECT DATE(jam_masuk_iso) as izin_date, ket as status
-            FROM attendance 
-            WHERE user_id = :user_id 
-            AND ket IN ('izin', 'sakit')
-            AND DATE(jam_masuk_iso) BETWEEN :period_start AND :period_end
-            ORDER BY izin_date
-        ");
-        $stmt->execute([
-            'user_id' => $userId, 
-            'period_start' => $actualPeriodStart, 
-            'period_end' => $periodEnd
-        ]);
-        $izinRecords = $stmt->fetchAll();
-        
         // Get izin/sakit records from attendance_notes table
-        // Use the full period range to ensure we don't miss any data
         $stmt = $pdo->prepare("
             SELECT date as izin_date, type as status
             FROM attendance_notes 
@@ -1287,106 +1448,58 @@ function calculateKPIForEmployee(PDO $pdo, $userId, $periodStart = null, $period
         ]);
         $izinNotesRecords = $stmt->fetchAll();
         
-        // Debug: Test query without date filter to see if data exists
-        $stmt2 = $pdo->prepare("
-            SELECT date as izin_date, type as status
-            FROM attendance_notes 
+        // Debug logging for izin/sakit records
+        error_log("KPI Debug - User $userId: Found " . count($izinNotesRecords) . " izin/sakit records in period $periodStart to $periodEnd");
+        error_log("KPI Debug - Employee registration date: $employeeRegDateOnly");
+        
+        // Get overtime records (attendance marked as 'overtime')
+        $stmt = $pdo->prepare("
+            SELECT DATE(jam_masuk_iso) as overtime_date, status, jam_masuk_iso, jam_masuk
+            FROM attendance 
             WHERE user_id = :user_id 
-            AND type IN ('izin', 'sakit')
-            ORDER BY izin_date
+            AND DATE(jam_masuk_iso) BETWEEN :period_start AND :period_end
+            AND ket = 'overtime'
+            ORDER BY jam_masuk_iso ASC
         ");
-        $stmt2->execute(['user_id' => $userId]);
-        $allIzinNotesRecords = $stmt2->fetchAll();
-        error_log("KPI Debug - All izin/sakit records for user $userId (no date filter): " . count($allIzinNotesRecords));
-        error_log("KPI Debug - All izin/sakit data: " . print_r($allIzinNotesRecords, true));
+        $stmt->execute([
+            'user_id' => $userId, 
+            'period_start' => $periodStart, 
+            'period_end' => $periodEnd
+        ]);
+        $overtimeRecords = $stmt->fetchAll();
         
-        // Debug: Check if attendance_notes table exists and has data
-        try {
-            $stmt3 = $pdo->prepare("SELECT COUNT(*) as total FROM attendance_notes WHERE type IN ('izin', 'sakit')");
-            $stmt3->execute();
-            $totalNotes = $stmt3->fetch();
-            error_log("KPI Debug - Total izin/sakit records in attendance_notes table: " . $totalNotes['total']);
-            
-            // Special debug for user 22
-            if ($userId == 22) {
-                error_log("KPI Debug - Special debug for user 22:");
-                error_log("- Period start: $periodStart");
-                error_log("- Period end: $periodEnd");
-                error_log("- Actual period start: $actualPeriodStart");
-                error_log("- Employee reg date: $employeeRegDate");
-                error_log("- Attendance notes records count: " . count($izinNotesRecords));
-                foreach ($izinNotesRecords as $record) {
-                    error_log("- Notes record: " . $record['izin_date'] . " = " . $record['status']);
-                }
-                
-                // Check all records for user 22 in attendance_notes
-                $stmt4 = $pdo->prepare("SELECT * FROM attendance_notes WHERE user_id = 22");
-                $stmt4->execute();
-                $allUser22Records = $stmt4->fetchAll();
-                error_log("KPI Debug - All attendance_notes records for user 22: " . count($allUser22Records));
-                foreach ($allUser22Records as $record) {
-                    error_log("- All records: " . $record['date'] . " = " . $record['type']);
-                }
-            }
-        } catch (Exception $e) {
-            error_log("KPI Debug - Error checking attendance_notes table: " . $e->getMessage());
+        // Create maps for quick lookup
+        $attendanceMap = [];
+        foreach ($attendanceRecords as $record) {
+            $attendanceMap[$record['attendance_date']] = $record;
         }
         
-        // Debug logging
-        error_log("KPI Debug - User ID: $userId, Period: $periodStart to $periodEnd, Actual Period: $actualPeriodStart to $periodEnd, Employee Reg Date: $employeeRegDate");
-        error_log("KPI Debug - Query executed: SELECT date as izin_date, type as status FROM attendance_notes WHERE user_id = $userId AND type IN ('izin', 'sakit') AND date BETWEEN '$periodStart' AND '$periodEnd'");
-        error_log("KPI Debug - Attendance izin records: " . count($izinRecords));
-        error_log("KPI Debug - Attendance notes izin records: " . count($izinNotesRecords));
-        error_log("KPI Debug - Attendance notes data: " . print_r($izinNotesRecords, true));
-        
-        // Create a map of izin/sakit dates from both tables
-        // Priority: attendance_notes first, then attendance table
         $izinDates = [];
-        
-        // First, add izin/sakit from attendance_notes table (higher priority)
         foreach ($izinNotesRecords as $record) {
-            // Convert employee registration date to date only for comparison
-            $employeeRegDateOnly = date('Y-m-d', strtotime($employeeRegDate));
-            
-            // Special case: if employee registered on the same date as izin/sakit, prioritize izin/sakit
-            if ($record['izin_date'] == $employeeRegDateOnly) {
+            // Only add if date is after or on registration date AND within the period
+            if ($record['izin_date'] >= $employeeRegDateOnly && $record['izin_date'] >= $periodStart && $record['izin_date'] <= $periodEnd) {
                 $izinDates[$record['izin_date']] = $record['status'];
-                error_log("KPI Debug - Added attendance_notes izin (same day as registration): " . $record['izin_date'] . " = " . $record['status'] . " (employee reg: $employeeRegDateOnly)");
-            } else if ($record['izin_date'] > $employeeRegDateOnly) {
-                $izinDates[$record['izin_date']] = $record['status'];
-                error_log("KPI Debug - Added attendance_notes izin: " . $record['izin_date'] . " = " . $record['status'] . " (employee reg: $employeeRegDateOnly)");
-            } else {
-                error_log("KPI Debug - Skipped attendance_notes izin before registration: " . $record['izin_date'] . " (employee reg: $employeeRegDateOnly)");
             }
         }
         
-        // Then, add izin/sakit from attendance table (only if not already in notes)
-        foreach ($izinRecords as $record) {
-            if (!isset($izinDates[$record['izin_date']])) {
-                $izinDates[$record['izin_date']] = $record['status'];
-                error_log("KPI Debug - Added attendance izin: " . $record['izin_date'] . " = " . $record['status']);
-            } else {
-                error_log("KPI Debug - Skipped attendance izin (already in notes): " . $record['izin_date'] . " = " . $record['status']);
-            }
+        error_log("KPI Debug - User $userId: Total izin/sakit dates in map: " . count($izinDates));
+        
+        $overtimeDates = [];
+        foreach ($overtimeRecords as $record) {
+            $overtimeDates[$record['overtime_date']] = $record;
         }
         
-        error_log("KPI Debug - Total izin dates: " . count($izinDates));
-        error_log("KPI Debug - Izin dates: " . print_r(array_keys($izinDates), true));
-        error_log("KPI Debug - Izin dates map: " . print_r($izinDates, true));
-        
-        // Generate all working days in the period
-        $workingDays = getWorkingDaysInPeriod($periodStart, $periodEnd);
+        // Generate working days for this specific employee in the period
+        $workingDays = getEmployeeWorkingDaysInPeriod($pdo, $userId, $periodStart, $periodEnd);
         
         // Get current date for comparison
         $currentDate = date('Y-m-d');
-        
-        // Debug logging for period
-        error_log("KPI Debug - Employee ID: $userId, Registration Date: $employeeRegDate, Period: $periodStart to $periodEnd, Total Working Days: " . count($workingDays));
         
         $ontimeCount = 0;
         $lateCount = 0;
         $izinSakitCount = 0;
         $alphaCount = 0;
+        $overtimeCount = 0;
         $totalLateMinutes = 0;
         $actualWorkingDays = 0; // Count actual working days for this employee (only past dates)
         $totalWorkingDaysInPeriod = 0; // Count all working days in period for this employee
@@ -1404,7 +1517,6 @@ function calculateKPIForEmployee(PDO $pdo, $userId, $periodStart = null, $period
             $totalWorkingDaysInPeriod++;
             
             // Only count as actual working day if the date has already passed
-            // This prevents counting future dates in the denominator for KPI calculation
             if ($dateStr <= $currentDate) {
                 $actualWorkingDays++;
             }
@@ -1420,13 +1532,12 @@ function calculateKPIForEmployee(PDO $pdo, $userId, $periodStart = null, $period
             
             // Only process dates that have already passed for KPI calculation
             if ($dateStr <= $currentDate) {
-                // Check if it's izin/sakit first (from both tables, with priority already set)
-                // Special case: if employee registered on the same date as izin/sakit, prioritize izin/sakit
-                if (isset($izinDates[$dateStr]) && ($dateStr == $employeeRegDateOnly || $dateStr > $employeeRegDateOnly)) {
+                // Check if it's izin/sakit first (from attendance_notes table)
+                if (isset($izinDates[$dateStr])) {
                     $izinSakitCount++;
-                    error_log("KPI Debug - Found izin/sakit for date: $dateStr, type: " . $izinDates[$dateStr] . " (employee reg: $employeeRegDateOnly)");
+                    error_log("KPI Debug - User $userId: Found izin/sakit on $dateStr, count now: $izinSakitCount");
                 } else if ($attendanceRecord) {
-                    // Check attendance status
+                    // Check attendance status (only WFO, WFA, Overtime)
                     if ($attendanceRecord['status'] === 'ontime') {
                         $ontimeCount++;
                     } else {
@@ -1435,13 +1546,39 @@ function calculateKPIForEmployee(PDO $pdo, $userId, $periodStart = null, $period
                     }
                 } else {
                     // No attendance and no izin/sakit = alpha (only for past dates)
-                    $alphaCount++;
-                    error_log("KPI Debug - Counted alpha for past date: $dateStr (current: $currentDate)");
+                    // If this date is a manual holiday, do not penalize as alpha
+                    if (!isManualHoliday($pdo, $dateStr)) {
+                        $alphaCount++;
+                    }
                 }
-            } else {
-                error_log("KPI Debug - Skipped future date for KPI calculation: $dateStr (current: $currentDate)");
             }
         }
+        
+        // Count overtime days (including weekends and holidays)
+        foreach ($overtimeDates as $overtimeDate => $overtimeRecord) {
+            $overtimeCount++;
+        }
+        
+        // Count izin/sakit directly from the records (more reliable)
+        $currentDate = date('Y-m-d');
+        $directIzinSakitCount = 0;
+        foreach ($izinNotesRecords as $record) {
+            if ($record['izin_date'] >= $employeeRegDateOnly && 
+                $record['izin_date'] >= $periodStart && 
+                $record['izin_date'] <= $periodEnd &&
+                $record['izin_date'] <= $currentDate) {
+                $directIzinSakitCount++;
+            }
+        }
+        
+        // Use the direct count if it's different from the loop count
+        if ($directIzinSakitCount != $izinSakitCount) {
+            error_log("KPI Debug - User $userId: Correcting izin/sakit count from $izinSakitCount to $directIzinSakitCount");
+            $izinSakitCount = $directIzinSakitCount;
+        }
+        
+        // Debug logging for final counts
+        error_log("KPI Debug - User $userId: Final counts - Ontime: $ontimeCount, Late: $lateCount, Izin/Sakit: $izinSakitCount, Alpha: $alphaCount, Overtime: $overtimeCount");
         
         // Calculate KPI score
         $kpiScore = 0;
@@ -1458,6 +1595,9 @@ function calculateKPIForEmployee(PDO $pdo, $userId, $periodStart = null, $period
             // Add score for alpha (usually 0)
             $kpiScore += ($alphaCount * $alphaScore);
             
+            // Add overtime bonus
+                $kpiScore += ($overtimeCount * $overtimeBonus);
+
             // Calculate average based on actual working days that have passed
             $kpiScore = $kpiScore / $actualWorkingDays;
             
@@ -1465,25 +1605,26 @@ function calculateKPIForEmployee(PDO $pdo, $userId, $periodStart = null, $period
             $kpiScore = max(0, min(100, $kpiScore));
         }
         
-        // Debug logging for KPI calculation
-        error_log("KPI Debug - KPI Calculation - OnTime: $ontimeCount, Late: $lateCount, Izin/Sakit: $izinSakitCount, Alpha: $alphaCount, Actual Working Days: $actualWorkingDays, Total Working Days: $totalWorkingDaysInPeriod");
-        error_log("KPI Debug - KPI Score before division: " . ($ontimeCount * 100 - $totalLateMinutes * $latePenaltyPerMinute + $izinSakitCount * $izinSakitScore + $alphaCount * $alphaScore));
-        error_log("KPI Debug - Final KPI Score: $kpiScore");
-        
-        // Debug logging for final counts
-        error_log("KPI Debug - Final counts - OnTime: $ontimeCount, Late: $lateCount, Izin/Sakit: $izinSakitCount, Alpha: $alphaCount, Actual Working Days: $actualWorkingDays");
+        // Determine KPI status
+        $status = 'Very Poor';
+        if ($kpiScore >= 90) $status = 'Excellent';
+        elseif ($kpiScore >= 80) $status = 'Good';
+        elseif ($kpiScore >= 70) $status = 'Fair';
+        elseif ($kpiScore >= 60) $status = 'Poor';
         
         return [
             'user_id' => $userId,
             'nama' => $employee['nama'],
-            'total_working_days' => $totalWorkingDaysInPeriod, // Show total working days in period
+            'total_working_days' => $totalWorkingDaysInPeriod, // Total working days in period
             'actual_working_days' => $actualWorkingDays, // Days that have passed for KPI calculation
             'ontime_count' => $ontimeCount,
             'late_count' => $lateCount,
             'izin_sakit_count' => $izinSakitCount,
             'alpha_count' => $alphaCount,
+            'overtime_count' => $overtimeCount,
             'total_late_minutes' => $totalLateMinutes,
             'kpi_score' => round($kpiScore, 2),
+            'status' => $status,
             'period_start' => $periodStart,
             'period_end' => $periodEnd,
             'employee_registration_date' => $employeeRegDate
@@ -1495,15 +1636,197 @@ function calculateKPIForEmployee(PDO $pdo, $userId, $periodStart = null, $period
     }
 }
 
+// Function to get Indonesian national holidays for a given year
+function getIndonesianNationalHolidays($year) {
+    $holidays = [];
+    
+    // Fixed holidays (same date every year)
+    $fixedHolidays = [
+        '01-01' => 'Tahun Baru',
+        '02-14' => 'Valentine Day',
+        '03-22' => 'Hari Raya Nyepi',
+        '04-18' => 'Wafat Isa Almasih',
+        '05-01' => 'Hari Buruh Internasional',
+        '05-09' => 'Kenaikan Isa Almasih',
+        '05-20' => 'Hari Kebangkitan Nasional',
+        '06-01' => 'Hari Lahir Pancasila',
+        '06-17' => 'Hari Raya Idul Adha',
+        '08-17' => 'Hari Kemerdekaan RI',
+        '09-16' => 'Maulid Nabi Muhammad SAW',
+        '10-02' => 'Hari Batik Nasional',
+        '11-10' => 'Hari Pahlawan',
+        '12-25' => 'Hari Raya Natal'
+    ];
+    
+    // Islamic holidays (calculated based on Islamic calendar - simplified)
+    // Note: These dates are approximate and should be updated yearly
+    $islamicHolidays = [
+        // Idul Fitri (2 days) - dates vary each year
+        // Idul Adha - dates vary each year
+        // Islamic New Year - dates vary each year
+        // Maulid Nabi - dates vary each year
+    ];
+    
+    // Add fixed holidays
+    foreach ($fixedHolidays as $date => $name) {
+        $holidays[] = [
+            'date' => $year . '-' . $date,
+            'name' => $name,
+            'type' => 'fixed'
+        ];
+    }
+    
+    // Add Islamic holidays for specific years (2024-2025)
+    if ($year == 2024) {
+        $islamicHolidays2024 = [
+            '2024-04-10' => 'Hari Raya Idul Fitri 1445 H',
+            '2024-04-11' => 'Hari Raya Idul Fitri 1445 H (Hari Kedua)',
+            '2024-06-16' => 'Hari Raya Idul Adha 1445 H',
+            '2024-07-07' => 'Tahun Baru Islam 1446 H',
+            '2024-09-15' => 'Maulid Nabi Muhammad SAW 1446 H'
+        ];
+        foreach ($islamicHolidays2024 as $date => $name) {
+            $holidays[] = [
+                'date' => $date,
+                'name' => $name,
+                'type' => 'islamic'
+            ];
+        }
+    } elseif ($year == 2025) {
+        $islamicHolidays2025 = [
+            '2025-03-30' => 'Hari Raya Idul Fitri 1446 H',
+            '2025-03-31' => 'Hari Raya Idul Fitri 1446 H (Hari Kedua)',
+            '2025-06-06' => 'Hari Raya Idul Adha 1446 H',
+            '2025-06-26' => 'Tahun Baru Islam 1447 H',
+            '2025-09-05' => 'Maulid Nabi Muhammad SAW 1447 H'
+        ];
+        foreach ($islamicHolidays2025 as $date => $name) {
+            $holidays[] = [
+                'date' => $date,
+                'name' => $name,
+                'type' => 'islamic'
+            ];
+        }
+    }
+    
+    return $holidays;
+}
+
+// Function to check if a date is a national holiday
+function isNationalHoliday($date) {
+    $year = date('Y', strtotime($date));
+    $holidays = getIndonesianNationalHolidays($year);
+    
+    foreach ($holidays as $holiday) {
+        if ($holiday['date'] === $date) {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+// Manual holiday helpers
+function isManualHoliday(PDO $pdo, $date){
+    try{
+        $stmt = $pdo->prepare("SELECT 1 FROM manual_holidays WHERE date = :d LIMIT 1");
+        $stmt->execute([':d'=>$date]);
+        return (bool)$stmt->fetchColumn();
+    }catch(PDOException $e){
+        error_log('isManualHoliday error: '.$e->getMessage());
+        return false;
+    }
+}
+
+function getManualHolidaysInRange(PDO $pdo, $startDate, $endDate){
+    try{
+        $stmt = $pdo->prepare("SELECT * FROM manual_holidays WHERE date BETWEEN :s AND :e ORDER BY date");
+        $stmt->execute([':s'=>$startDate, ':e'=>$endDate]);
+        return $stmt->fetchAll();
+    }catch(PDOException $e){
+        error_log('getManualHolidaysInRange error: '.$e->getMessage());
+        return [];
+    }
+}
+
+// Function to get employee's work schedule
+function getEmployeeWorkSchedule(PDO $pdo, $userId) {
+    try {
+        $stmt = $pdo->prepare("SELECT * FROM employee_work_schedule WHERE user_id = :user_id");
+        $stmt->execute([':user_id' => $userId]);
+        $schedules = $stmt->fetchAll();
+        
+        $scheduleMap = [];
+        foreach ($schedules as $schedule) {
+            $scheduleMap[$schedule['day_of_week']] = [
+                'is_working_day' => (bool)$schedule['is_working_day'],
+                'start_time' => $schedule['start_time'],
+                'end_time' => $schedule['end_time']
+            ];
+        }
+        
+        return $scheduleMap;
+    } catch (PDOException $e) {
+        error_log("Error getting employee work schedule: " . $e->getMessage());
+        return [];
+    }
+}
+
+// Function to check if a specific date is a working day for an employee
+function isEmployeeWorkingDay(PDO $pdo, $userId, $date) {
+    $dateObj = new DateTime($date);
+    $dayOfWeek = strtolower($dateObj->format('l')); // monday, tuesday, etc.
+    
+    $schedule = getEmployeeWorkSchedule($pdo, $userId);
+    
+    // If no specific schedule found, use default (Monday-Friday)
+    if (empty($schedule)) {
+        $dayNumber = $dateObj->format('N');
+        return $dayNumber < 6 && !isNationalHoliday($date) && !isManualHoliday($pdo, $date);
+    }
+    
+    // Check if employee works on this day
+    if (isset($schedule[$dayOfWeek])) {
+        return $schedule[$dayOfWeek]['is_working_day'] && !isNationalHoliday($date) && !isManualHoliday($pdo, $date);
+    }
+    
+    return false;
+}
+
+// Function to get working days for a specific employee in a period
+function getEmployeeWorkingDaysInPeriod(PDO $pdo, $userId, $startDate, $endDate) {
+    $workingDays = [];
+    $start = new DateTime($startDate);
+    $end = new DateTime($endDate);
+    
+    while ($start <= $end) {
+        $dateStr = $start->format('Y-m-d');
+        
+        if (isEmployeeWorkingDay($pdo, $userId, $dateStr)) {
+            $workingDays[] = clone $start;
+        }
+        
+        $start->add(new DateInterval('P1D'));
+    }
+    
+    return $workingDays;
+}
+
 function getWorkingDaysInPeriod($startDate, $endDate) {
     $workingDays = [];
     $start = new DateTime($startDate);
     $end = new DateTime($endDate);
     
     while ($start <= $end) {
+        $dateStr = $start->format('Y-m-d');
+        $dayOfWeek = $start->format('N');
+        
         // Skip weekends (Saturday = 6, Sunday = 0)
-        if ($start->format('N') < 6) {
-            $workingDays[] = clone $start;
+        if ($dayOfWeek < 6) {
+            // Check if it's not a national or manual holiday
+            if (!isNationalHoliday($dateStr) && !(isset($GLOBALS['pdo']) ? isManualHoliday($GLOBALS['pdo'], $dateStr) : false)) {
+                $workingDays[] = clone $start;
+            }
         }
         $start->add(new DateInterval('P1D'));
     }
@@ -1517,9 +1840,15 @@ function getWorkingDaysInMonth($year, $month) {
     $end = new DateTime("$year-$month-" . $start->format('t')); // Last day of month
     
     while ($start <= $end) {
+        $dateStr = $start->format('Y-m-d');
+        $dayOfWeek = $start->format('N');
+        
         // Skip weekends (Saturday = 6, Sunday = 0)
-        if ($start->format('N') < 6) {
-            $workingDays++;
+        if ($dayOfWeek < 6) {
+            // Check if it's not a national or manual holiday
+            if (!isNationalHoliday($dateStr) && !(isset($GLOBALS['pdo']) ? isManualHoliday($GLOBALS['pdo'], $dateStr) : false)) {
+                $workingDays++;
+            }
         }
         $start->add(new DateInterval('P1D'));
     }
@@ -1536,9 +1865,15 @@ function getWorkingDaysInMonthUpToDate($year, $month, $day) {
     $end->sub(new DateInterval('P1D'));
     
     while ($start <= $end) {
+        $dateStr = $start->format('Y-m-d');
+        $dayOfWeek = $start->format('N');
+        
         // Skip weekends (Saturday = 6, Sunday = 0)
-        if ($start->format('N') < 6) {
-            $workingDays++;
+        if ($dayOfWeek < 6) {
+            // Check if it's not a national or manual holiday
+            if (!isNationalHoliday($dateStr) && !(isset($GLOBALS['pdo']) ? isManualHoliday($GLOBALS['pdo'], $dateStr) : false)) {
+                $workingDays++;
+            }
         }
         $start->add(new DateInterval('P1D'));
     }
@@ -1627,6 +1962,84 @@ if (isset($_GET['ajax'])) {
     // Must be authenticated for all endpoints except auth-related and public landing scan
     if (!in_array($action, ['login', 'register', 'get_members', 'save_attendance', 'get_today_attendance'], true)) {
         if (!isset($_SESSION['user'])) jsonResponse(['error' => 'Unauthorized'], 401);
+    }
+    // Admin manual holidays CRUD
+    if ($action === 'admin_get_manual_holidays') {
+        if (!isAdmin()) jsonResponse(['error'=>'Forbidden'],403);
+        $start = $_GET['start'] ?? ($_POST['start'] ?? date('Y-01-01'));
+        $end = $_GET['end'] ?? ($_POST['end'] ?? date('Y-12-31'));
+        $rows = getManualHolidaysInRange($pdo, $start, $end);
+        jsonResponse(['ok'=>true,'data'=>$rows]);
+    }
+    if ($action === 'admin_add_manual_holiday' && $_SERVER['REQUEST_METHOD']==='POST') {
+        if (!isAdmin()) jsonResponse(['error'=>'Forbidden'],403);
+        $date = $_POST['date'] ?? '';
+        $name = trim($_POST['name'] ?? 'Libur Manual');
+        if (!$date) jsonResponse(['ok'=>false,'message'=>'Tanggal wajib diisi'],400);
+        
+        // Validate date format
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
+            jsonResponse(['ok'=>false,'message'=>'Format tanggal tidak valid. Gunakan YYYY-MM-DD'],400);
+        }
+        
+        try{
+            // Check if table exists and has correct structure
+            $checkTable = $pdo->query("SHOW TABLES LIKE 'manual_holidays'");
+            if ($checkTable->rowCount() == 0) {
+                error_log('manual_holidays table does not exist');
+                jsonResponse(['ok'=>false,'message'=>'Tabel manual_holidays tidak ditemukan'],500);
+            }
+            
+            // Check table structure
+            $checkColumns = $pdo->query("DESCRIBE manual_holidays");
+            $columns = $checkColumns->fetchAll(PDO::FETCH_COLUMN);
+            error_log('manual_holidays columns: ' . implode(', ', $columns));
+            
+            // Validate user session
+            $userId = $_SESSION['user']['id'] ?? null;
+            if (!$userId) {
+                error_log('No user ID in session');
+                jsonResponse(['ok'=>false,'message'=>'Session tidak valid'],400);
+            }
+            
+            // Check if date already exists
+            $checkDate = $pdo->prepare("SELECT id FROM manual_holidays WHERE date = :d LIMIT 1");
+            $checkDate->execute([':d' => $date]);
+            $existingId = $checkDate->fetchColumn();
+            
+            if ($existingId) {
+                // Update existing record
+                $stmt = $pdo->prepare("UPDATE manual_holidays SET name = :n, created_by = :u WHERE id = :id");
+                $result = $stmt->execute([':n' => $name, ':u' => $userId, ':id' => $existingId]);
+                $message = 'Hari libur manual diperbarui';
+            } else {
+                // Insert new record
+                $stmt = $pdo->prepare("INSERT INTO manual_holidays(date,name,created_by) VALUES(:d,:n,:u)");
+                $result = $stmt->execute([':d' => $date, ':n' => $name, ':u' => $userId]);
+                $message = 'Hari libur manual disimpan';
+            }
+            
+            if ($result) {
+            triggerDatabaseBackup();
+                jsonResponse(['ok'=>true,'message'=>$message]);
+            } else {
+                error_log('Failed to execute manual holiday insert/update');
+                jsonResponse(['ok'=>false,'message'=>'Gagal menyimpan hari libur'],500);
+            }
+        }catch(PDOException $e){
+            error_log('add manual holiday error: '.$e->getMessage());
+            error_log('SQL State: ' . $e->getCode());
+            error_log('Error Info: ' . print_r($e->errorInfo, true));
+            jsonResponse(['ok'=>false,'message'=>'Gagal menyimpan hari libur: ' . $e->getMessage()],500);
+        }
+    }
+    if ($action === 'admin_delete_manual_holiday' && $_SERVER['REQUEST_METHOD']==='POST') {
+        if (!isAdmin()) jsonResponse(['error'=>'Forbidden'],403);
+        $id=(int)($_POST['id']??0);
+        if(!$id) jsonResponse(['ok'=>false,'message'=>'ID tidak valid'],400);
+        $pdo->prepare("DELETE FROM manual_holidays WHERE id=:id")->execute([':id'=>$id]);
+        triggerDatabaseBackup();
+        jsonResponse(['ok'=>true]);
     }
 
     if ($action === 'login' && $_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -1837,15 +2250,15 @@ if (isset($_GET['ajax'])) {
                     'nim' => $note['nim'],
                     'nama' => $note['nama'],
                     'startup' => $note['startup'],
-                    'jam_masuk' => date('H:i', strtotime($note['created_at'])),
-                    'jam_masuk_iso' => $note['created_at'],
+                    'jam_masuk' => '08:00', // Default time for izin/sakit
+                    'jam_masuk_iso' => $note['date'] . ' 08:00:00',
                     'ekspresi_masuk' => null,
                     'screenshot_masuk' => null,
                     'lokasi_masuk' => null,
                     'lat_masuk' => null,
                     'lng_masuk' => null,
-                    'jam_pulang' => date('H:i', strtotime($note['created_at'])),
-                    'jam_pulang_iso' => $note['created_at'],
+                    'jam_pulang' => '17:00', // Default time for izin/sakit
+                    'jam_pulang_iso' => $note['date'] . ' 17:00:00',
                     'ekspresi_pulang' => null,
                     'screenshot_pulang' => null,
                     'lokasi_pulang' => null,
@@ -1892,15 +2305,15 @@ if (isset($_GET['ajax'])) {
                     'nim' => $note['nim'],
                     'nama' => $note['nama'],
                     'startup' => $note['startup'],
-                    'jam_masuk' => date('H:i', strtotime($note['created_at'])),
-                    'jam_masuk_iso' => $note['created_at'],
+                    'jam_masuk' => '08:00', // Default time for izin/sakit
+                    'jam_masuk_iso' => $note['date'] . ' 08:00:00',
                     'ekspresi_masuk' => null,
                     'screenshot_masuk' => null,
                     'lokasi_masuk' => null,
                     'lat_masuk' => null,
                     'lng_masuk' => null,
-                    'jam_pulang' => date('H:i', strtotime($note['created_at'])),
-                    'jam_pulang_iso' => $note['created_at'],
+                    'jam_pulang' => '17:00', // Default time for izin/sakit
+                    'jam_pulang_iso' => $note['date'] . ' 17:00:00',
                     'ekspresi_pulang' => null,
                     'screenshot_pulang' => null,
                     'lokasi_pulang' => null,
@@ -1924,6 +2337,72 @@ if (isset($_GET['ajax'])) {
             });
         }
         jsonResponse(['ok' => true, 'data' => $attendanceData]);
+    }
+    
+    if ($action === 'get_kpi_data') {
+        try {
+            // Check if this is for admin dashboard (filter_type parameter)
+            $filterType = $_GET['filter_type'] ?? '';
+            $isAdminDashboard = isAdmin() && $filterType !== '';
+            
+            if ($isAdminDashboard) {
+                // Admin dashboard - get all KPI data with optional monthly filter
+                $customPeriodStart = null;
+                $customPeriodEnd = null;
+                
+                if ($filterType === 'monthly') {
+                    $month = (int)($_GET['month'] ?? date('n'));
+                    $year = (int)($_GET['year'] ?? date('Y'));
+                    $customPeriodStart = date('Y-m-01', mktime(0, 0, 0, $month, 1, $year));
+                    $customPeriodEnd = date('Y-m-t', mktime(0, 0, 0, $month, 1, $year));
+                    error_log("get_kpi_data - Monthly filter: $month/$year ($customPeriodStart to $customPeriodEnd)");
+                }
+                
+                $kpiData = getAllKPIData($pdo, $customPeriodStart, $customPeriodEnd);
+                error_log("get_kpi_data - Admin dashboard, returning all KPI data");
+                jsonResponse(['ok' => true, 'data' => $kpiData]);
+            } else {
+                // Individual employee KPI - get specific user
+                $userId = isAdmin() ? (int)($_GET['user_id'] ?? 0) : (int)$_SESSION['user']['id'];
+                
+                error_log("get_kpi_data - User ID: $userId, Is Admin: " . (isAdmin() ? 'Yes' : 'No'));
+                error_log("get_kpi_data - Session user: " . print_r($_SESSION['user'] ?? 'No session', true));
+                error_log("get_kpi_data - GET user_id: " . ($_GET['user_id'] ?? 'Not set'));
+                
+                if (!$userId && !isAdmin()) {
+                    error_log("get_kpi_data - No user ID found");
+                    jsonResponse(['ok' => false, 'message' => 'User tidak ditemukan'], 400);
+                }
+                
+                // If admin but no user_id specified, use logged-in user
+                if (!$userId) {
+                    $userId = (int)$_SESSION['user']['id'];
+                    error_log("get_kpi_data - Using logged-in user ID: $userId");
+                }
+                
+                // Get period start and end
+                $periodStart = $_GET['period_start'] ?? date('Y-m-01');
+                $periodEnd = $_GET['period_end'] ?? date('Y-m-t');
+                
+                error_log("get_kpi_data - Period: $periodStart to $periodEnd");
+                error_log("get_kpi_data - Individual employee KPI for user: $userId");
+                
+                // Calculate KPI for individual employee
+                $kpiData = calculateKPIForEmployee($pdo, $userId, $periodStart, $periodEnd);
+                
+                error_log("get_kpi_data - Individual KPI calculation result: " . print_r($kpiData, true));
+                
+                if ($kpiData) {
+                    jsonResponse(['ok' => true, 'data' => $kpiData]);
+                } else {
+                    error_log("get_kpi_data - Individual KPI calculation returned null/empty");
+                    jsonResponse(['ok' => false, 'message' => 'Gagal menghitung KPI'], 500);
+                }
+            }
+        } catch (Exception $e) {
+            error_log("get_kpi_data - Exception: " . $e->getMessage());
+            jsonResponse(['ok' => false, 'message' => 'Error: ' . $e->getMessage()], 500);
+        }
     }
 
     if ($action === 'save_attendance' && $_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -2058,19 +2537,43 @@ if (isset($_GET['ajax'])) {
                     }
                 }
 
-                // Geofencing WFO based on settings
-                $wfoLat = (float)getSetting($pdo, 'wfo_lat', '-6.9738');
-                $wfoLng = (float)getSetting($pdo, 'wfo_lng', '107.6300');
-                $wfoRadius = (int)getSetting($pdo, 'wfo_radius_m', '1200'); // meters
-                $isInsideTelu = true; // default when no coordinates
-                if ($lat !== null && $lng !== null) {
-                    $earth = 6371000; // meters
-                    $dLat = deg2rad($wfoLat - $lat);
-                    $dLng = deg2rad($wfoLng - $lng);
-                    $a = sin($dLat/2) * sin($dLat/2) + cos(deg2rad($lat)) * cos(deg2rad($wfoLat)) * sin($dLng/2) * sin($dLng/2);
-                    $c = 2 * atan2(sqrt($a), sqrt(1-$a));
-                    $distance = $earth * $c;
-                    $isInsideTelu = ($distance <= max(0, $wfoRadius));
+                // Determine WFO via API or coordinate fallback
+                $wfoMode = strtolower(getSetting($pdo, 'wfo_mode', 'api'));
+                $publicIp = $_POST['public_ip'] ?? '';
+                $isInsideTelu = false;
+                
+                if ($wfoMode === 'api') {
+                    // Try API-based detection first
+                    $isInsideTelu = isWfoByApi($pdo, $publicIp);
+                    // Fallback to coordinate if API cannot confirm
+                    if (!$isInsideTelu) {
+                        $wfoLat = (float)getSetting($pdo, 'wfo_lat', '-6.9738');
+                        $wfoLng = (float)getSetting($pdo, 'wfo_lng', '107.6300');
+                        $wfoRadius = (int)getSetting($pdo, 'wfo_radius_m', '1200'); // meters
+                        if ($lat !== null && $lng !== null) {
+                            $earth = 6371000; // meters
+                            $dLat = deg2rad($wfoLat - $lat);
+                            $dLng = deg2rad($wfoLng - $lng);
+                            $a = sin($dLat/2) * sin($dLat/2) + cos(deg2rad($lat)) * cos(deg2rad($wfoLat)) * sin($dLng/2) * sin($dLng/2);
+                            $c = 2 * atan2(sqrt($a), sqrt(1-$a));
+                            $distance = $earth * $c;
+                            $isInsideTelu = ($distance <= max(0, $wfoRadius));
+                        }
+                    }
+                } else {
+                    // Coordinate-only mode
+                    $wfoLat = (float)getSetting($pdo, 'wfo_lat', '-6.9738');
+                    $wfoLng = (float)getSetting($pdo, 'wfo_lng', '107.6300');
+                    $wfoRadius = (int)getSetting($pdo, 'wfo_radius_m', '1200'); // meters
+                    if ($lat !== null && $lng !== null) {
+                        $earth = 6371000; // meters
+                        $dLat = deg2rad($wfoLat - $lat);
+                        $dLng = deg2rad($wfoLng - $lng);
+                        $a = sin($dLat/2) * sin($dLat/2) + cos(deg2rad($lat)) * cos(deg2rad($wfoLat)) * sin($dLng/2) * sin($dLng/2);
+                        $c = 2 * atan2(sqrt($a), sqrt(1-$a));
+                        $distance = $earth * $c;
+                        $isInsideTelu = ($distance <= max(0, $wfoRadius));
+                    }
                 }
 
                 $ketVal = $isInsideTelu ? 'wfo' : 'wfa';
@@ -2312,6 +2815,27 @@ if ($action === 'process_attendance_facenet' && $_SERVER['REQUEST_METHOD'] === '
         jsonResponse(['error' => 'Attendance processing failed'], 500);
     }
 }
+
+    // Settings helpers for client usage
+    if ($action === 'get_setting') {
+        if (!isAdmin()) jsonResponse(['error'=>'Forbidden'],403);
+        $key = $_GET['key'] ?? ($_POST['key'] ?? '');
+        if(!$key) jsonResponse(['ok'=>false,'message'=>'key kosong'],400);
+        $stmt=$pdo->prepare("SELECT setting_value FROM settings WHERE setting_key=:k LIMIT 1");
+        $stmt->execute([':k'=>$key]);
+        $val = $stmt->fetchColumn();
+        jsonResponse(['ok'=>true,'value'=>$val]);
+    }
+    if ($action === 'save_setting' && $_SERVER['REQUEST_METHOD']==='POST') {
+        if (!isAdmin()) jsonResponse(['error'=>'Forbidden'],403);
+        $key = $_POST['key'] ?? '';
+        $value = $_POST['value'] ?? '';
+        if(!$key) jsonResponse(['ok'=>false,'message'=>'key kosong'],400);
+        $stmt=$pdo->prepare("INSERT INTO settings(setting_key,setting_value) VALUES(:k,:v) ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value)");
+        $stmt->execute([':k'=>$key, ':v'=>$value]);
+        triggerDatabaseBackup();
+        jsonResponse(['ok'=>true,'message'=>'Pengaturan disimpan']);
+    }
 
 // Enhanced FaceNet AJAX Endpoints
 if ($action === 'generate_enhanced_face_embedding' && $_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -2677,26 +3201,25 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         $jam_pulang = $_POST['jam_pulang'] ?? null;
 
         if(!$user_id) jsonResponse(['ok'=>false,'message'=>'Pilih pegawai'],400);
-        if(!in_array($type, ['izin','sakit','wfa'], true)) jsonResponse(['ok'=>false,'message'=>'Tipe tidak valid'],400);
+        if(!in_array($type, ['izin','sakit','wfa','overtime'], true)) jsonResponse(['ok'=>false,'message'=>'Tipe tidak valid'],400);
 
         // Logic for setting time based on type
         $jam_masuk_iso = null;
         $jam_pulang_iso = null;
         $status = 'ontime';
 
-        if ($type === 'wfa') {
+        if ($type === 'wfa' || $type === 'overtime') {
             if (!$jam_masuk || !$jam_pulang) {
-                jsonResponse(['ok' => false, 'message' => 'Jam masuk dan pulang wajib diisi untuk WFA'], 400);
+                jsonResponse(['ok' => false, 'message' => 'Jam masuk dan pulang wajib diisi untuk tipe ini'], 400);
             }
             $jam_masuk_iso = $date . ' ' . $jam_masuk . ':00';
             $jam_pulang_iso = $date . ' ' . $jam_pulang . ':00';
         } else {
-            // For Izin/Sakit, use current time when inputting
-            $now = new DateTime('now', new DateTimeZone('Asia/Jakarta'));
-            $jam_masuk_iso = $now->format('Y-m-d H:i:s');
-            $jam_pulang_iso = $now->format('Y-m-d H:i:s');
-            $jam_masuk = $now->format('H:i');
-            $jam_pulang = $now->format('H:i');
+            // For Izin/Sakit, use the selected date with default times
+            $jam_masuk_iso = $date . ' 08:00:00';  // Default 08:00 for masuk
+            $jam_pulang_iso = $date . ' 17:00:00'; // Default 17:00 for pulang
+            $jam_masuk = '08:00';
+            $jam_pulang = '17:00';
         }
 
         // Avoid duplicates for day
@@ -2707,19 +3230,58 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         $alasan_izin_sakit = $_POST['alasan_izin_sakit'] ?? null;
         $bukti_izin_sakit = $_POST['bukti_izin_sakit'] ?? null;
         
-        $sql = "INSERT INTO attendance (user_id, jam_masuk, jam_masuk_iso, jam_pulang, jam_pulang_iso, status, ket, alasan_izin_sakit, bukti_izin_sakit) VALUES (:u, :jm, :jmiso, :jp, :jpiso, :s, :ket, :alasan, :bukti)";
-        $ins = $pdo->prepare($sql);
-        $ins->execute([
-            ':u' => $user_id,
-            ':jm' => $jam_masuk,
-            ':jmiso' => $jam_masuk_iso,
-            ':jp' => $jam_pulang,
-            ':jpiso' => $jam_pulang_iso,
-            ':s' => $status,
-            ':ket' => $type,
-            ':alasan' => $alasan_izin_sakit,
-            ':bukti' => $bukti_izin_sakit
-        ]);
+        // Check if type is izin or sakit - if so, insert to attendance_notes instead
+        if (in_array($type, ['izin', 'sakit'])) {
+            try {
+                // Insert to attendance_notes table
+                $sql = "INSERT INTO attendance_notes (user_id, date, type, keterangan, bukti, created_at) VALUES (:u, :date, :type, :keterangan, :bukti, NOW())";
+                $ins = $pdo->prepare($sql);
+                $result = $ins->execute([
+                    ':u' => $user_id,
+                    ':date' => $date,
+                    ':type' => $type,
+                    ':keterangan' => $alasan_izin_sakit ?: 'Tidak ada keterangan',
+                    ':bukti' => $bukti_izin_sakit
+                ]);
+                
+                if ($result) {
+                    error_log("Admin add absence - Successfully inserted $type record to attendance_notes for user $user_id on date $date");
+                } else {
+                    error_log("Admin add absence - Failed to insert $type record to attendance_notes. Error: " . print_r($ins->errorInfo(), true));
+                    jsonResponse(['ok' => false, 'message' => 'Gagal menyimpan data izin/sakit']);
+                }
+            } catch (PDOException $e) {
+                error_log("Admin add absence - PDO Error inserting $type record to attendance_notes: " . $e->getMessage());
+                jsonResponse(['ok' => false, 'message' => 'Database error: ' . $e->getMessage()]);
+            }
+        } else {
+            try {
+                // Insert to attendance table for wfa/overtime
+                $sql = "INSERT INTO attendance (user_id, jam_masuk, jam_masuk_iso, jam_pulang, jam_pulang_iso, status, ket, alasan_izin_sakit, bukti_izin_sakit) VALUES (:u, :jm, :jmiso, :jp, :jpiso, :s, :ket, :alasan, :bukti)";
+                $ins = $pdo->prepare($sql);
+                $result = $ins->execute([
+                    ':u' => $user_id,
+                    ':jm' => $jam_masuk,
+                    ':jmiso' => $jam_masuk_iso,
+                    ':jp' => $jam_pulang,
+                    ':jpiso' => $jam_pulang_iso,
+                    ':s' => $status,
+                    ':ket' => $type,
+                    ':alasan' => $alasan_izin_sakit,
+                    ':bukti' => $bukti_izin_sakit
+                ]);
+                
+                if ($result) {
+                    error_log("Admin add absence - Successfully inserted $type record to attendance table for user $user_id on date $date");
+                } else {
+                    error_log("Admin add absence - Failed to insert $type record to attendance table. Error: " . print_r($ins->errorInfo(), true));
+                    jsonResponse(['ok' => false, 'message' => 'Gagal menyimpan data presensi']);
+                }
+            } catch (PDOException $e) {
+                error_log("Admin add absence - PDO Error inserting $type record to attendance table: " . $e->getMessage());
+                jsonResponse(['ok' => false, 'message' => 'Database error: ' . $e->getMessage()]);
+            }
+        }
         
         // Trigger backup setelah menambah data absence
         triggerDatabaseBackup();
@@ -2732,14 +3294,94 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         if (!isAdmin()) jsonResponse(['error' => 'Forbidden'], 403);
         $id = (int)($_POST['id'] ?? 0);
         if(!$id) jsonResponse(['ok'=>false,'message'=>'ID tidak valid'],400);
+        
+        // Get current attendance record to check if ket is being changed to izin/sakit
+        $currentStmt = $pdo->prepare("SELECT user_id, DATE(jam_masuk_iso) as attendance_date, ket FROM attendance WHERE id = :id");
+        $currentStmt->execute([':id' => $id]);
+        $currentRecord = $currentStmt->fetch();
+        
+        // Debug logging for current record
+        error_log("Admin update attendance - Current record query result: " . print_r($currentRecord, true));
+        
         $fields = ['jam_masuk','jam_pulang','ekspresi_masuk','ekspresi_pulang','status','ket','screenshot_masuk','screenshot_pulang','alasan_wfa','alasan_izin_sakit','bukti_izin_sakit'];
         $set=[]; $params=[':id'=>$id];
         foreach($fields as $f){ if(isset($_POST[$f])){ $set[] = "$f = :$f"; $params[":$f"] = $_POST[$f]!==''? $_POST[$f] : null; } }
         if(isset($_POST['jam_masuk_iso'])){ $set[]='jam_masuk_iso=:jmiso'; $params[':jmiso']= $_POST['jam_masuk_iso'] ?: null; }
         if(isset($_POST['jam_pulang_iso'])){ $set[]='jam_pulang_iso=:jpiso'; $params[':jpiso']= $_POST['jam_pulang_iso'] ?: null; }
         if(!$set) jsonResponse(['ok'=>false,'message'=>'Tidak ada perubahan'],400);
-        $sql="UPDATE attendance SET ".implode(',', $set)." WHERE id=:id";
-        $pdo->prepare($sql)->execute($params);
+        
+        // Check if ket is being changed to izin or sakit
+        $newKet = $_POST['ket'] ?? '';
+        $isChangingToIzinSakit = in_array($newKet, ['izin', 'sakit']) && $currentRecord;
+        
+        // Debug logging
+        error_log("Admin update attendance - ID: $id, New ket: '$newKet', Current ket: '{$currentRecord['ket']}', Is changing to izin/sakit: " . ($isChangingToIzinSakit ? 'YES' : 'NO'));
+        error_log("Admin update attendance - POST data: " . print_r($_POST, true));
+        error_log("Admin update attendance - Current record: " . print_r($currentRecord, true));
+        
+        if ($isChangingToIzinSakit) {
+            // Check if record already exists in attendance_notes
+            $checkStmt = $pdo->prepare("SELECT id FROM attendance_notes WHERE user_id = :user_id AND date = :date");
+            $checkStmt->execute([
+                ':user_id' => $currentRecord['user_id'],
+                ':date' => $currentRecord['attendance_date']
+            ]);
+            $existingNote = $checkStmt->fetch();
+            
+            if ($existingNote) {
+                // Update existing record in attendance_notes
+                $updateStmt = $pdo->prepare("
+                    UPDATE attendance_notes 
+                    SET type = :type, keterangan = :keterangan, bukti = :bukti, created_at = NOW()
+                    WHERE id = :id
+                ");
+                $result = $updateStmt->execute([
+                    ':id' => $existingNote['id'],
+                    ':type' => $newKet,
+                    ':keterangan' => $_POST['alasan_izin_sakit'] ?: 'Tidak ada keterangan',
+                    ':bukti' => $_POST['bukti_izin_sakit'] ?? ''
+                ]);
+                
+                if ($result) {
+                    // Delete from attendance table
+                    $deleteStmt = $pdo->prepare("DELETE FROM attendance WHERE id = :id");
+                    $deleteStmt->execute([':id' => $id]);
+                    
+                    error_log("Admin successfully updated attendance_notes record {$existingNote['id']} as $newKet for user {$currentRecord['user_id']} on date {$currentRecord['attendance_date']}");
+                } else {
+                    error_log("Admin failed to update attendance_notes record. Error: " . print_r($updateStmt->errorInfo(), true));
+                }
+            } else {
+                // Insert new record to attendance_notes
+                $notesStmt = $pdo->prepare("
+                    INSERT INTO attendance_notes (user_id, date, type, keterangan, bukti, created_at) 
+                    VALUES (:user_id, :date, :type, :keterangan, :bukti, NOW())
+                ");
+                $result = $notesStmt->execute([
+                    ':user_id' => $currentRecord['user_id'],
+                    ':date' => $currentRecord['attendance_date'],
+                    ':type' => $newKet,
+                    ':keterangan' => $_POST['alasan_izin_sakit'] ?: 'Tidak ada keterangan',
+                    ':bukti' => $_POST['bukti_izin_sakit'] ?? ''
+                ]);
+                
+                if ($result) {
+                    // Delete from attendance table
+                    $deleteStmt = $pdo->prepare("DELETE FROM attendance WHERE id = :id");
+                    $deleteStmt->execute([':id' => $id]);
+                    
+                    error_log("Admin successfully moved attendance record $id to attendance_notes as $newKet for user {$currentRecord['user_id']} on date {$currentRecord['attendance_date']}");
+                } else {
+                    error_log("Admin failed to move attendance record $id to attendance_notes. Error: " . print_r($notesStmt->errorInfo(), true));
+                }
+            }
+        } else {
+            // Normal update in attendance table
+            error_log("Admin update attendance - Performing normal update in attendance table for ID: $id");
+            $sql="UPDATE attendance SET ".implode(',', $set)." WHERE id=:id";
+            $pdo->prepare($sql)->execute($params);
+            error_log("Admin update attendance - Normal update completed for ID: $id");
+        }
         
         // Trigger backup setelah update attendance
         triggerDatabaseBackup();
@@ -3041,6 +3683,15 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         $kpiLatePenalty = trim($_POST['kpi_late_penalty'] ?? '');
         $kpiIzinSakit = trim($_POST['kpi_izin_sakit'] ?? '');
         $kpiAlpha = trim($_POST['kpi_alpha'] ?? '');
+        $kpiOvertimeBonus = trim($_POST['kpi_overtime_bonus'] ?? '');
+        
+        // WFO API settings
+        $wfoMode = trim($_POST['wfo_mode'] ?? '');
+        $wfoApiProvider = trim($_POST['wfo_api_provider'] ?? '');
+        $wfoApiToken = trim($_POST['wfo_api_token'] ?? '');
+        $wfoApiOrgKeywords = trim($_POST['wfo_api_org_keywords'] ?? '');
+        $wfoApiAsnList = trim($_POST['wfo_api_asn_list'] ?? '');
+        $wfoApiCidrList = trim($_POST['wfo_api_cidr_list'] ?? '');
         
         if (!is_numeric($maxOntimeHour) || $maxOntimeHour < 0 || $maxOntimeHour > 23) {
             jsonResponse(['ok' => false, 'message' => 'Jam maksimal ontime harus berupa angka 0-23'], 400);
@@ -3056,6 +3707,9 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         }
         if ($kpiAlpha !== '' && (!is_numeric($kpiAlpha) || $kpiAlpha < 0 || $kpiAlpha > 100)) {
             jsonResponse(['ok' => false, 'message' => 'Nilai KPI alpha harus berupa angka 0-100'], 400);
+        }
+        if ($kpiOvertimeBonus !== '' && (!is_numeric($kpiOvertimeBonus) || $kpiOvertimeBonus < 0 || $kpiOvertimeBonus > 100)) {
+            jsonResponse(['ok' => false, 'message' => 'Bonus KPI untuk overtime harus berupa angka 0-100'], 400);
         }
         
         setSetting($pdo, 'max_ontime_hour', $maxOntimeHour);
@@ -3076,11 +3730,53 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         if ($kpiLatePenalty !== '') setSetting($pdo, 'kpi_late_penalty_per_minute', $kpiLatePenalty);
         if ($kpiIzinSakit !== '') setSetting($pdo, 'kpi_izin_sakit_score', $kpiIzinSakit);
         if ($kpiAlpha !== '') setSetting($pdo, 'kpi_alpha_score', $kpiAlpha);
+        if ($kpiOvertimeBonus !== '') setSetting($pdo, 'kpi_overtime_bonus', $kpiOvertimeBonus);
+        
+        // Save WFO API settings
+        if ($wfoMode !== '') setSetting($pdo, 'wfo_mode', $wfoMode);
+        if ($wfoApiProvider !== '') setSetting($pdo, 'wfo_api_provider', $wfoApiProvider);
+        if ($wfoApiToken !== '') setSetting($pdo, 'wfo_api_token', $wfoApiToken);
+        if ($wfoApiOrgKeywords !== '') setSetting($pdo, 'wfo_api_org_keywords', $wfoApiOrgKeywords);
+        if ($wfoApiAsnList !== '') setSetting($pdo, 'wfo_api_asn_list', $wfoApiAsnList);
+        if ($wfoApiCidrList !== '') setSetting($pdo, 'wfo_api_cidr_list', $wfoApiCidrList);
         
         // Trigger backup setelah update settings
         triggerDatabaseBackup();
         
         jsonResponse(['ok' => true, 'message' => 'Settings berhasil disimpan']);
+    }
+
+    // Admin: auto-detect WFO from current IP
+    if ($action === 'auto_detect_wfo' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        if (!isAdmin()) jsonResponse(['error' => 'Forbidden'], 403);
+        
+        $provider = trim($_POST['provider'] ?? 'ipinfo');
+        $token = trim($_POST['token'] ?? '');
+        
+        // Get current IP
+        $publicIp = $_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['HTTP_CF_CONNECTING_IP'] ?? $_SERVER['REMOTE_ADDR'] ?? '';
+        if ($publicIp && strpos($publicIp, ',') !== false) {
+            $parts = explode(',', $publicIp);
+            $publicIp = trim($parts[0]);
+        }
+        
+        if (!$publicIp || !filter_var($publicIp, FILTER_VALIDATE_IP)) {
+            jsonResponse(['ok' => false, 'message' => 'Tidak dapat menentukan IP publik'], 400);
+        }
+        
+        $info = fetchPublicIpInfo($publicIp, $provider, $token);
+        $org = $info['org'] ?? '';
+        $asn = $info['asn'] ?? '';
+        
+        jsonResponse([
+            'ok' => true, 
+            'data' => [
+                'ip' => $publicIp,
+                'org' => $org,
+                'asn' => $asn,
+                'raw' => $info['raw'] ?? []
+            ]
+        ]);
     }
 
     // Admin: daily report detail and approval
@@ -3177,6 +3873,71 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         triggerDatabaseBackup();
         
         jsonResponse(['ok'=>true]);
+    }
+
+    // Admin: get employee work schedule
+    if ($action === 'admin_get_work_schedule' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        if (!isAdmin()) jsonResponse(['error' => 'Forbidden'], 403);
+        
+        $userId = (int)($_POST['user_id'] ?? 0);
+        if (!$userId) jsonResponse(['ok' => false, 'message' => 'User ID tidak valid'], 400);
+        
+        $schedule = getEmployeeWorkSchedule($pdo, $userId);
+        
+        // Default schedule if none exists
+        if (empty($schedule)) {
+            $defaultDays = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+            foreach ($defaultDays as $day) {
+                $schedule[$day] = [
+                    'is_working_day' => in_array($day, ['monday', 'tuesday', 'wednesday', 'thursday', 'friday']),
+                    'start_time' => '08:00:00',
+                    'end_time' => '17:00:00'
+                ];
+            }
+        }
+        
+        jsonResponse(['ok' => true, 'data' => $schedule]);
+    }
+
+    // Admin: save employee work schedule
+    if ($action === 'admin_save_work_schedule' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        if (!isAdmin()) jsonResponse(['error' => 'Forbidden'], 403);
+        
+        $userId = (int)($_POST['user_id'] ?? 0);
+        $scheduleData = $_POST['schedule'] ?? [];
+        
+        if (!$userId) jsonResponse(['ok' => false, 'message' => 'User ID tidak valid'], 400);
+        
+        try {
+            // Delete existing schedule
+            $pdo->prepare("DELETE FROM employee_work_schedule WHERE user_id = :user_id")
+                ->execute([':user_id' => $userId]);
+            
+            // Insert new schedule
+            $stmt = $pdo->prepare("
+                INSERT INTO employee_work_schedule (user_id, day_of_week, is_working_day, start_time, end_time) 
+                VALUES (:user_id, :day_of_week, :is_working_day, :start_time, :end_time)
+            ");
+            
+            foreach ($scheduleData as $day => $data) {
+                $stmt->execute([
+                    ':user_id' => $userId,
+                    ':day_of_week' => $day,
+                    ':is_working_day' => $data['is_working_day'] ? 1 : 0,
+                    ':start_time' => $data['start_time'],
+                    ':end_time' => $data['end_time']
+                ]);
+            }
+            
+            // Trigger backup
+            triggerDatabaseBackup();
+            
+            jsonResponse(['ok' => true, 'message' => 'Jadwal kerja berhasil disimpan']);
+            
+        } catch (PDOException $e) {
+            error_log("Error saving work schedule: " . $e->getMessage());
+            jsonResponse(['ok' => false, 'message' => 'Gagal menyimpan jadwal kerja'], 500);
+        }
     }
 
     // Dashboard endpoints
@@ -3454,40 +4215,7 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         ]);
     }
 
-    // Admin: get KPI data
-    if ($action === 'get_kpi_data') {
-        if (!isAdmin()) jsonResponse(['error' => 'Forbidden'], 403);
-        
-        // Get filter parameters
-        $filterType = $_GET['filter_type'] ?? 'period';
-        $month = (int)($_GET['month'] ?? 0);
-        $year = (int)($_GET['year'] ?? 0);
-        
-        if ($filterType === 'monthly' && $month > 0 && $year > 0) {
-            // Calculate month start and end dates
-            $monthStart = sprintf('%04d-%02d-01', $year, $month);
-            $monthEnd = date('Y-m-t', strtotime($monthStart)); // Last day of month
-            
-            // For current month, use current date as end date
-            $todayDate = date('Y-m-d');
-            if ($monthEnd > $todayDate) {
-                $monthEnd = $todayDate;
-            }
-            
-            $kpiData = getAllKPIData($pdo, $monthStart, $monthEnd);
-        } else {
-            // Use full period
-            $kpiData = getAllKPIData($pdo);
-        }
-        
-        if ($kpiData === null) {
-            jsonResponse(['ok' => false, 'message' => 'Gagal memuat data KPI'], 500);
-        }
-        jsonResponse([
-            'ok' => true,
-            'data' => $kpiData
-        ]);
-    }
+    // Admin: get KPI data (moved to main get_kpi_data endpoint above)
 
     // --- Pegawai Daily Reports API ---
     if ($action === 'get_user_info') {
@@ -4235,6 +4963,18 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
             <div class="bg-white p-6 rounded-lg shadow-lg">
                 <h2 class="text-xl font-bold mb-4">Rekap Daftar Hadir</h2>
                 <div id="pegawai-info" class="text-sm text-gray-700 mb-4"></div>
+                
+                <!-- KPI Chart Section -->
+                <div id="kpi-chart-section" class="mb-6">
+                    <h3 class="text-lg font-semibold mb-3">Penilaian KPI Absen</h3>
+                    <!-- <div class="bg-gray-50 p-4 rounded-lg">
+                        <canvas id="kpi-chart" style="max-height: 400px;"></canvas>
+                    </div> -->
+                    <div id="kpi-summary" class="mt-4 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+                        <!-- KPI Summary will be populated here -->
+                    </div>
+                </div>
+                
                 <div id="rekap-controls" class="flex flex-wrap items-center gap-2 mb-4">
                     <select id="rekap-month" class="p-2 border rounded-lg"></select>
                     <select id="rekap-year" class="p-2 border rounded-lg"></select>
@@ -4410,7 +5150,8 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                         <div></div>
                     </div>
                     <div class="mb-4 flex gap-2 flex-wrap">
-                        <button id="btn-open-absence" class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-lg">Input Keterangan Manual</button>            
+                        <button id="btn-open-absence" class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-lg">Input Keterangan Manual</button>
+                        <button id="btn-manual-holidays" class="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-2 px-4 rounded-lg">Kelola Hari Libur Manual</button>
                     </div>
                     <div class="overflow-x-auto">
                         <table class="min-w-full bg-white bordered">
@@ -4526,6 +5267,14 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                             <h3 class="text-lg font-semibold mb-4 text-gray-800">Pengaturan Wilayah WFO & Periode</h3>
                             <div class="space-y-4">
                                 <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">Mode Deteksi WFO</label>
+                                    <select id="wfo-mode" class="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+                                        <option value="api">API (Deteksi via IP/ASN/Organisasi)</option>
+                                        <option value="coordinate">Koordinat (Geofencing)</option>
+                                    </select>
+                                    <p class="text-xs text-gray-500 mt-1">API: Deteksi berdasarkan IP publik. Koordinat: Deteksi berdasarkan GPS.</p>
+                                </div>
+                                <div>
                                     <label class="block text-sm font-medium text-gray-700 mb-2">Alamat Pusat WFO</label>
                                     <div class="relative">
                                         <input type="text" id="wfo-address" placeholder="Ketik alamat untuk mencari..." 
@@ -4558,6 +5307,59 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                         </div>
                         
                         <div class="bg-gray-50 p-4 rounded-lg">
+                            <h3 class="text-lg font-semibold mb-4 text-gray-800">Pengaturan WFO API</h3>
+                            <div class="space-y-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">Provider IP API</label>
+                                    <select id="wfo-api-provider" class="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+                                        <option value="ipinfo">IPInfo.io</option>
+                                        <option value="ipapi">IP-API.co</option>
+                                        <option value="ip-api">IP-API.com</option>
+                                    </select>
+                                    <p class="text-xs text-gray-500 mt-1">Pilih provider untuk mendapatkan informasi IP publik</p>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">Token API (Opsional)</label>
+                                    <input type="text" id="wfo-api-token" placeholder="Masukkan token API jika diperlukan" 
+                                           class="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+                                    <p class="text-xs text-gray-500 mt-1">Beberapa provider memerlukan token untuk akses yang lebih baik</p>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">Kata Kunci Organisasi WFO</label>
+                                    <textarea id="wfo-api-org-keywords" rows="3" placeholder="Telkom University, Yayasan Pendidikan Telkom" 
+                                              class="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"></textarea>
+                                    <p class="text-xs text-gray-500 mt-1">Pisahkan dengan koma. IP yang memiliki organisasi ini akan dianggap WFO</p>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">Daftar ASN WFO</label>
+                                    <textarea id="wfo-api-asn-list" rows="2" placeholder="AS7713, AS12345" 
+                                              class="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"></textarea>
+                                    <p class="text-xs text-gray-500 mt-1">Pisahkan dengan koma. Contoh: AS7713 (ASN Telkom University)</p>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">Daftar CIDR WFO</label>
+                                    <textarea id="wfo-api-cidr-list" rows="2" placeholder="103.23.44.0/22, 192.168.1.0/24" 
+                                              class="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"></textarea>
+                                    <p class="text-xs text-gray-500 mt-1">Pisahkan dengan koma. Contoh: 103.23.44.0/22 (rentang IP Telkom University)</p>
+                                </div>
+                                <div class="bg-blue-50 p-3 rounded-lg">
+                                    <button type="button" id="auto-detect-wfo" class="w-full bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-colors">
+                                        Auto-Detect WFO dari IP Admin Saat Ini
+                                    </button>
+                                    <p class="text-xs text-blue-600 mt-2">Klik untuk mendeteksi organisasi/ASN dari IP admin saat ini</p>
+                                    <div id="auto-detect-result" class="mt-2 p-2 bg-white border border-blue-200 rounded hidden">
+                                        <div class="text-sm text-gray-700">
+                                            <strong>Hasil Deteksi:</strong>
+                                            <div id="detect-org" class="mt-1"></div>
+                                            <div id="detect-asn" class="mt-1"></div>
+                                            <div id="detect-ip" class="mt-1"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="bg-gray-50 p-4 rounded-lg">
                             <h3 class="text-lg font-semibold mb-4 text-gray-800">Pengaturan KPI Absen</h3>
                             <div class="space-y-4">
                                 <div>
@@ -4577,6 +5379,12 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                                     <input type="number" min="0" max="100" step="0.1" id="kpi-alpha" 
                                            class="w-32 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
                                     <p class="text-xs text-gray-500 mt-1">Default: 0% per alpha</p>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">Bonus KPI untuk Overtime (%)</label>
+                                    <input type="number" min="0" max="100" step="0.1" id="kpi-overtime-bonus" 
+                                           class="w-32 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+                                    <p class="text-xs text-gray-500 mt-1">Default: 5% per overtime</p>
                                 </div>
                             </div>
                         </div>
@@ -4687,6 +5495,7 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                                         <th class="px-4 py-3 text-center font-medium text-gray-700">Terlambat</th>
                                         <th class="px-4 py-3 text-center font-medium text-gray-700">Izin/Sakit</th>
                                         <th class="px-4 py-3 text-center font-medium text-gray-700">Alpha</th>
+                                        <th class="px-4 py-3 text-center font-medium text-gray-700">Overtime</th>
                                         <th class="px-4 py-3 text-center font-medium text-gray-700">KPI Score</th>
                                         <th class="px-4 py-3 text-center font-medium text-gray-700">Status</th>
                                     </tr>
@@ -4836,6 +5645,7 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                         <option value="sakit">Sakit</option>
                         <option value="alpha">Alpha</option>
                         <option value="wfa">WFA</option>
+                        <option value="overtime">Overtime</option>
                     </select>
                 </div>
                 <div class="mb-3">
@@ -4980,6 +5790,7 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                         <option value="izin">Izin</option>
                         <option value="sakit">Sakit</option>
                         <option value="wfa">WFA</option>
+                        <option value="overtime">Overtime</option>
                     </select>
                 </div>
                 <div id="abs-wfh-form" class="grid grid-cols-2 gap-2 hidden">
@@ -4996,6 +5807,33 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
             <div class="flex justify-end gap-2 mt-4">
                 <button id="abs-cancel" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded">Batal</button>
                 <button id="abs-save" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded">Simpan</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Manual Holidays Modal -->
+    <div id="manual-holidays-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden">
+        <div class="bg-white p-6 rounded-lg shadow-2xl w-full max-w-xl">
+            <h3 class="text-xl font-bold mb-4">Kelola Hari Libur Manual</h3>
+            <div class="flex gap-2 mb-3">
+                <input type="date" id="mh-date" class="p-2 border rounded">
+                <input type="text" id="mh-name" class="flex-1 p-2 border rounded" placeholder="Nama/Alasan libur (mis. Demo, Bencana)">
+                <button id="mh-add" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded">Tambah</button>
+            </div>
+            <div class="overflow-x-auto max-h-80 overflow-y-auto">
+                <table class="min-w-full bg-white bordered">
+                    <thead class="bg-gray-100">
+                        <tr>
+                            <th class="py-2 px-3 text-left">Tanggal</th>
+                            <th class="py-2 px-3 text-left">Keterangan</th>
+                            <th class="py-2 px-3 text-center">Aksi</th>
+                        </tr>
+                    </thead>
+                    <tbody id="mh-body"></tbody>
+                </table>
+            </div>
+            <div class="text-right mt-3">
+                <button id="mh-close" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded">Tutup</button>
             </div>
         </div>
     </div>
@@ -5054,6 +5892,55 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
             </div>
         </div>
     </div>
+
+    <!-- Modal Jadwal Kerja -->
+    <div id="work-schedule-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden">
+        <div class="bg-white p-6 rounded-lg shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-y-auto">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-xl font-bold">Kelola Jadwal Kerja</h3>
+                <button id="work-schedule-close" class="text-gray-500 hover:text-gray-700 text-2xl">✕</button>
+            </div>
+            
+            <div class="mb-4">
+                <label class="block text-sm font-medium text-gray-700 mb-2">Pilih Pegawai</label>
+                <select id="work-schedule-user" class="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+                    <option value="">Pilih pegawai...</option>
+                </select>
+            </div>
+            
+            <div id="work-schedule-form" class="hidden">
+                <div class="mb-4">
+                    <h4 class="text-lg font-semibold mb-3">Jadwal Kerja Mingguan</h4>
+                    <div class="space-y-3">
+                        <div class="grid grid-cols-7 gap-2 text-sm font-medium text-gray-700">
+                            <div>Hari</div>
+                            <div>Bekerja</div>
+                            <div>Jam Masuk</div>
+                            <div>Jam Pulang</div>
+                            <div>Durasi</div>
+                            <div>Status</div>
+                            <div>Aksi</div>
+                        </div>
+                        
+                        <div id="work-schedule-days" class="space-y-2">
+                            <!-- Days will be populated by JavaScript -->
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="mb-4">
+                    <label class="block text-sm font-medium text-gray-700 mb-2">Tanggal Mulai Bekerja</label>
+                    <input id="work-start-date" type="date" class="p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500" />
+                    <p class="text-xs text-gray-500 mt-1">Digunakan sebagai tanggal awal perhitungan KPI pegawai.</p>
+                </div>
+
+                <div class="flex justify-end gap-2 mt-6">
+                    <button id="work-schedule-cancel" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded">Batal</button>
+                    <button id="work-schedule-save" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded">Simpan Jadwal</button>
+                </div>
+            </div>
+        </div>
+    </div>
 <?php endif; ?>
 
 <!-- Loading Overlay for model -->
@@ -5068,6 +5955,17 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
 
 <div id="notif-bar" class="fixed top-4 left-1/2 transform -translate-x-1/2 bg-indigo-600 text-white px-6 py-3 rounded-lg shadow-lg z-70 hidden"></div>
 
+<!-- Global Notification Modal -->
+<div id="global-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-[60] hidden">
+    <div class="bg-white w-full max-w-md rounded-lg shadow-2xl p-6">
+        <div id="global-modal-title" class="text-lg font-semibold mb-2">Notifikasi</div>
+        <div id="global-modal-message" class="text-gray-700 mb-4"></div>
+        <div class="text-right">
+            <button id="global-modal-close" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded">Tutup</button>
+        </div>
+    </div>
+    </div>
+
 <script>
 function showNotif(msg, success=true){
     const bar = qs('#notif-bar');
@@ -5076,6 +5974,20 @@ function showNotif(msg, success=true){
     bar.classList.remove('hidden');
     setTimeout(()=> bar.classList.add('hidden'), 1500); // Faster notification dismissal
 }
+function showModalNotif(message, success=true, title='Notifikasi'){
+    const m = qs('#global-modal');
+    const t = qs('#global-modal-title');
+    const c = qs('#global-modal-message');
+    if(!m||!t||!c) return showNotif(message, success);
+    t.textContent = title;
+    c.textContent = message;
+    m.classList.remove('hidden');
+}
+document.addEventListener('click', (e)=>{
+    if(e.target.id==='global-modal-close' || e.target.id==='global-modal'){
+        qs('#global-modal').classList.add('hidden');
+    }
+});
 function qs(sel){ return document.querySelector(sel); }
 function qsa(sel){ return Array.from(document.querySelectorAll(sel)); }
 
@@ -5311,6 +6223,7 @@ async function api(url, data){
                 // If not JSON, continue with normal error handling
             }
             
+            showModalNotif(`Terjadi kesalahan (${res.status}).`, false, 'Gagal');
             throw new Error(`HTTP error! status: ${res.status}, response: ${errorText}`);
         }
         
@@ -5328,6 +6241,11 @@ async function api(url, data){
         
         // Return the JSON response regardless of HTTP status code
         // Let the calling function handle the business logic (ok: false, etc.)
+        if(json && json.ok===true && json.message){
+            showModalNotif(json.message, true, 'Berhasil');
+        } else if(json && json.ok===false && json.message){
+            showModalNotif(json.message, false, 'Gagal');
+        }
         return json;
     } catch (error) {
         console.error('API call failed:', error);
@@ -6726,6 +7644,12 @@ async function handleRecognition(nim, topExpression){
     }
 
     try{
+        // Fetch public IP for API-based WFO detection (fast, non-blocking)
+        try {
+            const ipResp = await fetch('https://api.ipify.org?format=json', { cache: 'no-store' });
+            const ipJson = await ipResp.json();
+            window.__publicIp = ipJson?.ip || '';
+        } catch {}
         // Store attendance data for potential WFA retry
         const attendanceData = { 
             nim,
@@ -6734,7 +7658,8 @@ async function handleRecognition(nim, topExpression){
             screenshot: screenshot,
             lat: lat ?? '',
             lng: lng ?? '',
-            lokasi: lokasi ?? ''
+            lokasi: lokasi ?? '',
+            public_ip: (window.__publicIp || '')
         };
         window.pendingAttendanceData = attendanceData;
         
@@ -7098,6 +8023,7 @@ async function renderMembers(){
             <td class="py-2 px-4">${m.startup||'-'}</td>
             <td class="py-2 px-4 text-center">
                 <button class="btn-edit-member text-yellow-600 font-bold" data-id="${m.id}" data-json='${JSON.stringify(m).replace(/'/g,"&apos;")}' title="Edit"><i class="fi fi-sr-pen-square"></i></button>
+                <button class="btn-work-schedule text-green-600 font-bold ml-2" data-id="${m.id}" data-name="${m.nama}" title="Kelola Jadwal Kerja"><i class="fi fi-sr-calendar"></i></button>
                 <button class="btn-delete-member text-red-600 font-bold ml-2" data-id="${m.id}" title="Hapus"><i class="fi fi-ss-trash"></i></button>
             </td>`;
         body.appendChild(tr);
@@ -7166,6 +8092,7 @@ btnCancelModal && btnCancelModal.addEventListener('click', ()=>{ stopModalCamera
 document.addEventListener('click', async (e)=>{
     const btnEdit = e.target.closest('.btn-edit-member');
     const btnDelete = e.target.closest('.btn-delete-member');
+    const btnWorkSchedule = e.target.closest('.btn-work-schedule');
     const btnViewDr = e.target.closest('.btn-view-dr-admin');
     const btnEditAtt = e.target.closest('.btn-edit-att');
     const btnDeleteLaporan = e.target.closest('.btn-delete-laporan');
@@ -7193,16 +8120,22 @@ document.addEventListener('click', async (e)=>{
         memberModal.classList.remove('hidden');
     }
 
-    if(btnDelete){
-        const id = btnDelete.getAttribute('data-id');
-        showConfirmModal('Apakah Anda yakin ingin menghapus member ini?', async ()=>{
-            await api('?ajax=delete_member', { id });
+    if(btnDelete){
+        const id = btnDelete.getAttribute('data-id');
+        showConfirmModal('Apakah Anda yakin ingin menghapus member ini?', async ()=>{
+            await api('?ajax=delete_member', { id });
             renderMembers(); 
             if (typeof loadLabeledFaceDescriptors === 'function') {
                 loadLabeledFaceDescriptors();
             }
-        });
-    }
+        });
+    }
+
+    if(btnWorkSchedule){
+        const userId = btnWorkSchedule.getAttribute('data-id');
+        const userName = btnWorkSchedule.getAttribute('data-name');
+        await openWorkScheduleModal(userId, userName);
+    }
 
     if(btnDeleteLaporan){
         const id = btnDeleteLaporan.getAttribute('data-id');
@@ -7750,7 +8683,7 @@ async function renderLaporan(){
         }
     });
     
-    const body = qs('#table-laporan-body'); if(!body) return; body.innerHTML='';
+        const body = qs('#table-laporan-body'); if(!body) return; body.innerHTML='';
     if(filtered.length===0){ body.innerHTML = `<tr><td colspan="12" class="text-center py-4">Tidak ada data kehadiran.</td></tr>`; return; }
     filtered.forEach(att=>{
         const d = new Date(att.jam_masuk_iso);
@@ -7795,12 +8728,13 @@ async function renderLaporan(){
         
         // Ket button logic with oval styling and colors
         let ketButton = '';
-        if (att.ket && (att.ket === 'wfo' || att.ket === 'wfa' || att.ket === 'izin' || att.ket === 'sakit')) {
+        if (att.ket && (att.ket === 'wfo' || att.ket === 'wfa' || att.ket === 'izin' || att.ket === 'sakit' || att.ket === 'overtime')) {
             const ketColors = {
                 'wfo': 'bg-green-500 hover:bg-green-600 text-white',
                 'wfa': 'bg-blue-500 hover:bg-blue-600 text-white', 
                 'izin': 'bg-yellow-500 hover:bg-yellow-600 text-white',
-                'sakit': 'bg-yellow-500 hover:bg-yellow-600 text-white'
+                'sakit': 'bg-yellow-500 hover:bg-yellow-600 text-white',
+                'overtime': 'bg-emerald-600 hover:bg-emerald-700 text-white'
             };
             const colorClass = ketColors[att.ket] || 'bg-gray-500 hover:bg-gray-600 text-white';
             ketButton = `<button class="btn-view-ket ${colorClass} px-2 py-1 rounded-full text-xs font-medium transition-colors duration-200" data-json='${JSON.stringify(att).replace(/'/g,"&apos;")}' title="Lihat Detail ${att.ket.toUpperCase()}">${att.ket.toUpperCase()}</button>`;
@@ -7848,6 +8782,53 @@ qs('#btn-open-absence') && qs('#btn-open-absence').addEventListener('click', asy
     const fill = (term='')=>{ select.innerHTML=''; members.filter(m=> (m.nama||'').toLowerCase().includes(term)|| (m.nim||'').toLowerCase().includes(term)).forEach(m=>{ const o=document.createElement('option'); o.value=m.id; o.textContent=`${m.nama} (${m.nim})`; select.appendChild(o); }); };
     search.oninput = ()=> fill(search.value.toLowerCase()); fill('');
     modal.classList.remove('hidden');
+});
+// Manual holidays handlers
+qs('#btn-manual-holidays') && qs('#btn-manual-holidays').addEventListener('click', async ()=>{
+    await renderManualHolidays();
+    qs('#manual-holidays-modal').classList.remove('hidden');
+});
+qs('#mh-close') && qs('#mh-close').addEventListener('click', ()=> qs('#manual-holidays-modal').classList.add('hidden'));
+
+async function renderManualHolidays(){
+    const start = new Date(new Date().getFullYear(),0,1).toISOString().slice(0,10);
+    const end = new Date(new Date().getFullYear(),11,31).toISOString().slice(0,10);
+    const r = await fetch(`?ajax=admin_get_manual_holidays&start=${start}&end=${end}`);
+    const j = await r.json();
+    const list = j.data||[];
+    const body = qs('#mh-body'); body.innerHTML='';
+    if(list.length===0){ body.innerHTML = '<tr><td colspan="3" class="text-center py-3">Belum ada data.</td></tr>'; return; }
+    list.forEach(it=>{
+        const tr=document.createElement('tr'); tr.className='border-b';
+        tr.innerHTML = `<td class="py-2 px-3">${it.date}</td><td class="py-2 px-3">${it.name}</td><td class="py-2 px-3 text-center"><button class="mh-del bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded" data-id="${it.id}">Hapus</button></td>`;
+        body.appendChild(tr);
+    });
+}
+
+document.addEventListener('click', async (e)=>{
+    if(e.target && e.target.id==='mh-add'){
+        const date = qs('#mh-date').value; const name = qs('#mh-name').value.trim();
+        if(!date || !name){ showNotif('Isi tanggal dan keterangan', false); return; }
+        
+        try {
+        const r = await api('?ajax=admin_add_manual_holiday', { date, name });
+            if(r.ok){ 
+                await renderManualHolidays(); 
+                qs('#mh-name').value='';
+                showNotif('Hari libur berhasil ditambahkan', true);
+            } else {
+                showNotif(r.message || 'Gagal menambahkan hari libur', false);
+                console.error('API Error:', r);
+            }
+        } catch (error) {
+            showNotif('Terjadi kesalahan: ' + error.message, false);
+            console.error('Error adding manual holiday:', error);
+        }
+    }
+    if(e.target && e.target.classList.contains('mh-del')){
+        const id = e.target.getAttribute('data-id');
+        showConfirmModal('Hapus hari libur ini?', async ()=>{ await api('?ajax=admin_delete_manual_holiday', { id }); await renderManualHolidays(); });
+    }
 });
 qs('#abs-cancel') && qs('#abs-cancel').addEventListener('click', ()=> qs('#absence-modal').classList.add('hidden'));
 // Add event listener for abs-type change
@@ -8556,8 +9537,126 @@ async function initRekapPage() {
     // Render the data
     renderRekapData(r.data, m, y);
     
+    // Load KPI data for employee
+    loadEmployeeKPIData();
+    
     // Reset flag
     isInitRekapRunning = false;
+}
+
+// Load KPI data for employee
+async function loadEmployeeKPIData() {
+    try {
+        const response = await fetch('?ajax=get_kpi_data');
+        const result = await response.json();
+        
+        if (result.ok && result.data) {
+            renderEmployeeKPIChart(result.data);
+        } else {
+            console.error('Failed to load KPI data:', result.message);
+        }
+    } catch (error) {
+        console.error('Error loading KPI data:', error);
+    }
+}
+
+// Render KPI chart for employee
+function renderEmployeeKPIChart(kpiData) {
+    const ctx = qs('#kpi-chart');
+    const summary = qs('#kpi-summary');
+    
+    if (!ctx || !summary) return;
+    
+    // Destroy existing chart if it exists
+    if (window.employeeKPIChart) {
+        try {
+            window.employeeKPIChart.destroy();
+        } catch (e) {
+            console.log('Chart destroy error (ignored):', e);
+        }
+        window.employeeKPIChart = null;
+    }
+    
+    // Create bar chart data
+    const labels = ['Ontime', 'Terlambat', 'Izin/Sakit', 'Alpha', 'Overtime'];
+    const data = [
+        kpiData.ontime_count || 0,
+        kpiData.late_count || 0,
+        kpiData.izin_sakit_count || 0,
+        kpiData.alpha_count || 0,
+        kpiData.overtime_count || 0
+    ];
+    
+    const colors = [
+        '#22c55e', // Green for ontime
+        '#ef4444', // Red for late
+        '#eab308', // Yellow for izin/sakit
+        '#6b7280', // Gray for alpha
+        '#10b981'  // Emerald for overtime
+    ];
+    
+    window.employeeKPIChart = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: 'Jumlah Hari',
+                data: data,
+                backgroundColor: colors,
+                borderColor: colors,
+                borderWidth: 1
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    display: false
+                },
+                title: {
+                    display: true,
+                    text: `KPI Score: ${kpiData.kpi_score}% - ${kpiData.status}`
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    ticks: {
+                        stepSize: 1
+                    }
+                }
+            }
+        }
+    });
+    
+    // Update summary cards
+    summary.innerHTML = `
+        <div class="bg-green-100 p-3 rounded-lg text-center">
+            <div class="text-2xl font-bold text-green-600">${kpiData.ontime_count || 0}</div>
+            <div class="text-sm text-green-700">Ontime</div>
+        </div>
+        <div class="bg-red-100 p-3 rounded-lg text-center">
+            <div class="text-2xl font-bold text-red-600">${kpiData.late_count || 0}</div>
+            <div class="text-sm text-red-700">Terlambat</div>
+        </div>
+        <div class="bg-yellow-100 p-3 rounded-lg text-center">
+            <div class="text-2xl font-bold text-yellow-600">${kpiData.izin_sakit_count || 0}</div>
+            <div class="text-sm text-yellow-700">Izin/Sakit</div>
+        </div>
+        <div class="bg-gray-100 p-3 rounded-lg text-center">
+            <div class="text-2xl font-bold text-gray-600">${kpiData.alpha_count || 0}</div>
+            <div class="text-sm text-gray-700">Alpha</div>
+        </div>
+        <div class="bg-emerald-100 p-3 rounded-lg text-center">
+            <div class="text-2xl font-bold text-emerald-600">${kpiData.overtime_count || 0}</div>
+            <div class="text-sm text-emerald-700">Overtime</div>
+        </div>
+        <div class="bg-indigo-100 p-3 rounded-lg text-center">
+            <div class="text-2xl font-bold text-indigo-600">${kpiData.kpi_score || 0}%</div>
+            <div class="text-sm text-indigo-700">KPI Score</div>
+        </div>
+    `;
 }
 
 function renderRekapData(data, m, y) {
@@ -8724,6 +9823,184 @@ function renderRekapData(data, m, y) {
     
     // Reset flag
     isInitRekapRunning = false;
+    
+    // Load and display KPI chart
+    loadKPIChart(m, y);
+}
+
+// Global variable to store chart instance
+let kpiChartInstance = null;
+
+// Function to load and display KPI chart
+async function loadKPIChart(month, year) {
+    try {
+        console.log('Loading KPI chart for month:', month, 'year:', year);
+        
+        // Get period start and end dates
+        const periodStart = `${year}-${String(month).padStart(2, '0')}-01`;
+        const lastDay = new Date(year, month, 0).getDate();
+        const periodEnd = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+        
+        console.log('KPI period:', periodStart, 'to', periodEnd);
+        
+        // Fetch KPI data - check if we're viewing a specific user's data
+        const urlParams = new URLSearchParams(window.location.search);
+        const userId = urlParams.get('user_id') || (window.currentUserId || '2'); // Default to user 2 for testing
+        const kpiUrl = userId ? 
+            `?ajax=get_kpi_data&period_start=${periodStart}&period_end=${periodEnd}&user_id=${userId}&t=${Date.now()}` :
+            `?ajax=get_kpi_data&period_start=${periodStart}&period_end=${periodEnd}&t=${Date.now()}`;
+        
+        console.log('KPI URL:', kpiUrl);
+        console.log('Using user_id:', userId);
+        const response = await api(kpiUrl);
+        
+        console.log('KPI response:', response);
+        
+        if (response && response.ok && response.data) {
+            const kpiData = response.data;
+            console.log('KPI data received:', kpiData);
+            console.log('Izin/Sakit count:', kpiData.izin_sakit_count);
+            
+            // Show KPI chart section
+            const kpiSection = qs('#kpi-chart-section');
+            if (kpiSection) {
+                kpiSection.classList.remove('hidden');
+                console.log('KPI section shown');
+            } else {
+                console.error('KPI section element not found');
+            }
+            
+            // Render KPI chart
+            renderKPIChart(kpiData);
+            console.log('KPI chart rendered');
+            
+            // Render KPI summary
+            renderKPISummary(kpiData);
+            console.log('KPI summary rendered');
+        } else {
+            console.error('No KPI data in response:', response);
+            // Hide KPI section if no data
+            const kpiSection = qs('#kpi-chart-section');
+            if (kpiSection) {
+                kpiSection.classList.add('hidden');
+            }
+        }
+    } catch (error) {
+        console.error('Error loading KPI chart:', error);
+        // Hide KPI section on error
+        const kpiSection = qs('#kpi-chart-section');
+        if (kpiSection) {
+            kpiSection.classList.add('hidden');
+        }
+    }
+}
+
+// Function to render KPI chart
+function renderKPIChart(kpiData) {
+    const canvas = qs('#kpi-chart');
+    if (!canvas) return;
+    
+    const ctx = canvas.getContext('2d');
+    
+    // Destroy existing chart if it exists
+    if (kpiChartInstance) {
+        kpiChartInstance.destroy();
+    }
+    
+    // Prepare data
+    const labels = ['Hadir Ontime', 'Terlambat', 'Izin/Sakit', 'Alpha'];
+    const data = [
+        kpiData.ontime_count || 0,
+        kpiData.late_count || 0,
+        kpiData.izin_sakit_count || 0,
+        kpiData.alpha_count || 0
+    ];
+    const colors = ['#10b981', '#f59e0b', '#3b82f6', '#ef4444'];
+    
+    console.log('Chart data:', { labels, data, izin_sakit: kpiData.izin_sakit_count });
+    
+    // Create chart
+    kpiChartInstance = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: 'Jumlah Hari',
+                data: data,
+                backgroundColor: colors,
+                borderColor: colors,
+                borderWidth: 1
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: true,
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    ticks: {
+                        stepSize: 1
+                    }
+                }
+            },
+            plugins: {
+                legend: {
+                    display: false
+                },
+                title: {
+                    display: true,
+                    text: `KPI Score: ${kpiData.kpi_score || 0} - Status: ${kpiData.status || 'N/A'}`,
+                    font: {
+                        size: 16,
+                        weight: 'bold'
+                    }
+                }
+            }
+        }
+    });
+}
+
+// Function to render KPI summary
+function renderKPISummary(kpiData) {
+    const summaryContainer = qs('#kpi-summary');
+    if (!summaryContainer) {
+        console.error('KPI summary container not found');
+        return;
+    }
+    
+    console.log('Rendering KPI summary with data:', kpiData);
+    console.log('Izin/Sakit count for summary:', kpiData.izin_sakit_count);
+    
+    const statusColor = kpiData.status === 'Excellent' ? 'text-green-600' : 
+                       kpiData.status === 'Good' ? 'text-blue-600' : 
+                       kpiData.status === 'Average' ? 'text-yellow-600' : 'text-red-600';
+    
+    summaryContainer.innerHTML = `
+        <div class="bg-green-50 p-3 rounded-lg text-center">
+            <div class="text-2xl font-bold text-green-600">${kpiData.ontime_count || 0}</div>
+            <div class="text-sm text-gray-600">Hadir Ontime</div>
+        </div>
+        <div class="bg-yellow-50 p-3 rounded-lg text-center">
+            <div class="text-2xl font-bold text-yellow-600">${kpiData.late_count || 0}</div>
+            <div class="text-sm text-gray-600">Terlambat</div>
+        </div>
+        <div class="bg-blue-50 p-3 rounded-lg text-center">
+            <div class="text-2xl font-bold text-blue-600">${kpiData.izin_sakit_count || 0}</div>
+            <div class="text-sm text-gray-600">Izin/Sakit</div>
+        </div>
+        <div class="bg-red-50 p-3 rounded-lg text-center">
+            <div class="text-2xl font-bold text-red-600">${kpiData.alpha_count || 0}</div>
+            <div class="text-sm text-gray-600">Alpha</div>
+        </div>
+        <div class="bg-indigo-50 p-3 rounded-lg text-center">
+            <div class="text-2xl font-bold text-indigo-600">${kpiData.kpi_score || 0}</div>
+            <div class="text-sm text-gray-600">KPI Score</div>
+        </div>
+        <div class="bg-gray-50 p-3 rounded-lg text-center">
+            <div class="text-2xl font-bold ${statusColor}">${kpiData.status || 'N/A'}</div>
+            <div class="text-sm text-gray-600">Status</div>
+        </div>
+    `;
 }
 
 // Initialize rekap page controls
@@ -9374,6 +10651,15 @@ async function renderSettings() {
             if(qs('#kpi-late-penalty')) qs('#kpi-late-penalty').value = settings.kpi_late_penalty_per_minute?.value || '1';
             if(qs('#kpi-izin-sakit')) qs('#kpi-izin-sakit').value = settings.kpi_izin_sakit_score?.value || '85';
             if(qs('#kpi-alpha')) qs('#kpi-alpha').value = settings.kpi_alpha_score?.value || '0';
+            if(qs('#kpi-overtime-bonus')) qs('#kpi-overtime-bonus').value = settings.kpi_overtime_bonus?.value || '5';
+            
+            // WFO API settings
+            if(qs('#wfo-mode')) qs('#wfo-mode').value = settings.wfo_mode?.value || 'api';
+            if(qs('#wfo-api-provider')) qs('#wfo-api-provider').value = settings.wfo_api_provider?.value || 'ipinfo';
+            if(qs('#wfo-api-token')) qs('#wfo-api-token').value = settings.wfo_api_token?.value || '';
+            if(qs('#wfo-api-org-keywords')) qs('#wfo-api-org-keywords').value = settings.wfo_api_org_keywords?.value || '';
+            if(qs('#wfo-api-asn-list')) qs('#wfo-api-asn-list').value = settings.wfo_api_asn_list?.value || '';
+            if(qs('#wfo-api-cidr-list')) qs('#wfo-api-cidr-list').value = settings.wfo_api_cidr_list?.value || '';
         }
     } catch (error) {
         console.error('Error loading settings:', error);
@@ -9640,6 +10926,15 @@ qs('#settings-form') && qs('#settings-form').addEventListener('submit', async (e
     const kpiLatePenalty = qs('#kpi-late-penalty')?.value || '';
     const kpiIzinSakit = qs('#kpi-izin-sakit')?.value || '';
     const kpiAlpha = qs('#kpi-alpha')?.value || '';
+    const kpiOvertimeBonus = qs('#kpi-overtime-bonus')?.value || '';
+    
+    // WFO API settings
+    const wfoMode = qs('#wfo-mode')?.value || 'api';
+    const wfoApiProvider = qs('#wfo-api-provider')?.value || 'ipinfo';
+    const wfoApiToken = qs('#wfo-api-token')?.value || '';
+    const wfoApiOrgKeywords = qs('#wfo-api-org-keywords')?.value || '';
+    const wfoApiAsnList = qs('#wfo-api-asn-list')?.value || '';
+    const wfoApiCidrList = qs('#wfo-api-cidr-list')?.value || '';
     
     // Use selected address coordinates if available
     let wfoLat = '';
@@ -9675,7 +10970,14 @@ qs('#settings-form') && qs('#settings-form').addEventListener('submit', async (e
             attendance_period_end: periodEnd,
             kpi_late_penalty: kpiLatePenalty,
             kpi_izin_sakit: kpiIzinSakit,
-            kpi_alpha: kpiAlpha
+            kpi_alpha: kpiAlpha,
+            kpi_overtime_bonus: kpiOvertimeBonus,
+            wfo_mode: wfoMode,
+            wfo_api_provider: wfoApiProvider,
+            wfo_api_token: wfoApiToken,
+            wfo_api_org_keywords: wfoApiOrgKeywords,
+            wfo_api_asn_list: wfoApiAsnList,
+            wfo_api_cidr_list: wfoApiCidrList
         });
         
         if (response.ok) {
@@ -9696,6 +10998,95 @@ qs('#reset-settings') && qs('#reset-settings').addEventListener('click', () => {
     if(qs('#kpi-izin-sakit')) qs('#kpi-izin-sakit').value = '85';
     if(qs('#kpi-alpha')) qs('#kpi-alpha').value = '0';
     showNotif('Pengaturan direset ke default', true);
+});
+
+// Auto-detect WFO button handler
+qs('#auto-detect-wfo') && qs('#auto-detect-wfo').addEventListener('click', async () => {
+    const button = qs('#auto-detect-wfo');
+    const resultDiv = qs('#auto-detect-result');
+    const orgDiv = qs('#detect-org');
+    const asnDiv = qs('#detect-asn');
+    const ipDiv = qs('#detect-ip');
+    
+    button.disabled = true;
+    button.textContent = '🔄 Mendeteksi...';
+    
+    try {
+        // Get current IP
+        const ipResponse = await fetch('https://api.ipify.org?format=json');
+        const ipData = await ipResponse.json();
+        const currentIp = ipData.ip;
+        
+        // Get IP info using current provider setting
+        const provider = qs('#wfo-api-provider')?.value || 'ipinfo';
+        const token = qs('#wfo-api-token')?.value || '';
+        
+        let apiUrl = '';
+        if (provider === 'ipinfo') {
+            apiUrl = `https://ipinfo.io/${currentIp}/json${token ? `?token=${token}` : ''}`;
+        } else if (provider === 'ipapi') {
+            apiUrl = `https://ipapi.co/${currentIp}/json/`;
+        } else {
+            apiUrl = `http://ip-api.com/json/${currentIp}?fields=status,message,org,as,asname,query`;
+        }
+        
+        const headers = {};
+        if (provider === 'ipapi' && token) {
+            headers['Authorization'] = `Bearer ${token}`;
+        }
+        
+        const infoResponse = await fetch(apiUrl, { headers });
+        const infoData = await infoResponse.json();
+        
+        // Extract organization and ASN based on provider
+        let org = '';
+        let asn = '';
+        
+        if (provider === 'ipinfo') {
+            org = infoData.company?.name || infoData.org || '';
+            asn = infoData.org ? infoData.org.split(' ')[0] : '';
+        } else if (provider === 'ipapi') {
+            org = infoData.org || infoData.company || '';
+            asn = infoData.asn || infoData.as || '';
+        } else {
+            org = infoData.org || infoData.asname || '';
+            asn = infoData.as || '';
+        }
+        
+        // Display results
+        ipDiv.innerHTML = `<strong>IP:</strong> ${currentIp}`;
+        orgDiv.innerHTML = `<strong>Organisasi:</strong> ${org || 'Tidak ditemukan'}`;
+        asnDiv.innerHTML = `<strong>ASN:</strong> ${asn || 'Tidak ditemukan'}`;
+        
+        resultDiv.classList.remove('hidden');
+        
+        // Auto-fill if organization contains Telkom University
+        if (org && org.toLowerCase().includes('telkom')) {
+            const currentOrgKeywords = qs('#wfo-api-org-keywords')?.value || '';
+            if (!currentOrgKeywords.includes(org)) {
+                const newKeywords = currentOrgKeywords ? `${currentOrgKeywords}, ${org}` : org;
+                qs('#wfo-api-org-keywords').value = newKeywords;
+                showNotif(`Organisasi "${org}" ditambahkan ke kata kunci WFO`, true);
+            }
+        }
+        
+        if (asn && asn.startsWith('AS')) {
+            const currentAsnList = qs('#wfo-api-asn-list')?.value || '';
+            if (!currentAsnList.includes(asn)) {
+                const newAsnList = currentAsnList ? `${currentAsnList}, ${asn}` : asn;
+                qs('#wfo-api-asn-list').value = newAsnList;
+                showNotif(`ASN "${asn}" ditambahkan ke daftar ASN WFO`, true);
+            }
+        }
+        
+    } catch (error) {
+        console.error('Error detecting WFO:', error);
+        showNotif('Gagal mendeteksi informasi IP. Periksa koneksi internet atau token API.', false);
+        resultDiv.classList.add('hidden');
+    } finally {
+        button.disabled = false;
+        button.textContent = 'Auto-Detect WFO dari IP Admin Saat Ini';
+    }
 });
 
 // Dashboard functions
@@ -9723,6 +11114,9 @@ async function renderDashboard() {
         renderTodayLateChart(data.today_late);
         renderMonthlyPerformanceCharts(data.monthly_stats);
         renderAttendanceTrendChart(data.attendance_trend);
+        
+        // Initialize KPI filter options first
+        initKPIFilterOptions();
         
         // Load KPI data
         loadKPIData();
@@ -10047,8 +11441,10 @@ async function loadKPIData() {
             params.append('filter_type', 'monthly');
             params.append('month', month);
             params.append('year', year);
+            console.log('KPI Filter: Monthly mode -', month, year);
         } else {
             params.append('filter_type', 'period');
+            console.log('KPI Filter: Period mode');
         }
         
         const response = await fetch(`?ajax=get_kpi_data&${params.toString()}`);
@@ -10130,6 +11526,7 @@ function renderKPITable(kpiData) {
                 <td class="px-4 py-3 text-center text-red-600 font-semibold">${employee.late_count}</td>
                 <td class="px-4 py-3 text-center text-yellow-600 font-semibold">${employee.izin_sakit_count}</td>
                 <td class="px-4 py-3 text-center text-gray-600 font-semibold">${employee.alpha_count}</td>
+                <td class="px-4 py-3 text-center text-emerald-600 font-semibold">${employee.overtime_count || 0}</td>
                 <td class="px-4 py-3 text-center">
                     <span class="px-2 py-1 rounded-full text-sm font-semibold ${statusClass}">
                         ${employee.kpi_score}%
@@ -10203,6 +11600,7 @@ function initKPIFilterOptions() {
 // Show/hide month and year filters based on filter type
 kpiFilterType && kpiFilterType.addEventListener('change', (e) => {
     const isMonthly = e.target.value === 'monthly';
+    console.log('Filter type changed to:', e.target.value, 'isMonthly:', isMonthly);
     if (kpiFilterMonth) kpiFilterMonth.classList.toggle('hidden', !isMonthly);
     if (kpiFilterYear) kpiFilterYear.classList.toggle('hidden', !isMonthly);
     
@@ -10211,17 +11609,23 @@ kpiFilterType && kpiFilterType.addEventListener('change', (e) => {
         const now = new Date();
         if (kpiFilterMonth) kpiFilterMonth.value = now.getMonth() + 1;
         if (kpiFilterYear) kpiFilterYear.value = now.getFullYear();
+        console.log('Set default month/year:', now.getMonth() + 1, now.getFullYear());
     }
+    
+    // Reload data when filter type changes
+    loadKPIData();
 });
 
 // Load KPI data when month/year changes
 kpiFilterMonth && kpiFilterMonth.addEventListener('change', () => {
+    console.log('Month changed to:', kpiFilterMonth.value);
     if (kpiFilterType && kpiFilterType.value === 'monthly') {
         loadKPIData();
     }
 });
 
 kpiFilterYear && kpiFilterYear.addEventListener('change', () => {
+    console.log('Year changed to:', kpiFilterYear.value);
     if (kpiFilterType && kpiFilterType.value === 'monthly') {
         loadKPIData();
     }
@@ -10316,6 +11720,279 @@ if ('serviceWorker' in navigator) {
             });
     });
 }
+
+// Work Schedule Modal Functions
+async function openWorkScheduleModal(userId, userName) {
+    const modal = qs('#work-schedule-modal');
+    const userSelect = qs('#work-schedule-user');
+    const form = qs('#work-schedule-form');
+    const startDateInput = qs('#work-start-date');
+    
+    // Load members for dropdown
+    const membersRes = await fetch('?ajax=get_members');
+    const membersData = await membersRes.json();
+    const members = membersData.data || [];
+    
+    // Populate user dropdown
+    userSelect.innerHTML = '<option value="">Pilih pegawai...</option>';
+    members.forEach(member => {
+        const option = document.createElement('option');
+        option.value = member.id;
+        option.textContent = `${member.nama} (${member.nim})`;
+        if (member.id == userId) {
+            option.selected = true;
+        }
+        userSelect.appendChild(option);
+    });
+    
+    // Load schedule for selected user
+    if (userId) {
+        await loadWorkSchedule(userId);
+        form.classList.remove('hidden');
+        // Preload current start date from member JSON if available
+        try{
+            const membersRes2 = await fetch('?ajax=get_members');
+            const md = await membersRes2.json();
+            const m = (md.data||[]).find(x=>x.id==userId);
+            if(m && m.created_at && startDateInput){ startDateInput.value = (m.work_start_date||m.created_at||'').slice(0,10); }
+        }catch{}
+    } else {
+        form.classList.add('hidden');
+    }
+    
+    modal.classList.remove('hidden');
+}
+
+async function loadWorkSchedule(userId) {
+    try {
+        const response = await api('?ajax=admin_get_work_schedule', { user_id: userId });
+        if (response.ok) {
+            const schedule = response.data;
+            renderWorkScheduleDays(schedule);
+        } else {
+            showNotif('Gagal memuat jadwal kerja', false);
+        }
+    } catch (error) {
+        console.error('Error loading work schedule:', error);
+        showNotif('Gagal memuat jadwal kerja', false);
+    }
+}
+
+function renderWorkScheduleDays(schedule) {
+    const container = qs('#work-schedule-days');
+    container.innerHTML = '';
+    
+    const days = [
+        { key: 'monday', label: 'Senin' },
+        { key: 'tuesday', label: 'Selasa' },
+        { key: 'wednesday', label: 'Rabu' },
+        { key: 'thursday', label: 'Kamis' },
+        { key: 'friday', label: 'Jumat' },
+        { key: 'saturday', label: 'Sabtu' },
+        { key: 'sunday', label: 'Minggu' }
+    ];
+    
+    days.forEach(day => {
+        const dayData = schedule[day.key] || {
+            is_working_day: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'].includes(day.key),
+            start_time: '08:00:00',
+            end_time: '17:00:00'
+        };
+        
+        const row = document.createElement('div');
+        row.className = 'grid grid-cols-7 gap-2 items-center p-2 border rounded';
+        row.innerHTML = `
+            <div class="font-medium">${day.label}</div>
+            <div>
+                <input type="checkbox" ${dayData.is_working_day ? 'checked' : ''} 
+                       class="work-day-checkbox" data-day="${day.key}">
+            </div>
+            <div>
+                <input type="time" value="${dayData.start_time}" 
+                       class="work-start-time w-full p-1 border rounded text-sm" data-day="${day.key}">
+            </div>
+            <div>
+                <input type="time" value="${dayData.end_time}" 
+                       class="work-end-time w-full p-1 border rounded text-sm" data-day="${day.key}">
+            </div>
+            <div class="text-sm text-gray-600 work-duration" data-day="${day.key}">
+                ${calculateDuration(dayData.start_time, dayData.end_time)}
+            </div>
+            <div class="text-sm">
+                <span class="work-status px-2 py-1 rounded text-xs ${dayData.is_working_day ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'}" data-day="${day.key}">
+                    ${dayData.is_working_day ? 'Bekerja' : 'Libur'}
+                </span>
+            </div>
+            <div>
+                <button type="button" class="copy-schedule-btn text-blue-600 hover:text-blue-800 text-sm" data-day="${day.key}">
+                    Copy
+                </button>
+            </div>
+        `;
+        
+        container.appendChild(row);
+    });
+    
+    // Add event listeners
+    addWorkScheduleEventListeners();
+}
+
+function addWorkScheduleEventListeners() {
+    // Handle checkbox changes
+    qsa('.work-day-checkbox').forEach(checkbox => {
+        checkbox.addEventListener('change', function() {
+            const day = this.dataset.day;
+            const statusSpan = qs(`.work-status[data-day="${day}"]`);
+            const startTime = qs(`.work-start-time[data-day="${day}"]`);
+            const endTime = qs(`.work-end-time[data-day="${day}"]`);
+            
+            if (this.checked) {
+                statusSpan.textContent = 'Bekerja';
+                statusSpan.className = 'work-status px-2 py-1 rounded text-xs bg-green-100 text-green-800';
+                startTime.disabled = false;
+                endTime.disabled = false;
+            } else {
+                statusSpan.textContent = 'Libur';
+                statusSpan.className = 'work-status px-2 py-1 rounded text-xs bg-gray-100 text-gray-800';
+                startTime.disabled = true;
+                endTime.disabled = true;
+            }
+            updateDuration(day);
+        });
+    });
+    
+    // Handle time changes
+    qsa('.work-start-time, .work-end-time').forEach(input => {
+        input.addEventListener('change', function() {
+            const day = this.dataset.day;
+            updateDuration(day);
+        });
+    });
+    
+    // Handle copy buttons
+    qsa('.copy-schedule-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            const day = this.dataset.day;
+            const checkbox = qs(`.work-day-checkbox[data-day="${day}"]`);
+            const startTime = qs(`.work-start-time[data-day="${day}"]`);
+            const endTime = qs(`.work-end-time[data-day="${day}"]`);
+            
+            // Copy to all other days
+            qsa('.work-day-checkbox').forEach(otherCheckbox => {
+                if (otherCheckbox.dataset.day !== day) {
+                    otherCheckbox.checked = checkbox.checked;
+                    otherCheckbox.dispatchEvent(new Event('change'));
+                }
+            });
+            
+            qsa('.work-start-time').forEach(otherStart => {
+                if (otherStart.dataset.day !== day) {
+                    otherStart.value = startTime.value;
+                }
+            });
+            
+            qsa('.work-end-time').forEach(otherEnd => {
+                if (otherEnd.dataset.day !== day) {
+                    otherEnd.value = endTime.value;
+                }
+            });
+            
+            // Update all durations
+            qsa('.work-day-checkbox').forEach(cb => updateDuration(cb.dataset.day));
+            
+            showNotif('Jadwal berhasil disalin ke semua hari');
+        });
+    });
+}
+
+function updateDuration(day) {
+    const startTime = qs(`.work-start-time[data-day="${day}"]`);
+    const endTime = qs(`.work-end-time[data-day="${day}"]`);
+    const durationSpan = qs(`.work-duration[data-day="${day}"]`);
+    
+    if (startTime && endTime && durationSpan) {
+        durationSpan.textContent = calculateDuration(startTime.value, endTime.value);
+    }
+}
+
+function calculateDuration(startTime, endTime) {
+    if (!startTime || !endTime) return '0h 0m';
+    
+    const start = new Date(`2000-01-01 ${startTime}`);
+    const end = new Date(`2000-01-01 ${endTime}`);
+    
+    if (end <= start) return '0h 0m';
+    
+    const diffMs = end - start;
+    const hours = Math.floor(diffMs / (1000 * 60 * 60));
+    const minutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+    
+    return `${hours}h ${minutes}m`;
+}
+
+// Work Schedule Modal Event Listeners
+qs('#work-schedule-close') && qs('#work-schedule-close').addEventListener('click', () => {
+    qs('#work-schedule-modal').classList.add('hidden');
+});
+
+qs('#work-schedule-cancel') && qs('#work-schedule-cancel').addEventListener('click', () => {
+    qs('#work-schedule-modal').classList.add('hidden');
+});
+
+qs('#work-schedule-user') && qs('#work-schedule-user').addEventListener('change', async function() {
+    const userId = this.value;
+    const form = qs('#work-schedule-form');
+    
+    if (userId) {
+        await loadWorkSchedule(userId);
+        form.classList.remove('hidden');
+    } else {
+        form.classList.add('hidden');
+    }
+});
+
+qs('#work-schedule-save') && qs('#work-schedule-save').addEventListener('click', async function() {
+    const userId = qs('#work-schedule-user').value;
+    
+    if (!userId) {
+        showNotif('Pilih pegawai terlebih dahulu', false);
+        return;
+    }
+    
+    // Collect schedule data
+    const schedule = {};
+    qsa('.work-day-checkbox').forEach(checkbox => {
+        const day = checkbox.dataset.day;
+        const startTime = qs(`.work-start-time[data-day="${day}"]`).value;
+        const endTime = qs(`.work-end-time[data-day="${day}"]`).value;
+        
+        schedule[day] = {
+            is_working_day: checkbox.checked,
+            start_time: startTime,
+            end_time: endTime
+        };
+    });
+    
+    try {
+        const response = await api('?ajax=admin_save_work_schedule', {
+            user_id: userId,
+            schedule: schedule
+        });
+        
+        if (response.ok) {
+            // Save per-user work start date setting if provided
+            const startDateVal = qs('#work-start-date')?.value || '';
+            if(startDateVal){ await api('?ajax=save_setting', { key: `work_start_date_user_${userId}`, value: startDateVal }); }
+            showNotif('Jadwal kerja berhasil disimpan');
+            qs('#work-schedule-modal').classList.add('hidden');
+        } else {
+            showNotif(response.message || 'Gagal menyimpan jadwal kerja', false);
+        }
+    } catch (error) {
+        console.error('Error saving work schedule:', error);
+        showNotif('Gagal menyimpan jadwal kerja', false);
+    }
+});
 </script>
 </body>
 </html>
