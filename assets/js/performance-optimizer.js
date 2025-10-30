@@ -37,6 +37,10 @@ class PerformanceOptimizer {
             
             this.isInitialized = true;
             console.log('Performance Optimizer initialized successfully');
+            // Auto-preload critical resources
+            if (this.optimizationSettings.enablePreloading) {
+                try { await this.preloadResources(); } catch(e) { /* noop */ }
+            }
             
         } catch (error) {
             console.error('Error initializing Performance Optimizer:', error);
@@ -158,11 +162,12 @@ class PerformanceOptimizer {
         if (typeof faceapi === 'undefined') return;
 
         try {
+            const MODEL_URL = (window.FACEAPI_MODEL_URL || 'assets/js/face-api-models');
             await Promise.all([
-                faceapi.nets.tinyFaceDetector.loadFromUri('assets/js/models'),
-                faceapi.nets.faceLandmark68Net.loadFromUri('assets/js/models'),
-                faceapi.nets.faceRecognitionNet.loadFromUri('assets/js/models'),
-                faceapi.nets.faceExpressionNet.loadFromUri('assets/js/models')
+                faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+                faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+                faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL),
+                faceapi.nets.faceExpressionNet.loadFromUri(MODEL_URL)
             ]);
             console.log('Face API models preloaded');
         } catch (error) {

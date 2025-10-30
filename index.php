@@ -2608,7 +2608,7 @@ if (isset($_GET['ajax'])) {
                     jsonResponse(['ok' => false, 'message' => $statusText, 'statusClass' => 'bg-red-100 text-red-700']);
             } else {
                 $masukTime = new DateTime($todayRow['jam_masuk_iso']);
-                $statusText = "Anda sudah presensi masuk pada " . $masukTime->format('d/m/Y H:i') . " dan belum pulang.";
+                $statusText = "Anda sudah presensi masuk pukul " . $masukTime->format('H:i') . " dan belum pulang.";
                 jsonResponse(['ok' => false, 'message' => $statusText, 'statusClass' => 'bg-yellow-100 text-yellow-700']);
                 }
             }
@@ -4437,6 +4437,11 @@ if ($page === 'logout') {
     <script src="assets/js/tailwind.js"></script>
 
     <script src="assets/js/face-api.min.js"></script>
+    <script>
+        // Expose model URL for optimizers
+        window.FACEAPI_MODEL_URL = 'assets/js/face-api-models';
+    </script>
+    <script src="assets/js/performance-optimizer.js"></script>
     <script src="assets/js/chart.min.js"></script>
     <link rel="stylesheet" href="assets/css/inter.css">
     <link rel='stylesheet' href='assets/css/uicons-solid-rounded.css'>
@@ -4455,7 +4460,18 @@ if ($page === 'logout') {
         }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
         #video-container { position: relative; width: 100%; max-width: 720px; margin: auto; }
-        #video, #canvas { position: absolute; top: 0; left: 0; width: 100%; height: auto; }
+        #video, #canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+        /* Header account button - keep avatar inside and tidy on mobile */
+        #btn-profile { max-width: 160px; }
+        #btn-profile .avatar { width: 32px; height: 32px; border-radius: 9999px; object-fit: cover; flex-shrink: 0; }
+        @media (max-width: 400px) {
+            #btn-profile { max-width: 140px; padding-left: 0.5rem; padding-right: 0.5rem; gap: 0.5rem; }
+            #btn-profile span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 80px; display: inline-block; }
+        }
+        /* Mirror hanya video agar UI & teks tidak terbalik */
+        .mirror-video { transform: scaleX(-1); }
+        /* Ensure video crops from center on tall mobile cameras */
+        #video { object-fit: cover; object-position: center center; }
         /* Bordered tables */
         table.bordered { border-collapse: collapse; width: 100%; table-layout: auto; }
         table.bordered th, table.bordered td { border: 1px solid #e5e7eb; padding: 0.5rem; text-align: center; vertical-align: middle; }
@@ -4650,9 +4666,9 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
         <div class="container mx-auto px-4 py-4 flex items-center justify-between">
             <h1 class="text-2xl font-bold text-gray-800">Sistem Presensi Berbasis Wajah</h1>
             <div class="relative">
-                <button id="btn-profile" class="flex items-center gap-3 px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors">
+                <button id="btn-profile" class="flex items-center gap-3 px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors overflow-hidden">
                     <span class="text-sm text-gray-700">Akun</span>
-                    <img src="generate-avatar.php?background=64748b&color=ffffff&name=A&size=32" class="w-8 h-8 rounded-full" alt="profile" style="object-fit: contain;">
+                    <img src="generate-avatar.php?background=64748b&color=ffffff&name=A&size=32" class="avatar" alt="profile">
                 </button>
                 <div id="dropdown-profile" class="absolute right-0 mt-2 bg-white rounded-lg shadow-lg border border-gray-200 hidden min-w-max">
                     <a href="?page=login" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 whitespace-nowrap">Login</a>
@@ -4718,7 +4734,7 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
             <!-- Two Panel Layout -->
             <div id="two-panel-layout" class="grid grid-cols-1 lg:grid-cols-3 gap-8 w-full px-4">
                 <!-- Left Panel - Text Content -->
-                <div class="landing-panel p-8 rounded-2xl shadow-lg text-panel-middle lg:col-span-1 text-panel-container mt-[160px] ml-[100px] mr-0">
+                <div class="landing-panel p-8 rounded-2xl shadow-lg lg:col-span-1 mt-12 mx-auto max-w-md md:mt-16 md:max-w-lg lg:mt-24 lg:mx-0">
                     <div class="mb-6">
                         <h2 class="text-2xl font-bold text-gray-800 mb-3">PRESENSI MUDAH, CEPAT & AKURAT.</h2>
                         <p class="text-base text-gray-600 mb-4">Selamat datang di solusi presensi wajah terdepan.</p>
@@ -4922,9 +4938,9 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
         <div class="container mx-auto px-4 py-4 flex items-center justify-between">
             <h1 class="text-2xl font-bold text-gray-700">Sistem Presensi Berbasis Wajah</h1>
             <div class="relative">
-                <button id="btn-profile" class="flex items-center gap-3 px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg">
+                <button id="btn-profile" class="flex items-center gap-3 px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg overflow-hidden">
                     <span class="text-sm text-gray-700"><?php echo htmlspecialchars($_SESSION['user']['nama'] ?? 'Akun'); ?></span>
-                    <img src="generate-avatar.php?background=6366f1&color=fff&name=<?php echo urlencode($_SESSION['user']['nama'] ?? 'A'); ?>&size=32" class="w-8 h-8 rounded-full" alt="profile" style="object-fit: contain;">
+                    <img src="generate-avatar.php?background=6366f1&color=fff&name=<?php echo urlencode($_SESSION['user']['nama'] ?? 'A'); ?>&size=32" class="avatar" alt="profile">
                 </button>
                 <div id="dropdown-profile" class="absolute right-0 mt-2 bg-white rounded-lg shadow-lg border hidden min-w-max">
                     <?php if(isset($_SESSION['user'])): ?>
@@ -6150,6 +6166,7 @@ function processSpeechQueue() {
 }
 
 // Modify the `statusMessage` function to use the improved `speak` function
+let notifLockUntil = 0;
 function statusMessage(text, cls) {
     if (!presensiStatus) return;
     
@@ -6158,13 +6175,74 @@ function statusMessage(text, cls) {
     presensiStatus.className = 'mt-4 text-center font-medium text-lg p-3 rounded-md ' + cls;
     presensiStatus.classList.remove('hidden');
 
-    // Use the improved speak function with queue
-    speak(text);
+    // Hindari interupsi suara untuk pesan non-kritis
+    const now = Date.now();
+    const isCritical = /bg-(green|yellow|red)-100/.test(cls || '');
+    if (isCritical || now > notifLockUntil) {
+        // Hitung durasi lock berdasarkan panjang teks agar tidak terpotong
+        const dur = Math.max(2500, Math.min(7000, text.length * 60));
+        notifLockUntil = now + dur;
+        speak(text);
+    }
 }
 
 
 
-async function api(url, data){
+// ===== IndexedDB caching for face descriptors =====
+function simpleHash(str){
+    let h = 5381; for (let i=0;i<str.length;i++){ h = ((h<<5)+h) + str.charCodeAt(i); h |= 0; }
+    return 'v' + (h >>> 0).toString(16);
+}
+
+async function computeMembersVersionKey(membersList){
+    try{
+        const basis = membersList.map(m=>[m.nim, m.foto||m.photo||m.image||'', m.nama||'']).sort((a,b)=>String(a[0]).localeCompare(String(b[0])));
+        return simpleHash(JSON.stringify(basis));
+    }catch(e){ return 'v-default'; }
+}
+
+function idbOpen(){
+    return new Promise((resolve,reject)=>{
+        const req = indexedDB.open('presensi-cache', 1);
+        req.onupgradeneeded = (e)=>{
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains('descriptors')) {
+                db.createObjectStore('descriptors');
+            }
+        };
+        req.onsuccess = ()=> resolve(req.result);
+        req.onerror = ()=> reject(req.error);
+    });
+}
+
+async function idbGetDescriptors(versionKey){
+    try{
+        const db = await idbOpen();
+        return await new Promise((resolve,reject)=>{
+            const tx = db.transaction('descriptors','readonly');
+            const store = tx.objectStore('descriptors');
+            const getReq = store.get(versionKey);
+            getReq.onsuccess = ()=> resolve(getReq.result||null);
+            getReq.onerror = ()=> resolve(null);
+        });
+    }catch(e){ return null; }
+}
+
+async function idbSetDescriptors(versionKey, data){
+    try{
+        const db = await idbOpen();
+        return await new Promise((resolve,reject)=>{
+            const tx = db.transaction('descriptors','readwrite');
+            const store = tx.objectStore('descriptors');
+            const putReq = store.put(data, versionKey);
+            putReq.onsuccess = ()=> resolve(true);
+            putReq.onerror = ()=> resolve(false);
+        });
+    }catch(e){ return false; }
+}
+
+async function api(url, data, opts){
+    const options = opts || {};
     try {
         // Log the data being sent (but not the full screenshot to avoid console spam)
         const logData = { ...data };
@@ -6223,7 +6301,9 @@ async function api(url, data){
                 // If not JSON, continue with normal error handling
             }
             
-            showModalNotif(`Terjadi kesalahan (${res.status}).`, false, 'Gagal');
+            if (!options.suppressModal) {
+                showModalNotif(`Terjadi kesalahan (${res.status}).`, false, 'Gagal');
+            }
             throw new Error(`HTTP error! status: ${res.status}, response: ${errorText}`);
         }
         
@@ -6241,10 +6321,12 @@ async function api(url, data){
         
         // Return the JSON response regardless of HTTP status code
         // Let the calling function handle the business logic (ok: false, etc.)
-        if(json && json.ok===true && json.message){
-            showModalNotif(json.message, true, 'Berhasil');
-        } else if(json && json.ok===false && json.message){
-            showModalNotif(json.message, false, 'Gagal');
+        if (!options.suppressModal) {
+            if(json && json.ok===true && json.message){
+                showModalNotif(json.message, true, 'Berhasil');
+            } else if(json && json.ok===false && json.message){
+                showModalNotif(json.message, false, 'Gagal');
+            }
         }
         return json;
     } catch (error) {
@@ -6581,7 +6663,7 @@ function submitAttendanceWithWFA(attendanceData, wfaReason) {
     };
     
     // Submit attendance with WFA reason
-    api('?ajax=save_attendance', dataWithWFA)
+    api('?ajax=save_attendance', dataWithWFA, { suppressModal: true })
         .then(response => {
             if (response.ok) {
                 statusMessage('Presensi berhasil dengan alasan WFA!', 'bg-green-100 text-green-700');
@@ -6761,6 +6843,7 @@ async function initializeFaceRecognition() {
 
 
 async function loadFaceApiModels(){
+    if (window.faceApiModelsLoaded) return; // cache: only load once per session
     if (!loadingOverlay) return;
     
     const loadingProgress = qs('#loading-progress');
@@ -6782,6 +6865,7 @@ async function loadFaceApiModels(){
         await faceapi.nets.faceExpressionNet.loadFromUri(MODEL_URL);
 
         loadingProgress.textContent = 'Model AI berhasil dimuat!';
+        window.faceApiModelsLoaded = true;
         // INSTANT: No delay for maximum speed
     } catch (error) {
         loadingProgress.textContent = 'Gagal memuat model AI. Silakan refresh halaman.';
@@ -6805,6 +6889,17 @@ async function fetchMembers(){
 
 async function loadLabeledFaceDescriptors(){
     members = await fetchMembers(); // Store globally for gender validation
+    // Try load from IndexedDB cache first
+    const versionKey = await computeMembersVersionKey(members);
+    const cached = await idbGetDescriptors(versionKey);
+    if (cached && Array.isArray(cached) && cached.length > 0) {
+        labeledFaceDescriptors = cached.map(item => new faceapi.LabeledFaceDescriptors(
+            item.label,
+            item.descriptors.map(d => new Float32Array(d))
+        ));
+        console.log('Loaded face descriptors from cache:', labeledFaceDescriptors.length);
+        return;
+    }
     labeledFaceDescriptors = [];
     // ULTRA-FAST: Skip logging for maximum speed
     let loadedCount = 0;
@@ -6867,6 +6962,15 @@ async function loadLabeledFaceDescriptors(){
     } else if (failedCount > 0) {
         console.warn(`⚠️ WARNING: ${failedCount} members could not be loaded. Check their photos.`);
     }
+    // Save to IndexedDB cache
+    try {
+        const toStore = labeledFaceDescriptors.map(ld => ({
+            label: ld.label,
+            descriptors: ld.descriptors.map(arr => Array.from(arr))
+        }));
+        await idbSetDescriptors(versionKey, toStore);
+        console.log('Saved face descriptors to cache:', toStore.length);
+    } catch(e) { console.warn('Failed saving descriptors to cache', e); }
 }
 
 // ULTRA-FAST: Smart threshold adjustment for maximum speed
@@ -6991,6 +7095,8 @@ function startVideo(){
         navigator.mediaDevices.getUserMedia(constraints).then(stream => {
             video.srcObject = stream;
             isCameraActive = true;
+            // Mirror hanya video supaya tombol dan teks tidak terbalik
+            if (video) video.classList.add('mirror-video');
             video.addEventListener('loadedmetadata', () => {});
         }).catch(err => {
             console.error('Error camera', err);
@@ -7079,31 +7185,34 @@ function startVideoInterval(){
             const ctx = canvas.getContext('2d');
             ctx.clearRect(0,0,canvas.width,canvas.height);
             if (resized.length > 0) {
-                faceapi.draw.drawDetections(canvas, resized);
                 if (labeledFaceDescriptors && labeledFaceDescriptors.length > 0) {
                     // Advanced: Stricter threshold for better accuracy
                     const faceMatcher = new faceapi.FaceMatcher(labeledFaceDescriptors, detectionConfig.faceMatcherThreshold);
                     const results = resized.map(d => faceMatcher.findBestMatch(d.descriptor));
+                    const ctx2 = canvas.getContext('2d');
+                    ctx2.clearRect(0,0,canvas.width,canvas.height);
                     results.forEach((result, i) => {
                         const box = resized[i].detection.box;
                         const face = resized[i];
-                        
-                        // BALANCED: Informative logging for debugging
-                        const quality = assessFaceQuality(face);
-                        // ULTRA-FAST: Skip all logging for maximum speed
-                        
-                        // Advanced: Use quality-based detection acceptance
+                        // Hitung posisi mirror: video di-mirror, canvas tidak, jadi koordinat X dibalik
+                        const mirroredX = canvas.width - (box.x + box.width);
+                        // Gambar kotak
+                        ctx2.strokeStyle = '#22c55e';
+                        ctx2.lineWidth = 2;
+                        ctx2.strokeRect(mirroredX, box.y, box.width, box.height);
+                        // Label hasil (tidak terbalik)
                         const shouldAccept = shouldAcceptDetection(result, face);
-                        
-                        const drawBox = new faceapi.draw.DrawBox(box, {
-                            label: `${result.toString()} ${shouldAccept ? '✓' : '?'}`
-                        });
-                        drawBox.draw(canvas);
-                        
-                        // Advanced: Only accept high-quality, consistent detections
+                        const label = `${result.toString()} ${shouldAccept ? '✓' : '?'}`;
+                        ctx2.font = '14px Inter, sans-serif';
+                        ctx2.fillStyle = 'rgba(37, 99, 235, 0.9)';
+                        const padding = 4;
+                        const textWidth = ctx2.measureText(label).width;
+                        ctx2.fillRect(mirroredX, Math.max(0, box.y - 20), textWidth + padding*2, 20);
+                        ctx2.fillStyle = '#fff';
+                        ctx2.fillText(label, mirroredX + padding, Math.max(12, box.y - 6));
+                        // Proses pengenalan
                         if (shouldAccept) {
-                            // Recognition will be handled by instant processing or queue system
-                            // ULTRA-FAST: Skip logging for maximum speed
+                            // Recognition handled instantly in shouldAcceptDetection -> handleRecognition
                         }
                     });
                 } else {
@@ -7402,6 +7511,9 @@ let lastSuccessfulDetection = null;
 
 function shouldAcceptDetection(result, face) {
     if (!result || result.label === 'unknown') return false;
+    // Skip if this label recently processed
+    const lastTs = processedLabels.get(result.label) || 0;
+    if (Date.now() - lastTs < processedCooldownMs) return false;
     
     // ENHANCED: Stricter checks for better accuracy and prevent misdetection
     if (result.distance > detectionConfig.recognitionThreshold) return false;
@@ -7563,7 +7675,9 @@ function performMultiAttemptValidation(result, face) {
 // Queue system removed for instant processing
 
 let isProcessingRecognition = false;
-let recognitionCompleted = false; // Flag to stop detection after successful recognition
+// Track processed labels to prevent duplicate submissions while tetap melanjutkan deteksi
+let processedLabels = new Map(); // nim -> timestamp ms
+const processedCooldownMs = 30000; // 30 detik
 
 async function handleRecognition(nim, topExpression){
     if(!scanMode || isProcessingRecognition) return;
@@ -7584,11 +7698,20 @@ async function handleRecognition(nim, topExpression){
                     canvas.width = video.videoWidth;
                     canvas.height = video.videoHeight;
                     // Resize to speed up upload while keeping enough detail for verification
-                    const targetW = 320; const scale = targetW / canvas.width; const targetH = Math.round(canvas.height * scale);
+                    const targetW = 240; const scale = targetW / canvas.width; const targetH = Math.round(canvas.height * scale);
                     const tmp = document.createElement('canvas'); const tctx = tmp.getContext('2d');
                     tmp.width = targetW; tmp.height = targetH;
-                    tctx.drawImage(video, 0, 0, targetW, targetH);
-                    const screenshot = tmp.toDataURL('image/jpeg', 0.6); // Balanced compression for speed + clarity
+                    // Center-crop from the middle to avoid only-forehead issue on tall mobile cameras
+                    const srcW = video.videoWidth;
+                    const srcH = video.videoHeight;
+                    const aspect = targetW / targetH;
+                    let cropW = srcW;
+                    let cropH = Math.round(cropW / aspect);
+                    if (cropH > srcH) { cropH = srcH; cropW = Math.round(cropH * aspect); }
+                    const sx = Math.max(0, Math.floor((srcW - cropW) / 2));
+                    const sy = Math.max(0, Math.floor((srcH - cropH) / 2));
+                    tctx.drawImage(video, sx, sy, cropW, cropH, 0, 0, targetW, targetH);
+                    const screenshot = tmp.toDataURL('image/jpeg', 0.5); // Faster upload, sufficient for bukti
                     // console.log('Screenshot taken successfully, size:', screenshot.length);
                     resolve(screenshot);
                 } else {
@@ -7607,7 +7730,7 @@ async function handleRecognition(nim, topExpression){
             navigator.geolocation.getCurrentPosition(
                 pos => resolve(pos), 
                 err => resolve(null), 
-                { enableHighAccuracy: false, timeout: 10, maximumAge: 300000 } // ULTRA-FAST: 10ms timeout, 5min cache
+                { enableHighAccuracy: true, timeout: 5000, maximumAge: 300000 }
             );
         })
     ]);
@@ -7619,16 +7742,13 @@ async function handleRecognition(nim, topExpression){
         return;
     }
     
-    // ULTRA-FAST: Use position from parallel processing
-    let lat=null, lng=null, lokasi=null;
+    // Use position from parallel processing
+    let lat=null, lng=null, lokasi='';
     if (position) {
         lat = position.coords.latitude;
         lng = position.coords.longitude;
     }
-    // Convert coordinates to readable street names
-    if(lat!==null && lng!==null){ 
-        lokasi = await getStreetNameFromCoordinates(lat, lng);
-    }
+    // Biarkan backend melakukan reverse geocoding jika lokasi kosong
 
     async function submitAttendance(extra={}){
         return api('?ajax=save_attendance', { 
@@ -7640,15 +7760,20 @@ async function handleRecognition(nim, topExpression){
             lng: lng ?? '',
             lokasi: lokasi ?? '',
             ...extra
-        });
+        }, { suppressModal: true });
     }
 
     try{
         // Fetch public IP for API-based WFO detection (fast, non-blocking)
+        // Dapatkan IP publik tanpa memblokir proses (timeout singkat)
         try {
-            const ipResp = await fetch('https://api.ipify.org?format=json', { cache: 'no-store' });
-            const ipJson = await ipResp.json();
-            window.__publicIp = ipJson?.ip || '';
+            const ipFetch = fetch('https://api.ipify.org?format=json', { cache: 'no-store' });
+            const timeout = new Promise((_,rej)=> setTimeout(()=>rej(new Error('ip-timeout')), 800));
+            const ipResp = await Promise.race([ipFetch, timeout]);
+            if (ipResp && ipResp.ok) {
+                const ipJson = await ipResp.json();
+                window.__publicIp = ipJson?.ip || '';
+            }
         } catch {}
         // Store attendance data for potential WFA retry
         const attendanceData = { 
@@ -7676,11 +7801,15 @@ async function handleRecognition(nim, topExpression){
             statusMessage(r.message, r.statusClass || 'bg-green-100 text-green-700');
             // Update log after successful attendance
             updateLogAfterAttendance(nim, scanMode);
-            // Continue detection for multi-person support
-            // Ultra-fast processing - minimal logging
-            // console.log(`Successfully processed attendance for ${nim}. Continuing detection for other people.`);
+            // Tandai label sudah diproses agar tidak dobel, lanjutkan deteksi untuk orang lain
+            processedLabels.set(nim, Date.now());
         } else {
             statusMessage(r.message || 'Gagal menyimpan presensi', r.statusClass || 'bg-yellow-100 text-yellow-700');
+            // Jika sudah presensi sebelumnya, hentikan deteksi dan berikan notifikasi jelas
+            const msg = (r.message||'').toLowerCase();
+            if (msg.includes('sudah presensi')) {
+                processedLabels.set(nim, Date.now());
+            }
         }
     }catch(err){
         console.error('Error in handleRecognition:', err);
@@ -7780,6 +7909,10 @@ document.addEventListener('DOMContentLoaded', () => {
     console.log('🚀 Initializing face recognition system...');
     initializeSpeechSynthesis();
     initializeFaceRecognition();
+    // Preload models once
+    if (!window.faceApiModelsLoaded) {
+        loadFaceApiModels().catch(()=>{});
+    }
     
     // INSTANT: Immediate debug info display
     console.log('🔧 Face Recognition Debug Info:');
@@ -10070,7 +10203,7 @@ drUserEditModal.id='dr-user-edit-modal';
 drUserEditModal.className='fixed inset-0 bg-black/50 hidden items-center justify-center z-50';
 drUserEditModal.innerHTML = `
     <div class="bg-white p-6 rounded-lg shadow-2xl w-full max-w-2xl">
-        <h3 class="text-xl font-bold mb-2">Edit Laporan Harian</h3>
+        <h3 class="text-xl font-bold mb-2">Laporan Harian</h3>
         <div class="text-sm text-gray-500 mb-2" id="dr-user-edit-date"></div>
         
         <!-- Bukti Izin/Sakit Section (Edit Mode) -->
