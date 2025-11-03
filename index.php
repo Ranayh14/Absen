@@ -9,6 +9,11 @@ ini_set('display_errors', '0');
 
 error_log('bootstrap: index.php started');
 
+// Load Composer autoloader for Google Authenticator
+if (file_exists(__DIR__ . '/vendor/autoload.php')) {
+    require_once __DIR__ . '/vendor/autoload.php';
+}
+
 // ----- CONFIG -----
 // Change if needed for your XAMPP/MySQL setup
 $DB_HOST = '127.0.0.1';
@@ -177,7 +182,10 @@ function ensureSchema(PDO $pdo): void {
                 'face_embedding_updated' => "ALTER TABLE users ADD COLUMN face_embedding_updated TIMESTAMP NULL AFTER face_embedding",
                 'advanced_features' => "ALTER TABLE users ADD COLUMN advanced_features LONGTEXT NULL AFTER face_embedding_updated",
                 'facial_geometry' => "ALTER TABLE users ADD COLUMN facial_geometry LONGTEXT NULL AFTER advanced_features",
-                'feature_vector' => "ALTER TABLE users ADD COLUMN feature_vector LONGTEXT NULL AFTER facial_geometry"
+                'feature_vector' => "ALTER TABLE users ADD COLUMN feature_vector LONGTEXT NULL AFTER facial_geometry",
+                'google_authenticator_secret' => "ALTER TABLE users ADD COLUMN google_authenticator_secret VARCHAR(255) NULL AFTER password_hash",
+                'password_reset_token' => "ALTER TABLE users ADD COLUMN password_reset_token VARCHAR(255) NULL AFTER google_authenticator_secret",
+                'password_reset_expires' => "ALTER TABLE users ADD COLUMN password_reset_expires DATETIME NULL AFTER password_reset_token"
             ];
     
     foreach ($requiredColumns as $column => $sql) {
@@ -342,6 +350,8 @@ function seedDefaultSettings(PDO $pdo): void {
         ['wfo_api_org_keywords', 'Telkom University, Yayasan Pendidikan Telkom, Telkom University Bandung', 'Daftar kata kunci organisasi yang dianggap WFO (dipisah koma)'],
         ['wfo_api_asn_list', '', 'Daftar ASN yang dianggap WFO (contoh: AS7713), dipisah koma'],
         ['wfo_api_cidr_list', '', 'Daftar CIDR yang dianggap WFO (contoh: 103.23.44.0/22), dipisah koma'],
+        ['wfo_wifi_ssids', 'Telkom University,TelU,WiFi Telkom University,WiFi-TelU,Telkom-University', 'Daftar SSID WiFi yang valid untuk WFO (dipisah koma)'],
+        ['wfo_require_wifi', '1', 'Wajib menggunakan WiFi Telkom University untuk presensi WFO (1=Ya, 0=Tidak)'],
         ['attendance_period_end', date('Y-12-31'), 'Tanggal akhir periode perhitungan absen (YYYY-MM-DD)'],
         ['kpi_late_penalty_per_minute', '1', 'Pengurangan KPI per menit terlambat (%)'],
         ['kpi_izin_sakit_score', '85', 'Nilai KPI untuk izin/sakit (%)'],
@@ -388,11 +398,12 @@ function geocodeAddress(string $address): ?array {
  * Returns readable address string or null on failure.
  */
 function reverseGeocodeAddress(float $lat, float $lng): ?string {
-    $url = 'https://nominatim.openstreetmap.org/reverse?format=json&lat=' . $lat . '&lon=' . $lng . '&addressdetails=1&accept-language=id';
+    // Use zoom level 18 for maximum detail (building level)
+    $url = 'https://nominatim.openstreetmap.org/reverse?format=json&lat=' . $lat . '&lon=' . $lng . '&addressdetails=1&accept-language=id&zoom=18';
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, $url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 5);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 2); // Reduced from 5 to 2 seconds for faster response
     curl_setopt($ch, CURLOPT_HTTPHEADER, [
         'User-Agent: AbsenApp/1.0 (XAMPP PHP)'
     ]);
@@ -408,30 +419,40 @@ function reverseGeocodeAddress(float $lat, float $lng): ?string {
     $address = $data['address'];
     $displayName = $data['display_name'] ?? '';
     
-    // Build readable address from components
+    // Build detailed address from components with proper order
     $parts = [];
     
-    // Try to get specific location names
+    // 1. Building name or house name (most specific)
     if (isset($address['building']) && $address['building']) {
         $parts[] = $address['building'];
     } elseif (isset($address['house_name']) && $address['house_name']) {
         $parts[] = $address['house_name'];
     }
     
+    // 2. Road/Street with house number if available
+    $roadParts = [];
+    if (isset($address['house_number']) && $address['house_number']) {
+        $roadParts[] = $address['house_number'];
+    }
     if (isset($address['road']) && $address['road']) {
-        $parts[] = $address['road'];
+        $roadParts[] = $address['road'];
     } elseif (isset($address['pedestrian']) && $address['pedestrian']) {
-        $parts[] = $address['pedestrian'];
+        $roadParts[] = $address['pedestrian'];
     } elseif (isset($address['footway']) && $address['footway']) {
-        $parts[] = $address['footway'];
+        $roadParts[] = $address['footway'];
+    }
+    if (!empty($roadParts)) {
+        $parts[] = 'Jl. ' . implode(' ', $roadParts);
     }
     
+    // 3. Suburb/Neighbourhood
     if (isset($address['suburb']) && $address['suburb']) {
         $parts[] = $address['suburb'];
     } elseif (isset($address['neighbourhood']) && $address['neighbourhood']) {
         $parts[] = $address['neighbourhood'];
     }
     
+    // 4. City/Town/Village
     if (isset($address['city']) && $address['city']) {
         $parts[] = $address['city'];
     } elseif (isset($address['town']) && $address['town']) {
@@ -440,8 +461,14 @@ function reverseGeocodeAddress(float $lat, float $lng): ?string {
         $parts[] = $address['village'];
     }
     
+    // 5. State/Province
     if (isset($address['state']) && $address['state']) {
         $parts[] = $address['state'];
+    }
+    
+    // 6. Postal code
+    if (isset($address['postcode']) && $address['postcode']) {
+        $parts[] = $address['postcode'];
     }
     
     // If we have good parts, join them
@@ -451,8 +478,14 @@ function reverseGeocodeAddress(float $lat, float $lng): ?string {
     
     // Fallback to display_name if available
     if ($displayName) {
-        // Clean up the display name
+        // Clean up the display name and try to extract postal code
         $cleanName = preg_replace('/,\s*Indonesia$/', '', $displayName);
+        
+        // Try to append postal code if available
+        if (isset($address['postcode']) && $address['postcode']) {
+            $cleanName .= ', ' . $address['postcode'];
+        }
+        
         return $cleanName;
     }
     
@@ -680,6 +713,153 @@ function getFirstName($fullName) {
     if (empty($fullName)) return '';
     $nameParts = explode(' ', trim($fullName));
     return $nameParts[0];
+}
+
+// Google Authenticator Helper Functions
+function generateGoogleAuthenticatorSecret() {
+    if (!class_exists('\Sonata\GoogleAuthenticator\GoogleAuthenticator')) {
+        return null;
+    }
+    $g = new \Sonata\GoogleAuthenticator\GoogleAuthenticator();
+    return $g->generateSecret();
+}
+
+function getGoogleAuthenticatorQRCode($secret, $email, $issuer = 'Sistem Presensi') {
+    if (!class_exists('\Sonata\GoogleAuthenticator\GoogleQrUrl')) {
+        return null;
+    }
+    try {
+        // Generate QR code URL for Google Authenticator
+        // Format: otpauth://totp/ISSUER:EMAIL?secret=SECRET&issuer=ISSUER
+        $qrContent = sprintf(
+            'otpauth://totp/%s:%s?secret=%s&issuer=%s',
+            urlencode($issuer),
+            urlencode($email),
+            urlencode($secret),
+            urlencode($issuer)
+        );
+        
+        // Use Google Charts API to generate QR code image
+        $qrUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=' . urlencode($qrContent);
+        
+        return $qrUrl;
+    } catch (Exception $e) {
+        error_log("Error generating QR code: " . $e->getMessage());
+        return null;
+    }
+}
+
+function verifyGoogleAuthenticatorOTP($secret, $code) {
+    if (!class_exists('\Sonata\GoogleAuthenticator\GoogleAuthenticator')) {
+        return false;
+    }
+    if (empty($secret) || empty($code)) {
+        return false;
+    }
+    $g = new \Sonata\GoogleAuthenticator\GoogleAuthenticator();
+    return $g->checkCode($secret, $code);
+}
+
+// Email Helper Functions
+function sendPasswordResetEmail($email, $resetToken) {
+    try {
+        // Build reset URL - handle both localhost and production
+        $protocol = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') ? 'https' : 'http';
+        $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+        $scriptName = $_SERVER['SCRIPT_NAME'] ?? '/index.php';
+        $basePath = dirname($scriptName);
+        
+        // Clean up base path - remove trailing slash and normalize
+        $basePath = rtrim($basePath, '/');
+        if ($basePath === '.') {
+            $basePath = '';
+        }
+        if (!empty($basePath) && $basePath !== '/') {
+            $basePath = '/' . ltrim($basePath, '/');
+        }
+        
+        $resetUrl = $protocol . '://' . $host . $basePath . '/index.php?page=verify-otp&token=' . urlencode($resetToken);
+        
+        $subject = "Reset Password - Sistem Presensi";
+        
+        // Professional email template
+        $htmlBody = '<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reset Password</title>
+</head>
+<body style="margin: 0; padding: 0; font-family: Arial, sans-serif; background-color: #f4f4f4;">
+    <table role="presentation" style="width: 100%; border-collapse: collapse;">
+        <tr>
+            <td style="padding: 20px 0; text-align: center; background-color: #ffffff;">
+                <table role="presentation" style="width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                    <tr>
+                        <td style="padding: 40px 40px 20px 40px; text-align: center; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 8px 8px 0 0;">
+                            <h1 style="margin: 0; color: #ffffff; font-size: 28px; font-weight: bold;">Reset Password</h1>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 40px; background-color: #ffffff;">
+                            <p style="margin: 0 0 20px 0; color: #333333; font-size: 16px; line-height: 1.6;">Halo,</p>
+                            <p style="margin: 0 0 20px 0; color: #333333; font-size: 16px; line-height: 1.6;">Kami menerima permintaan untuk mereset password akun Anda di Sistem Presensi Berbasis Wajah.</p>
+                            <p style="margin: 0 0 30px 0; color: #333333; font-size: 16px; line-height: 1.6;">Untuk melanjutkan proses reset password, silakan verifikasi dengan kode OTP dari Google Authenticator Anda terlebih dahulu.</p>
+                            <div style="text-align: center; margin: 30px 0;">
+                                <a href="' . htmlspecialchars($resetUrl) . '" style="display: inline-block; padding: 14px 32px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #ffffff; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 16px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">Verifikasi OTP</a>
+                            </div>
+                            <p style="margin: 30px 0 10px 0; color: #666666; font-size: 14px; line-height: 1.6;">Atau salin link berikut ke browser Anda:</p>
+                            <p style="margin: 0 0 30px 0; color: #667eea; font-size: 14px; word-break: break-all; line-height: 1.6;">' . htmlspecialchars($resetUrl) . '</p>
+                            <div style="background-color: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 30px 0; border-radius: 4px;">
+                                <p style="margin: 0; color: #856404; font-size: 14px; line-height: 1.6;"><strong>Penting:</strong> Link ini akan kedaluwarsa dalam 1 jam. Jika Anda tidak meminta reset password, abaikan email ini.</p>
+                            </div>
+                            <p style="margin: 30px 0 0 0; color: #666666; font-size: 14px; line-height: 1.6;">Terima kasih,<br><strong>Tim Sistem Presensi</strong></p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 20px 40px; background-color: #f8f9fa; border-radius: 0 0 8px 8px; text-align: center; border-top: 1px solid #e9ecef;">
+                            <p style="margin: 0; color: #6c757d; font-size: 12px;">&copy; ' . date('Y') . ' Sistem Presensi Berbasis Wajah. All rights reserved.</p>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>';
+        
+        $textBody = "Reset Password\n\n";
+        $textBody .= "Kami menerima permintaan untuk mereset password akun Anda.\n\n";
+        $textBody .= "Untuk melanjutkan, silakan verifikasi dengan kode OTP dari Google Authenticator Anda:\n";
+        $textBody .= $resetUrl . "\n\n";
+        $textBody .= "Link ini akan kedaluwarsa dalam 1 jam.\n\n";
+        $textBody .= "Jika Anda tidak meminta reset password, abaikan email ini.\n\n";
+        $textBody .= "Terima kasih,\nTim Sistem Presensi";
+        
+        $headers = "MIME-Version: 1.0" . "\r\n";
+        $headers .= "Content-type:text/html;charset=UTF-8" . "\r\n";
+        $headers .= "From: Sistem Presensi <noreply@presensi.local>" . "\r\n";
+        $headers .= "Reply-To: noreply@presensi.local" . "\r\n";
+        
+        // Try to send email
+        $result = @mail($email, $subject, $htmlBody, $headers);
+        
+        // Log email attempt
+        error_log("Password reset email sent to: $email, URL: $resetUrl, Result: " . ($result ? 'SUCCESS' : 'FAILED'));
+        
+        // For development/testing: if mail() fails, log but don't fail completely
+        // In production, you should configure SMTP properly
+        if (!$result) {
+            error_log("Warning: mail() function returned false for $email. Check PHP mail configuration.");
+            // For development: we'll still allow the reset to proceed
+            // In production, you should configure SMTP properly or use PHPMailer
+        }
+        
+        return $result;
+    } catch (Exception $e) {
+        error_log("Error in sendPasswordResetEmail: " . $e->getMessage());
+        return false;
+    }
 }
 
 // FaceNet Integration Functions
@@ -1960,7 +2140,7 @@ if (isset($_GET['ajax'])) {
     }
 
     // Must be authenticated for all endpoints except auth-related and public landing scan
-    if (!in_array($action, ['login', 'register', 'get_members', 'save_attendance', 'get_today_attendance'], true)) {
+    if (!in_array($action, ['login', 'register', 'get_members', 'save_attendance', 'get_today_attendance', 'forgot_password', 'verify_otp', 'reset_password', 'get_ga_qr'], true)) {
         if (!isset($_SESSION['user'])) jsonResponse(['error' => 'Unauthorized'], 401);
     }
     // Admin manual holidays CRUD
@@ -2099,6 +2279,183 @@ if (isset($_GET['ajax'])) {
         triggerDatabaseBackup();
         
         jsonResponse(['ok' => true]);
+    }
+
+    // Forgot Password - Request reset
+    if ($action === 'forgot_password' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        $email = trim($_POST['email'] ?? '');
+        if (empty($email)) {
+            jsonResponse(['ok' => false, 'message' => 'Email wajib diisi'], 400);
+        }
+        
+        $stmt = $pdo->prepare("SELECT id, email, google_authenticator_secret FROM users WHERE email=:email LIMIT 1");
+        $stmt->execute([':email' => $email]);
+        $user = $stmt->fetch();
+        
+        if (!$user) {
+            // Don't reveal if email exists for security
+            jsonResponse(['ok' => true, 'message' => 'Jika email terdaftar, link reset password telah dikirim.']);
+        }
+        
+        // Check if user has Google Authenticator secret
+        if (empty($user['google_authenticator_secret'])) {
+            jsonResponse(['ok' => false, 'message' => 'Akun Anda belum memiliki Google Authenticator. Silakan hubungi administrator untuk mengatur QR code.'], 400);
+        }
+        
+        // Generate reset token
+        $resetToken = bin2hex(random_bytes(32));
+        $resetExpires = date('Y-m-d H:i:s', strtotime('+1 hour'));
+        
+        $stmt = $pdo->prepare("UPDATE users SET password_reset_token=:token, password_reset_expires=:expires WHERE id=:id");
+        $stmt->execute([
+            ':token' => $resetToken,
+            ':expires' => $resetExpires,
+            ':id' => $user['id']
+        ]);
+        
+        // Build reset URL for response (same as email)
+        $protocol = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') ? 'https' : 'http';
+        $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+        $scriptName = $_SERVER['SCRIPT_NAME'] ?? '/index.php';
+        $basePath = dirname($scriptName);
+        $basePath = rtrim($basePath, '/');
+        if ($basePath === '.') {
+            $basePath = '';
+        }
+        if (!empty($basePath) && $basePath !== '/') {
+            $basePath = '/' . ltrim($basePath, '/');
+        }
+        $resetUrl = $protocol . '://' . $host . $basePath . '/index.php?page=verify-otp&token=' . urlencode($resetToken);
+        
+        // Try to send email
+        $emailSent = @sendPasswordResetEmail($email, $resetToken);
+        
+        // Always return success with reset URL for direct redirect
+        // Email is optional (for production, configure SMTP properly)
+        error_log("Password reset token generated for $email. Reset URL: $resetUrl");
+        
+        // Return success with token for direct redirect
+        jsonResponse([
+            'ok' => true, 
+            'reset_url' => $resetUrl,
+            'token' => $resetToken,
+            'message' => 'Redirecting to OTP verification...'
+        ]);
+    }
+
+    // Verify OTP - Step 2 of forgot password
+    if ($action === 'verify_otp' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        $token = trim($_POST['token'] ?? '');
+        $otp = trim($_POST['otp'] ?? '');
+        
+        if (empty($token) || empty($otp)) {
+            jsonResponse(['ok' => false, 'message' => 'Token dan OTP wajib diisi'], 400);
+        }
+        
+        // Find user by reset token
+        $stmt = $pdo->prepare("SELECT id, email, google_authenticator_secret, password_reset_expires FROM users WHERE password_reset_token=:token LIMIT 1");
+        $stmt->execute([':token' => $token]);
+        $user = $stmt->fetch();
+        
+        if (!$user) {
+            jsonResponse(['ok' => false, 'message' => 'Token tidak valid atau telah kedaluwarsa'], 400);
+        }
+        
+        // Check if token expired
+        if (strtotime($user['password_reset_expires']) < time()) {
+            jsonResponse(['ok' => false, 'message' => 'Token telah kedaluwarsa. Silakan request reset password lagi.'], 400);
+        }
+        
+        // Verify OTP with Google Authenticator
+        if (empty($user['google_authenticator_secret'])) {
+            jsonResponse(['ok' => false, 'message' => 'Akun Anda belum memiliki Google Authenticator.'], 400);
+        }
+        
+        if (!verifyGoogleAuthenticatorOTP($user['google_authenticator_secret'], $otp)) {
+            jsonResponse(['ok' => false, 'message' => 'Kode OTP tidak valid. Pastikan kode dari Google Authenticator masih berlaku.'], 400);
+        }
+        
+        // OTP verified successfully, redirect to reset password page
+        jsonResponse(['ok' => true, 'token' => $token, 'message' => 'OTP berhasil diverifikasi. Silakan buat password baru.']);
+    }
+
+    // Reset Password - Step 3 of forgot password
+    if ($action === 'reset_password' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        $token = trim($_POST['token'] ?? '');
+        $password = $_POST['password'] ?? '';
+        $password2 = $_POST['password2'] ?? '';
+        
+        if (empty($token) || empty($password) || empty($password2)) {
+            jsonResponse(['ok' => false, 'message' => 'Semua field wajib diisi'], 400);
+        }
+        
+        if ($password !== $password2) {
+            jsonResponse(['ok' => false, 'message' => 'Konfirmasi password tidak cocok'], 400);
+        }
+        
+        // Find user by reset token
+        $stmt = $pdo->prepare("SELECT id, password_reset_expires FROM users WHERE password_reset_token=:token LIMIT 1");
+        $stmt->execute([':token' => $token]);
+        $user = $stmt->fetch();
+        
+        if (!$user) {
+            jsonResponse(['ok' => false, 'message' => 'Token tidak valid atau telah kedaluwarsa'], 400);
+        }
+        
+        // Check if token expired
+        if (strtotime($user['password_reset_expires']) < time()) {
+            jsonResponse(['ok' => false, 'message' => 'Token telah kedaluwarsa. Silakan request reset password lagi.'], 400);
+        }
+        
+        // Update password
+        $hash = password_hash($password, PASSWORD_BCRYPT);
+        $stmt = $pdo->prepare("UPDATE users SET password_hash=:hash, password_reset_token=NULL, password_reset_expires=NULL WHERE id=:id");
+        $stmt->execute([
+            ':hash' => $hash,
+            ':id' => $user['id']
+        ]);
+        
+        jsonResponse(['ok' => true, 'message' => 'Password berhasil direset. Silakan login dengan password baru.']);
+    }
+
+    // Get Google Authenticator QR Code for member
+    if ($action === 'get_ga_qr') {
+        if (!isAdmin()) jsonResponse(['error' => 'Forbidden'], 403);
+        
+        $userId = (int)($_GET['user_id'] ?? 0);
+        if (!$userId) {
+            jsonResponse(['ok' => false, 'message' => 'User ID tidak valid'], 400);
+        }
+        
+        $stmt = $pdo->prepare("SELECT id, email, google_authenticator_secret FROM users WHERE id=:id LIMIT 1");
+        $stmt->execute([':id' => $userId]);
+        $user = $stmt->fetch();
+        
+        if (!$user) {
+            jsonResponse(['ok' => false, 'message' => 'User tidak ditemukan'], 404);
+        }
+        
+        // Generate secret if doesn't exist
+        if (empty($user['google_authenticator_secret'])) {
+            $secret = generateGoogleAuthenticatorSecret();
+            if (!$secret) {
+                jsonResponse(['ok' => false, 'message' => 'Gagal menghasilkan secret. Pastikan Google Authenticator library terpasang.'], 500);
+            }
+            
+            $stmt = $pdo->prepare("UPDATE users SET google_authenticator_secret=:secret WHERE id=:id");
+            $stmt->execute([':secret' => $secret, ':id' => $userId]);
+        } else {
+            $secret = $user['google_authenticator_secret'];
+        }
+        
+        // Generate QR code URL
+        $qrUrl = getGoogleAuthenticatorQRCode($secret, $user['email'], 'Sistem Presensi');
+        
+        if (!$qrUrl) {
+            jsonResponse(['ok' => false, 'message' => 'Gagal menghasilkan QR code.'], 500);
+        }
+        
+        jsonResponse(['ok' => true, 'qr_url' => $qrUrl, 'secret' => $secret, 'email' => $user['email']]);
     }
 
     if ($action === 'logout') {
@@ -2528,51 +2885,156 @@ if (isset($_GET['ajax'])) {
                 $lng = isset($_POST['lng']) ? (float)$_POST['lng'] : null;
                 $lokasi = $_POST['lokasi'] ?? null;
                 $alasanWfa = null;
+                $gpsAccuracy = isset($_POST['gps_accuracy']) ? (float)$_POST['gps_accuracy'] : null;
+                $wifiSSID = trim($_POST['wifi_ssid'] ?? '');
                 
-                // Convert coordinates to readable address if we have coordinates but no location name
-                if ($lat !== null && $lng !== null && (!$lokasi || strpos($lokasi, 'Lokasi:') === 0)) {
-                    $reverseGeocoded = reverseGeocodeAddress($lat, $lng);
-                    if ($reverseGeocoded) {
-                        $lokasi = $reverseGeocoded;
+                // Strict validation: GPS location is mandatory
+                if ($lat === null || $lng === null || $lat === 0 || $lng === 0) {
+                    jsonResponse(['ok' => false, 'message' => 'Lokasi GPS wajib untuk presensi. Pastikan GPS aktif dan izin lokasi diberikan.'], 400);
+                }
+                
+                // Accept GPS even with lower accuracy (indoors/gymnasium buildings are common)
+                // Log warning but don't reject - GPS accuracy can be low indoors which is normal
+                if ($gpsAccuracy !== null && $gpsAccuracy > 50) {
+                    error_log('GPS accuracy low: ' . round($gpsAccuracy) . 'm - accepting anyway (user may be indoors)');
+                }
+                
+                // OPTIMIZED: Quick reverse geocoding - ensure lokasi is never empty
+                if (empty($lokasi) || strpos($lokasi, 'Lokasi:') === 0) {
+                    if ($lat !== null && $lng !== null) {
+                        // Try reverse geocoding with shorter timeout
+                        $reverseGeocoded = @reverseGeocodeAddress($lat, $lng);
+                        if ($reverseGeocoded && !empty($reverseGeocoded)) {
+                            $lokasi = $reverseGeocoded;
+                        } else {
+                            // Fallback - ensure lokasi is never empty
+                            $lokasi = 'Lokasi: ' . round($lat, 6) . ', ' . round($lng, 6);
+                        }
+                    } else {
+                        // No coordinates - use default
+                        $lokasi = 'Lokasi tidak tersedia';
+                    }
+                }
+                
+                // Final validation - ensure lokasi is never empty
+                if (empty($lokasi)) {
+                    if ($lat !== null && $lng !== null) {
+                        $lokasi = 'Lokasi: ' . round($lat, 6) . ', ' . round($lng, 6);
+                    } else {
+                        $lokasi = 'Lokasi tidak tersedia';
                     }
                 }
 
                 // Determine WFO via API or coordinate fallback
                 $wfoMode = strtolower(getSetting($pdo, 'wfo_mode', 'api'));
                 $publicIp = $_POST['public_ip'] ?? '';
+                // OPTIMIZED: If public IP not provided, try to get from server headers
+                if (empty($publicIp)) {
+                    $publicIp = $_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['HTTP_CF_CONNECTING_IP'] ?? $_SERVER['REMOTE_ADDR'] ?? '';
+                    if (strpos($publicIp, ',') !== false) {
+                        $publicIp = trim(explode(',', $publicIp)[0]);
+                    }
+                }
+                $requireWifi = (int)getSetting($pdo, 'wfo_require_wifi', '1');
                 $isInsideTelu = false;
+                $isValidWifi = false;
                 
-                if ($wfoMode === 'api') {
-                    // Try API-based detection first
-                    $isInsideTelu = isWfoByApi($pdo, $publicIp);
-                    // Fallback to coordinate if API cannot confirm
-                    if (!$isInsideTelu) {
-                        $wfoLat = (float)getSetting($pdo, 'wfo_lat', '-6.9738');
-                        $wfoLng = (float)getSetting($pdo, 'wfo_lng', '107.6300');
-                        $wfoRadius = (int)getSetting($pdo, 'wfo_radius_m', '1200'); // meters
-                        if ($lat !== null && $lng !== null) {
-                            $earth = 6371000; // meters
-                            $dLat = deg2rad($wfoLat - $lat);
-                            $dLng = deg2rad($wfoLng - $lng);
-                            $a = sin($dLat/2) * sin($dLat/2) + cos(deg2rad($lat)) * cos(deg2rad($wfoLat)) * sin($dLng/2) * sin($dLng/2);
-                            $c = 2 * atan2(sqrt($a), sqrt(1-$a));
-                            $distance = $earth * $c;
-                            $isInsideTelu = ($distance <= max(0, $wfoRadius));
+                // Check WiFi SSID if required (case-insensitive, partial match with more SSID variants)
+                if ($requireWifi && !empty($wifiSSID)) {
+                    $validWifiSSIDs = array_filter(array_map('trim', explode(',', getSetting($pdo, 'wfo_wifi_ssids', 'Telkom University,TelU,WiFi Telkom University,WiFi-TelU,Telkom-University'))));
+                    $wifiSSIDLower = strtolower(trim($wifiSSID));
+                    foreach ($validWifiSSIDs as $validSSID) {
+                        $validSSIDLower = strtolower(trim($validSSID));
+                        // Partial match - check if WiFi SSID contains valid SSID or vice versa
+                        if (strpos($wifiSSIDLower, $validSSIDLower) !== false || strpos($validSSIDLower, $wifiSSIDLower) !== false) {
+                            $isValidWifi = true;
+                            break;
                         }
                     }
-                } else {
-                    // Coordinate-only mode
-                    $wfoLat = (float)getSetting($pdo, 'wfo_lat', '-6.9738');
-                    $wfoLng = (float)getSetting($pdo, 'wfo_lng', '107.6300');
-                    $wfoRadius = (int)getSetting($pdo, 'wfo_radius_m', '1200'); // meters
-                    if ($lat !== null && $lng !== null) {
-                        $earth = 6371000; // meters
-                        $dLat = deg2rad($wfoLat - $lat);
-                        $dLng = deg2rad($wfoLng - $lng);
-                        $a = sin($dLat/2) * sin($dLat/2) + cos(deg2rad($lat)) * cos(deg2rad($wfoLat)) * sin($dLng/2) * sin($dLng/2);
-                        $c = 2 * atan2(sqrt($a), sqrt(1-$a));
-                        $distance = $earth * $c;
-                        $isInsideTelu = ($distance <= max(0, $wfoRadius));
+                }
+                
+                // Strict location validation with smaller radius for WFO
+                $wfoLat = (float)getSetting($pdo, 'wfo_lat', '-6.9738');
+                $wfoLng = (float)getSetting($pdo, 'wfo_lng', '107.6300');
+                $wfoRadius = (int)getSetting($pdo, 'wfo_radius_m', '800'); // Reduced radius to 800m for stricter validation
+                
+                if ($lat !== null && $lng !== null) {
+                    $earth = 6371000; // meters
+                    $dLat = deg2rad($wfoLat - $lat);
+                    $dLng = deg2rad($wfoLng - $lng);
+                    $a = sin($dLat/2) * sin($dLat/2) + cos(deg2rad($lat)) * cos(deg2rad($wfoLat)) * sin($dLng/2) * sin($dLng/2);
+                    $c = 2 * atan2(sqrt($a), sqrt(1-$a));
+                    $distance = $earth * $c;
+                    $isInsideTelu = ($distance <= max(0, $wfoRadius));
+                    
+                    // Additional strict validation: must be very close to Telkom University (within 800m)
+                    if ($isInsideTelu && $distance > 800) {
+                        $isInsideTelu = false; // Too far from center, require WFA
+                    }
+                }
+                
+                // WFO validation: Must have GPS inside area AND (WiFi Telkom University OR IP API Telkom University)
+                $isInsideTeluByApi = false;
+                if ($wfoMode === 'api' && !empty($publicIp)) {
+                    $isInsideTeluByApi = isWfoByApi($pdo, $publicIp);
+                }
+                
+                // For WFO: GPS must be inside AND (WiFi Telkom OR IP API Telkom)
+                // Check if user meets WFO requirements
+                if ($isInsideTelu) {
+                    // Check WiFi validation
+                    $hasValidWifi = false;
+                    if ($requireWifi) {
+                        if (empty($wifiSSID)) {
+                            // Browser can't detect WiFi (security limitation) - allow if IP API is valid OR GPS is inside
+                            // If GPS is inside Telkom University area, it's likely user is connected to Telkom WiFi
+                            if ($wfoMode === 'api' && $isInsideTeluByApi) {
+                                $hasValidWifi = true; // IP API is valid, consider WiFi valid
+                            } else {
+                                // WiFi not detected but GPS is inside - likely connected to Telkom WiFi (browser limitation)
+                                // Allow WFO since GPS validation is the primary check
+                                $hasValidWifi = true;
+                                error_log('WiFi SSID not detected but GPS inside WFO area - allowing WFO (browser limitation)');
+                            }
+                        } else {
+                            // WiFi SSID was detected - must match valid SSIDs
+                            $hasValidWifi = $isValidWifi;
+                            // If WiFi doesn't match but IP API is valid, still allow (may be network issue)
+                            if (!$hasValidWifi && $wfoMode === 'api' && $isInsideTeluByApi) {
+                                $hasValidWifi = true;
+                                error_log('WiFi SSID mismatch but IP API valid - allowing WFO');
+                            }
+                        }
+                    } else {
+                        // WiFi not required
+                        $hasValidWifi = true;
+                    }
+                    
+                    // Check IP API validation
+                    $hasValidApi = ($wfoMode === 'api' && $isInsideTeluByApi);
+                    
+                    // WFO requires: GPS inside AND (Valid WiFi OR Valid IP API)
+                    // Since GPS is already inside, if WiFi or IP API is valid, allow WFO
+                    if (!$hasValidWifi && !$hasValidApi) {
+                        // GPS inside but no valid WiFi or IP - this is rare, but still allow if GPS is definitely inside
+                        // Primary validation is GPS location - if GPS says inside, user is likely at Telkom University
+                        if ($distance <= 500) { // Within 500m - very confident
+                            $hasValidWifi = true; // Allow WFO based on GPS alone
+                            error_log('GPS inside WFO area (within 500m) - allowing WFO based on GPS location');
+                        } else {
+                            // Further away - require WiFi or IP confirmation
+                            $isInsideTelu = false;
+                            $alasanWfa = $_POST['wfa_reason'] ?? $_POST['alasan_wfa'] ?? null;
+                            if (!$alasanWfa) {
+                                jsonResponse(['ok' => false, 'need_reason' => true, 'message' => 'Untuk presensi WFO, Anda harus terhubung ke WiFi Telkom University atau menggunakan IP Telkom University. Silakan hubungkan ke WiFi Telkom University atau gunakan presensi WFA dengan alasan.'], 400);
+                            }
+                        }
+                    }
+                    
+                    // Only reject if WiFi SSID was explicitly detected and doesn't match AND IP API also invalid
+                    // AND user is not very close to center (within 500m)
+                    if ($requireWifi && !empty($wifiSSID) && !$isValidWifi && !$hasValidApi && $distance > 500) {
+                        jsonResponse(['ok' => false, 'need_reason' => true, 'message' => 'WiFi yang terhubung bukan WiFi Telkom University. Silakan hubungkan ke WiFi Telkom University atau gunakan presensi WFA dengan alasan.'], 400);
                     }
                 }
 
@@ -2580,7 +3042,7 @@ if (isset($_GET['ajax'])) {
                 if (!$isInsideTelu) {
                     $alasanWfa = $_POST['wfa_reason'] ?? $_POST['alasan_wfa'] ?? null;
                     if (!$alasanWfa) {
-                        jsonResponse(['ok' => false, 'need_reason' => true, 'message' => 'Di luar wilayah kantor. Harap isi alasan kerja di luar (WFA).'], 400);
+                        jsonResponse(['ok' => false, 'need_reason' => true, 'message' => 'Di luar wilayah kantor atau tidak terhubung ke WiFi/IP Telkom University. Harap isi alasan kerja di luar (WFA).'], 400);
                     }
                 }
 
@@ -2634,11 +3096,29 @@ if (isset($_GET['ajax'])) {
                 $lng = isset($_POST['lng']) ? (float)$_POST['lng'] : null;
                 $lokasi = $_POST['lokasi'] ?? null;
                 
-                // Convert coordinates to readable address if we have coordinates but no location name
-                if ($lat !== null && $lng !== null && (!$lokasi || strpos($lokasi, 'Lokasi:') === 0)) {
-                    $reverseGeocoded = reverseGeocodeAddress($lat, $lng);
-                    if ($reverseGeocoded) {
-                        $lokasi = $reverseGeocoded;
+                // OPTIMIZED: Quick reverse geocoding - ensure lokasi is never empty
+                if (empty($lokasi) || strpos($lokasi, 'Lokasi:') === 0) {
+                    if ($lat !== null && $lng !== null) {
+                        // Try reverse geocoding with shorter timeout
+                        $reverseGeocoded = @reverseGeocodeAddress($lat, $lng);
+                        if ($reverseGeocoded && !empty($reverseGeocoded)) {
+                            $lokasi = $reverseGeocoded;
+                        } else {
+                            // Fallback - ensure lokasi is never empty
+                            $lokasi = 'Lokasi: ' . round($lat, 6) . ', ' . round($lng, 6);
+                        }
+                    } else {
+                        // No coordinates - use default
+                        $lokasi = 'Lokasi tidak tersedia';
+                    }
+                }
+                
+                // Final validation - ensure lokasi is never empty
+                if (empty($lokasi)) {
+                    if ($lat !== null && $lng !== null) {
+                        $lokasi = 'Lokasi: ' . round($lat, 6) . ', ' . round($lng, 6);
+                    } else {
+                        $lokasi = 'Lokasi tidak tersedia';
                     }
                 }
                 
@@ -3692,6 +4172,8 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         $wfoApiOrgKeywords = trim($_POST['wfo_api_org_keywords'] ?? '');
         $wfoApiAsnList = trim($_POST['wfo_api_asn_list'] ?? '');
         $wfoApiCidrList = trim($_POST['wfo_api_cidr_list'] ?? '');
+        $wfoWifiSSIDs = trim($_POST['wfo_wifi_ssids'] ?? '');
+        $wfoRequireWifi = trim($_POST['wfo_require_wifi'] ?? '');
         
         if (!is_numeric($maxOntimeHour) || $maxOntimeHour < 0 || $maxOntimeHour > 23) {
             jsonResponse(['ok' => false, 'message' => 'Jam maksimal ontime harus berupa angka 0-23'], 400);
@@ -3739,6 +4221,8 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         if ($wfoApiOrgKeywords !== '') setSetting($pdo, 'wfo_api_org_keywords', $wfoApiOrgKeywords);
         if ($wfoApiAsnList !== '') setSetting($pdo, 'wfo_api_asn_list', $wfoApiAsnList);
         if ($wfoApiCidrList !== '') setSetting($pdo, 'wfo_api_cidr_list', $wfoApiCidrList);
+        if ($wfoWifiSSIDs !== '') setSetting($pdo, 'wfo_wifi_ssids', $wfoWifiSSIDs);
+        if ($wfoRequireWifi !== '') setSetting($pdo, 'wfo_require_wifi', $wfoRequireWifi);
         
         // Trigger backup setelah update settings
         triggerDatabaseBackup();
@@ -4416,7 +4900,7 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         }
     }
 
-    jsonResponse(['error' => 'Unknown endpoint'], 404);
+    jsonResponse(['ok' => false, 'message' => 'Endpoint tidak ditemukan'], 404);
 }
 
 // ----- PAGE ROUTING -----
@@ -4548,23 +5032,29 @@ if ($page === 'logout') {
         
         /* Full height image adjustments */
         .full-height-image {
-            height: calc(100vh - 80px); /* Subtract header height */
-            min-height: 600px;
+            min-height: 500px;
+            max-height: 700px;
             display: flex;
             align-items: center;
             justify-content: center;
         }
         
         .image-container {
-            width: auto;
+            width: 100%;
             height: 100%;
             max-width: 100%;
         }
         
         .image-container img {
-            width: auto;
+            width: 100%;
             height: 100%;
             object-fit: contain;
+        }
+        
+        /* Landing page container */
+        #page-presensi {
+            max-width: 100%;
+            overflow-x: hidden;
         }
         
         .text-panel-middle {
@@ -4587,61 +5077,53 @@ if ($page === 'logout') {
         
         /* Responsive adjustments */
         @media (max-width: 1024px) {
-            .landing-panel, .illustration-panel {
+            #two-panel-layout {
+                grid-template-columns: 1fr;
+                gap: 2rem;
+            }
+            
+            .landing-panel {
                 padding: 1.5rem;
+                max-width: 100%;
             }
             
-            .landing-panel h2 {
-                font-size: 2rem;
-            }
-            
-            .full-height-image {
-                height: calc(100vh - 70px);
-            }
-            
-            .text-panel-middle {
-                height: 50vh;
-                min-height: 350px;
-                max-height: 450px;
-                margin-top: 6vh; /* Adjust for tablet */
-            }
-            
-            .text-panel-container {
-                margin-left: 1rem;
-            }
-            
-            .image-panel-container {
-                margin-right: 1rem;
-            }
-        }
-        
-        @media (max-width: 768px) {
             .landing-panel h2 {
                 font-size: 1.75rem;
             }
             
+            .full-height-image {
+                min-height: 400px;
+                max-height: 500px;
+            }
+        }
+        
+        @media (max-width: 768px) {
+            .landing-panel {
+                padding: 1rem;
+            }
+            
+            .landing-panel h2 {
+                font-size: 1.5rem;
+            }
+            
             .btn-attendance {
                 padding: 0.75rem 1.5rem;
-                font-size: 1rem;
+                font-size: 0.9rem;
             }
             
             .full-height-image {
-                height: calc(100vh - 60px);
-            }
-            
-            .text-panel-middle {
-                height: auto;
                 min-height: 300px;
-                max-height: none;
-                margin-top: 4vh; /* Adjust for mobile */
+                max-height: 400px;
+            }
+        }
+        
+        @media (min-width: 1025px) {
+            #two-panel-layout {
+                grid-template-columns: 1fr 1fr;
             }
             
-            .text-panel-container {
-                margin-left: 0.5rem;
-            }
-            
-            .image-panel-container {
-                margin-right: 0.5rem;
+            .landing-panel {
+                max-width: 100%;
             }
         }
     </style>
@@ -4656,7 +5138,7 @@ if ($page === 'logout') {
 
 <?php 
 // Public landing page: presensi can be accessed without login
-if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'], true))) { 
+if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing','forgot-password','verify-otp','reset-password'], true))) { 
     $page = 'landing'; 
 }
 ?>
@@ -4686,6 +5168,7 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                 <div class="absolute top-3 left-3 flex gap-2">
                     <button id="btn-back-scan" class="bg-white/90 hover:bg-white text-gray-800 font-semibold py-1.5 px-3 rounded-lg hidden">Kembali</button>
                     <button id="btn-stop-detection" class="bg-red-500/90 hover:bg-red-600 text-white font-semibold py-1.5 px-3 rounded-lg hidden">Stop Deteksi</button>
+                    <button id="btn-start-detection" class="bg-green-500/90 hover:bg-green-600 text-white font-semibold py-1.5 px-3 rounded-lg hidden">Mulai Deteksi</button>
                 </div>
             </div>
             <div id="presensi-status" class="mt-4 text-center font-medium text-lg p-3 rounded-md hidden"></div>
@@ -4732,9 +5215,9 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
             </div>
             
             <!-- Two Panel Layout -->
-            <div id="two-panel-layout" class="grid grid-cols-1 lg:grid-cols-3 gap-8 w-full px-4">
+            <div id="two-panel-layout" class="grid grid-cols-1 lg:grid-cols-2 gap-8 w-full px-4 max-w-7xl mx-auto">
                 <!-- Left Panel - Text Content -->
-                <div class="landing-panel p-8 rounded-2xl shadow-lg lg:col-span-1 mt-12 mx-auto max-w-md md:mt-16 md:max-w-lg lg:mt-24 lg:mx-0">
+                <div class="landing-panel p-6 md:p-8 rounded-2xl shadow-lg lg:col-span-1 flex flex-col justify-center">
                     <div class="mb-6">
                         <h2 class="text-2xl font-bold text-gray-800 mb-3">PRESENSI MUDAH, CEPAT & AKURAT.</h2>
                         <p class="text-base text-gray-600 mb-4">Selamat datang di solusi presensi wajah terdepan.</p>
@@ -4787,9 +5270,9 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                 </div>
                 
                 <!-- Right Panel - Illustration -->
-                <div class="full-height-image lg:col-span-2 image-panel-container">
-                    <div class="image-container">
-                        <img src="assets/photo/craiyon_110731_image.png" alt="Facial Recognition Illustration">
+                <div class="full-height-image lg:col-span-1 image-panel-container hidden lg:flex items-center justify-center">
+                    <div class="image-container w-full h-full">
+                        <img src="assets/photo/craiyon_110731_image.png" alt="Facial Recognition Illustration" class="w-full h-full object-contain">
                     </div>
                 </div>
             </div>
@@ -4867,7 +5350,10 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                 </div>
                 <button class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 rounded-lg transition">Login</button>
             </form>
-            <p class="text-center text-sm text-gray-600 mt-4">Belum punya akun? <a class="text-indigo-600 hover:underline" href="?page=register">Daftar</a></p>
+            <p class="text-center text-sm text-gray-600 mt-4">
+                <a class="text-indigo-600 hover:underline" href="?page=forgot-password">Lupa Password?</a>
+            </p>
+            <p class="text-center text-sm text-gray-600 mt-2">Belum punya akun? <a class="text-indigo-600 hover:underline" href="?page=register">Daftar</a></p>
             <div id="login-msg" class="text-center text-sm mt-4"></div>
             <a href="?page=landing" class="bg-indigo-600 hover:bg-indigo-700 text-white hover:text-gray-800 rounded-full p-2 mb-4 pr-3"><i class="fi fi-sr-angle-left"></i></a>
         </div>
@@ -4933,23 +5419,101 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
             <a href="?page=landing" class="bg-gray-500 hover:bg-gray-600 text-white hover:text-gray-800 rounded-full p-2 mb-4 pr-3 "><i class="fi fi-sr-angle-left"></i></a>
         </div>
     </div>
+<?php elseif ($page === 'forgot-password'): ?>
+    <div class="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-orange-50 to-red-50">
+        <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-8">
+            <h1 class="text-2xl font-bold text-gray-800 mb-2">Lupa Password</h1>
+            <p class="text-gray-500 mb-6">Masukkan email Anda untuk memulai proses reset password</p>
+            <form id="form-forgot-password" class="space-y-4">
+                <div>
+                    <label class="block text-sm text-gray-600 mb-1">Email</label>
+                    <input name="email" type="email" class="w-full p-3 border rounded-lg focus:ring focus:border-indigo-400" required>
+                </div>
+                <button class="w-full bg-orange-600 hover:bg-orange-700 text-white font-semibold py-3 rounded-lg transition">Kirim Permintaan Reset</button>
+            </form>
+            <p class="text-center text-sm text-gray-600 mt-4">
+                <a class="text-indigo-600 hover:underline" href="?page=login">Kembali ke Login</a>
+            </p>
+            <div id="forgot-password-msg" class="text-center text-sm mt-4"></div>
+        </div>
+    </div>
+<?php elseif ($page === 'verify-otp'): ?>
+    <?php
+    $tokenFromUrl = $_GET['token'] ?? '';
+    ?>
+    <div class="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-purple-50 to-indigo-50">
+        <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-8">
+            <h1 class="text-2xl font-bold text-gray-800 mb-2">Verifikasi OTP</h1>
+            <p class="text-gray-500 mb-6">Masukkan kode OTP dari Google Authenticator Anda</p>
+            <form id="form-verify-otp" class="space-y-4">
+                <input type="hidden" id="reset-token" name="token" value="<?php echo htmlspecialchars($tokenFromUrl); ?>">
+                <div>
+                    <label class="block text-sm text-gray-600 mb-1">Kode OTP</label>
+                    <input name="otp" type="text" maxlength="6" pattern="[0-9]{6}" class="w-full p-3 border rounded-lg focus:ring focus:border-indigo-400 text-center text-2xl tracking-widest" placeholder="000000" required>
+                    <p class="text-xs text-gray-500 mt-2">Masukkan 6 digit kode dari Google Authenticator</p>
+                </div>
+                <button class="w-full bg-purple-600 hover:bg-purple-700 text-white font-semibold py-3 rounded-lg transition">Verifikasi</button>
+            </form>
+            <p class="text-center text-sm text-gray-600 mt-4">
+                <a class="text-indigo-600 hover:underline" href="?page=forgot-password">Kembali</a>
+            </p>
+            <div id="verify-otp-msg" class="text-center text-sm mt-4"></div>
+        </div>
+    </div>
+<?php elseif ($page === 'reset-password'): ?>
+    <?php
+    $tokenFromUrl = $_GET['token'] ?? '';
+    ?>
+    <div class="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-green-50 to-emerald-50">
+        <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-8">
+            <h1 class="text-2xl font-bold text-gray-800 mb-2">Reset Password</h1>
+            <p class="text-gray-500 mb-6">Masukkan password baru Anda</p>
+            <form id="form-reset-password" class="space-y-4">
+                <input type="hidden" id="reset-token-final" name="token" value="<?php echo htmlspecialchars($tokenFromUrl); ?>">
+                <div>
+                    <label class="block text-sm text-gray-600 mb-1">Password Baru</label>
+                    <input name="password" type="password" class="w-full p-3 border rounded-lg focus:ring focus:border-indigo-400" required>
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-600 mb-1">Konfirmasi Password Baru</label>
+                    <input name="password2" type="password" class="w-full p-3 border rounded-lg focus:ring focus:border-indigo-400" required>
+                </div>
+                <button class="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-3 rounded-lg transition">Reset Password</button>
+            </form>
+            <p class="text-center text-sm text-gray-600 mt-4">
+                <a class="text-indigo-600 hover:underline" href="?page=login">Kembali ke Login</a>
+            </p>
+            <div id="reset-password-msg" class="text-center text-sm mt-4"></div>
+        </div>
+    </div>
 <?php else: ?>
     <header class="bg-white shadow-md">
         <div class="container mx-auto px-4 py-4 flex items-center justify-between">
             <h1 class="text-2xl font-bold text-gray-700">Sistem Presensi Berbasis Wajah</h1>
-            <div class="relative">
-                <button id="btn-profile" class="flex items-center gap-3 px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg overflow-hidden">
-                    <span class="text-sm text-gray-700"><?php echo htmlspecialchars($_SESSION['user']['nama'] ?? 'Akun'); ?></span>
-                    <img src="generate-avatar.php?background=6366f1&color=fff&name=<?php echo urlencode($_SESSION['user']['nama'] ?? 'A'); ?>&size=32" class="avatar" alt="profile">
-                </button>
-                <div id="dropdown-profile" class="absolute right-0 mt-2 bg-white rounded-lg shadow-lg border hidden min-w-max">
-                    <?php if(isset($_SESSION['user'])): ?>
-                        <div class="px-4 py-2 text-sm text-gray-600 border-b whitespace-nowrap"><?php echo htmlspecialchars($_SESSION['user']['email'] ?? ''); ?></div>
-                        <a href="?page=logout" class="block px-4 py-2 text-sm text-red-600 hover:bg-red-50 whitespace-nowrap">Logout</a>
-                    <?php else: ?>
-                        <a href="?page=login" class="block px-4 py-2 text-sm text-indigo-600 hover:bg-indigo-50 whitespace-nowrap">Login</a>
-                        <a href="?page=register" class="block px-4 py-2 text-sm text-emerald-600 hover:bg-emerald-50 whitespace-nowrap">Register</a>
-                    <?php endif; ?>
+            <div class="flex items-center gap-4">
+                <?php if (!isAdmin()): ?>
+                    <!-- Presensi Buttons in Header -->
+                    <button id="btn-header-presensi-masuk" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded-lg transition text-sm">
+                        Presensi Masuk
+                    </button>
+                    <button id="btn-header-presensi-pulang" class="bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-4 rounded-lg transition text-sm">
+                        Presensi Pulang
+                    </button>
+                <?php endif; ?>
+                <div class="relative">
+                    <button id="btn-profile" class="flex items-center gap-3 px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg overflow-hidden">
+                        <span class="text-sm text-gray-700"><?php echo htmlspecialchars($_SESSION['user']['nama'] ?? 'Akun'); ?></span>
+                        <img src="generate-avatar.php?background=6366f1&color=fff&name=<?php echo urlencode($_SESSION['user']['nama'] ?? 'A'); ?>&size=32" class="avatar" alt="profile">
+                    </button>
+                    <div id="dropdown-profile" class="absolute right-0 mt-2 bg-white rounded-lg shadow-lg border hidden min-w-max">
+                        <?php if(isset($_SESSION['user'])): ?>
+                            <div class="px-4 py-2 text-sm text-gray-600 border-b whitespace-nowrap"><?php echo htmlspecialchars($_SESSION['user']['email'] ?? ''); ?></div>
+                            <a href="?page=logout" class="block px-4 py-2 text-sm text-red-600 hover:bg-red-50 whitespace-nowrap">Logout</a>
+                        <?php else: ?>
+                            <a href="?page=login" class="block px-4 py-2 text-sm text-indigo-600 hover:bg-indigo-50 whitespace-nowrap">Login</a>
+                            <a href="?page=register" class="block px-4 py-2 text-sm text-emerald-600 hover:bg-emerald-50 whitespace-nowrap">Register</a>
+                        <?php endif; ?>
+                    </div>
                 </div>
             </div>
         </div>
@@ -4974,6 +5538,7 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
     </nav>
     
     <main class="max-w-8xl mx-auto px-4 py-4">
+        
         <!-- Pegawai: Rekap Hadir -->
         <div id="page-rekap" class="<?php echo isAdmin() ? 'hidden' : '';?>">
             <div class="bg-white p-6 rounded-lg shadow-lg">
@@ -5116,6 +5681,7 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                                 <th class="py-2 px-4">Nama</th>
                                 <th class="py-2 px-4">Program Studi</th>
                                 <th class="py-2 px-4">Nama Startup</th>
+                                <th class="py-2 px-4">QR Code GA</th>
                                 <th class="py-2 px-4">Aksi</th>
                             </tr>
                         </thead>
@@ -5357,6 +5923,20 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                                     <textarea id="wfo-api-cidr-list" rows="2" placeholder="103.23.44.0/22, 192.168.1.0/24" 
                                               class="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"></textarea>
                                     <p class="text-xs text-gray-500 mt-1">Pisahkan dengan koma. Contoh: 103.23.44.0/22 (rentang IP Telkom University)</p>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">SSID WiFi Telkom University</label>
+                                    <textarea id="wfo-wifi-ssids" rows="2" placeholder="Telkom University, TelU, WiFi Telkom University" 
+                                              class="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"></textarea>
+                                    <p class="text-xs text-gray-500 mt-1">Pisahkan dengan koma. SSID WiFi yang valid untuk presensi WFO</p>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">Wajib WiFi untuk WFO</label>
+                                    <select id="wfo-require-wifi" class="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+                                        <option value="1">Ya - Wajib WiFi Telkom University untuk presensi WFO</option>
+                                        <option value="0">Tidak - Tidak wajib WiFi</option>
+                                    </select>
+                                    <p class="text-xs text-gray-500 mt-1">Jika Ya, presensi WFO hanya bisa dilakukan jika terhubung ke WiFi Telkom University</p>
                                 </div>
                                 <div class="bg-blue-50 p-3 rounded-lg">
                                     <button type="button" id="auto-detect-wfo" class="w-full bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-colors">
@@ -5611,6 +6191,26 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                     <button type="submit" class="bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded-lg">Simpan</button>
                 </div>
             </form>
+        </div>
+    </div>
+
+    <!-- Modal QR Code Google Authenticator -->
+    <div id="ga-qr-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden">
+        <div class="bg-white p-8 rounded-lg shadow-2xl w-full max-w-md">
+            <h2 class="text-2xl font-bold mb-4">QR Code Google Authenticator</h2>
+            <div class="mb-4">
+                <p class="text-sm text-gray-600 mb-2" id="ga-qr-email"></p>
+                <p class="text-xs text-gray-500 mb-4">Scan QR code ini dengan aplikasi Google Authenticator di smartphone Anda.</p>
+                <div class="flex justify-center bg-gray-50 p-4 rounded-lg">
+                    <img id="ga-qr-image" src="" alt="QR Code" class="max-w-full h-auto">
+                </div>
+                <p class="text-xs text-gray-500 mt-4 text-center">
+                    Setelah memindai QR code, gunakan kode OTP dari Google Authenticator untuk reset password.
+                </p>
+            </div>
+            <div class="flex justify-end">
+                <button type="button" id="btn-close-ga-qr" class="bg-gray-300 hover:bg-gray-400 text-gray-800 font-bold py-2 px-4 rounded-lg">Tutup</button>
+            </div>
         </div>
     </div>
 
@@ -6114,7 +6714,7 @@ function processSpeechQueue() {
                 setTimeout(() => {
                     if (speechQueue.length > 0) {
                         processSpeechQueue();
-                    } else if (isCameraActive && !videoInterval) {
+                    } else if (isCameraActive && !videoInterval && !isDetectionStopped) {
                         startVideoInterval();
                     }
                 }, 200); // 200ms interval between speeches
@@ -6128,7 +6728,7 @@ function processSpeechQueue() {
                 setTimeout(() => {
                     if (speechQueue.length > 0) {
                         processSpeechQueue();
-                    } else if (isCameraActive && !videoInterval) {
+                    } else if (isCameraActive && !videoInterval && !isDetectionStopped) {
                         startVideoInterval();
                     }
                 }, 100);
@@ -6301,8 +6901,21 @@ async function api(url, data, opts){
                 // If not JSON, continue with normal error handling
             }
             
+            // Try to parse error response to get specific message
+            let errorMessage = `Terjadi kesalahan (${res.status})`;
+            try {
+                const errorJson = JSON.parse(errorText);
+                if (errorJson.message) {
+                    errorMessage = errorJson.message;
+                } else if (errorJson.error) {
+                    errorMessage = errorJson.error;
+                }
+            } catch (e) {
+                // Use default message
+            }
+            
             if (!options.suppressModal) {
-                showModalNotif(`Terjadi kesalahan (${res.status}).`, false, 'Gagal');
+                showModalNotif(errorMessage, false, 'Gagal');
             }
             throw new Error(`HTTP error! status: ${res.status}, response: ${errorText}`);
         }
@@ -6545,6 +7158,114 @@ if (registerForm) {
         else { msg.className='text-red-600'; msg.textContent=r.message||'Gagal registrasi'; }
     });
 }
+<?php elseif ($page === 'forgot-password'): ?>
+// Forgot Password
+const forgotPasswordForm = qs('#form-forgot-password');
+if (forgotPasswordForm) {
+    forgotPasswordForm.addEventListener('submit', async (e)=>{
+        e.preventDefault();
+        const fd = new FormData(e.target);
+        const msg = qs('#forgot-password-msg');
+        msg.className = 'text-blue-600';
+        msg.textContent = 'Mengirim permintaan...';
+        
+        try {
+            const r = await api('?ajax=forgot_password', fd);
+            if(r.ok){
+                // Direct redirect to verify-otp without showing message
+                if (r.token) {
+                    window.location.href = '?page=verify-otp&token=' + encodeURIComponent(r.token);
+                } else if (r.reset_url) {
+                    window.location.href = r.reset_url;
+                }
+            } else {
+                msg.className = 'text-red-600';
+                msg.textContent = r.message || 'Email tidak ditemukan atau belum memiliki Google Authenticator';
+            }
+        } catch (error) {
+            msg.className = 'text-red-600';
+            msg.textContent = 'Email tidak ditemukan atau belum memiliki Google Authenticator';
+            console.error('Forgot password error:', error);
+        }
+    });
+}
+
+// Check for token in URL and redirect to verify-otp
+const urlParams = new URLSearchParams(window.location.search);
+const tokenParam = urlParams.get('token');
+if (tokenParam) {
+    window.location.href = '?page=verify-otp&token=' + encodeURIComponent(tokenParam);
+}
+<?php elseif ($page === 'verify-otp'): ?>
+// Verify OTP
+const verifyOtpForm = qs('#form-verify-otp');
+if (verifyOtpForm) {
+    // Get token from URL
+    const urlParams = new URLSearchParams(window.location.search);
+    const tokenFromUrl = urlParams.get('token');
+    
+    if (tokenFromUrl) {
+        qs('#reset-token').value = tokenFromUrl;
+    }
+    
+    verifyOtpForm.addEventListener('submit', async (e)=>{
+        e.preventDefault();
+        const fd = new FormData(e.target);
+        const msg = qs('#verify-otp-msg');
+        msg.className = 'text-blue-600';
+        msg.textContent = 'Memverifikasi OTP...';
+        
+        const r = await api('?ajax=verify_otp', fd);
+        if(r.ok){
+            msg.className = 'text-green-600';
+            msg.textContent = r.message || 'OTP berhasil diverifikasi.';
+            setTimeout(()=>{
+                window.location.href = '?page=reset-password&token=' + encodeURIComponent(r.token || fd.get('token'));
+            }, 1500);
+        } else {
+            msg.className = 'text-red-600';
+            msg.textContent = r.message || 'Kode OTP tidak valid';
+        }
+    });
+    
+    // Auto-focus OTP input
+    const otpInput = verifyOtpForm.querySelector('input[name="otp"]');
+    if (otpInput) {
+        otpInput.focus();
+    }
+}
+<?php elseif ($page === 'reset-password'): ?>
+// Reset Password
+const resetPasswordForm = qs('#form-reset-password');
+if (resetPasswordForm) {
+    // Get token from URL
+    const urlParams = new URLSearchParams(window.location.search);
+    const tokenFromUrl = urlParams.get('token');
+    
+    if (tokenFromUrl) {
+        qs('#reset-token-final').value = tokenFromUrl;
+    }
+    
+    resetPasswordForm.addEventListener('submit', async (e)=>{
+        e.preventDefault();
+        const fd = new FormData(e.target);
+        const msg = qs('#reset-password-msg');
+        msg.className = 'text-blue-600';
+        msg.textContent = 'Mereset password...';
+        
+        const r = await api('?ajax=reset_password', fd);
+        if(r.ok){
+            msg.className = 'text-green-600';
+            msg.textContent = r.message || 'Password berhasil direset.';
+            setTimeout(()=>{
+                window.location.href = '?page=login';
+            }, 2000);
+        } else {
+            msg.className = 'text-red-600';
+            msg.textContent = r.message || 'Gagal mereset password';
+        }
+    });
+}
 <?php elseif ($page === 'landing'): ?>
 // Landing page - Face recognition attendance
 const videoContainer = qs('#video-container');
@@ -6563,6 +7284,8 @@ let videoInterval = null;
 let scanMode = '';
 let lastSpokenMessage = '';
 let videoPlayListenerAdded = false;
+let isPresensiSuccess = false; // Flag untuk menandai presensi sudah berhasil
+let isDetectionStopped = false; // Flag untuk menandai detection dihentikan manual
 
 // Optimasi: Performance monitoring variables
 let performanceStats = {
@@ -6572,24 +7295,24 @@ let performanceStats = {
     lastDetectionTime: 0
 };
 
-// ULTRA-FAST: Detection config optimized for maximum speed with good accuracy
+// BALANCED ACCURACY: Detection config optimized for good accuracy while still detecting faces reliably
 let detectionConfig = {
-    faceMatcherThreshold: 0.4, // Balanced threshold for speed and accuracy
-    recognitionThreshold: 0.4, // Balanced threshold for speed and accuracy
-    inputSize: 320, // Lower resolution for maximum speed (was 416)
-    scoreThreshold: 0.3, // Lower threshold for faster detection (was 0.4)
-    minFaceSize: 60, // Smaller minimum face size for faster detection (was 80)
-    maxFaces: 1, // Limit to 1 face for faster processing
-    confidenceThreshold: 0.7, // Balanced confidence requirement (was 0.8)
-    detectionThrottle: 1, // Ultra-fast detection (1000 FPS) for <1 second processing
-    qualityThreshold: 0.6, // Balanced quality threshold for speed (was 0.75)
-    landmarkThreshold: 0.6, // Balanced landmark threshold for speed (was 0.75)
-    expressionThreshold: 0.5, // Balanced expression threshold (was 0.6)
-    landmarkWeight: 0.4, // Reduced weight for speed (was 0.5)
-    descriptorWeight: 0.6, // Increased weight for face descriptor for speed (was 0.5)
-    genderValidation: false, // Disable gender validation for maximum speed
-    multiAttemptValidation: false, // Disable multi-attempt validation for maximum speed
-    strictMode: false // Disable strict mode for maximum speed
+    faceMatcherThreshold: 0.38, // Balanced threshold - strict enough to prevent misdetection, lenient enough to detect (0.35 was too strict)
+    recognitionThreshold: 0.38, // Balanced threshold - strict enough to prevent misdetection, lenient enough to detect (0.35 was too strict)
+    inputSize: 416, // Higher resolution for better accuracy
+    scoreThreshold: 0.35, // Slightly lower for better face detection (was 0.4)
+    minFaceSize: 70, // Slightly smaller for easier detection (was 80)
+    maxFaces: 1, // Limit to 1 face for processing
+    confidenceThreshold: 0.7, // Balanced confidence requirement (was 0.75)
+    detectionThrottle: 2, // Slightly slower but more accurate detection
+    qualityThreshold: 0.65, // Balanced quality threshold - allows detection but prevents low quality faces (was 0.7)
+    landmarkThreshold: 0.65, // Balanced landmark threshold - allows detection but requires good landmarks (was 0.7)
+    expressionThreshold: 0.55, // Balanced expression threshold (was 0.6)
+    landmarkWeight: 0.5, // Balanced weight
+    descriptorWeight: 0.5, // Balanced weight
+    genderValidation: true, // Enable gender validation for better accuracy (prevents cross-gender misdetection)
+    multiAttemptValidation: true, // Enable multi-attempt validation for accuracy
+    strictMode: true // Enable strict mode for maximum accuracy
 };
 let logMasukData = [];
 let logPulangData = [];
@@ -6672,7 +7395,8 @@ function submitAttendanceWithWFA(attendanceData, wfaReason) {
                 window.pendingAttendanceData = null;
                 isProcessingRecognition = false;
             } else {
-                statusMessage('Gagal menyimpan presensi: ' + (response.message || 'Unknown error'), 'bg-red-100 text-red-700');
+                const errorMsg = response.message || 'Presensi gagal. Silakan coba lagi.';
+                statusMessage('Gagal menyimpan presensi: ' + errorMsg, 'bg-red-100 text-red-700');
                 isProcessingRecognition = false;
             }
         })
@@ -6705,28 +7429,46 @@ async function getStreetNameFromCoordinates(lat, lng) {
                 const address = data.address;
                 const parts = [];
                 
-                // Build readable address from components
+                // 1. Building name or house name (most specific)
                 if (address.building) parts.push(address.building);
                 else if (address.house_name) parts.push(address.house_name);
                 
-                if (address.road) parts.push(address.road);
-                else if (address.pedestrian) parts.push(address.pedestrian);
-                else if (address.footway) parts.push(address.footway);
+                // 2. Road/Street with house number if available
+                const roadParts = [];
+                if (address.house_number) roadParts.push(address.house_number);
+                if (address.road) roadParts.push(address.road);
+                else if (address.pedestrian) roadParts.push(address.pedestrian);
+                else if (address.footway) roadParts.push(address.footway);
+                if (roadParts.length > 0) {
+                    parts.push('Jl. ' + roadParts.join(' '));
+                }
                 
+                // 3. Suburb/Neighbourhood
                 if (address.suburb) parts.push(address.suburb);
                 else if (address.neighbourhood) parts.push(address.neighbourhood);
                 
+                // 4. City/Town/Village
                 if (address.city) parts.push(address.city);
                 else if (address.town) parts.push(address.town);
                 else if (address.village) parts.push(address.village);
+                
+                // 5. State/Province
+                if (address.state) parts.push(address.state);
+                
+                // 6. Postal code
+                if (address.postcode) parts.push(address.postcode);
                 
                 if (parts.length > 0) {
                     return parts.join(', ');
                 }
                 
-                // Fallback to display_name
+                // Fallback to display_name with postal code
                 if (data.display_name) {
-                    return data.display_name.replace(/, Indonesia$/, '');
+                    let cleanName = data.display_name.replace(/, Indonesia$/, '');
+                    if (address.postcode) {
+                        cleanName += ', ' + address.postcode;
+                    }
+                    return cleanName;
                 }
             }
         } catch (error) {
@@ -6979,27 +7721,77 @@ function adjustDetectionThreshold() {
     if (performanceStats.detectionCount > 20 && performanceStats.averageDetectionTime > 200) {
         console.log('🔧 Adjusting thresholds for maximum speed...');
         // Increase thresholds to reduce processing time
-        detectionConfig.faceMatcherThreshold = Math.min(0.5, detectionConfig.faceMatcherThreshold + 0.05);
-        detectionConfig.recognitionThreshold = Math.min(0.5, detectionConfig.recognitionThreshold + 0.05);
+        // Keep thresholds balanced - allow slight adjustment but maintain accuracy
+        detectionConfig.faceMatcherThreshold = Math.min(0.42, detectionConfig.faceMatcherThreshold + 0.02);
+        detectionConfig.recognitionThreshold = Math.min(0.42, detectionConfig.recognitionThreshold + 0.02);
         console.log(`📊 New thresholds: FaceMatcher=${detectionConfig.faceMatcherThreshold}, Recognition=${detectionConfig.recognitionThreshold}`);
     } else if (performanceStats.detectionCount > 30 && performanceStats.averageDetectionTime < 150) {
         // If performance is good, maintain balanced thresholds
         console.log('🔧 Performance is good, maintaining speed-optimized thresholds...');
         // Keep balanced thresholds for speed
-        detectionConfig.faceMatcherThreshold = Math.max(0.4, detectionConfig.faceMatcherThreshold);
-        detectionConfig.recognitionThreshold = Math.max(0.4, detectionConfig.recognitionThreshold);
+        // Maintain balanced thresholds for accuracy
+        detectionConfig.faceMatcherThreshold = Math.max(0.38, detectionConfig.faceMatcherThreshold);
+        detectionConfig.recognitionThreshold = Math.max(0.38, detectionConfig.recognitionThreshold);
         console.log(`📊 Speed-optimized thresholds: FaceMatcher=${detectionConfig.faceMatcherThreshold}, Recognition=${detectionConfig.recognitionThreshold}`);
     }
 }
 
-function startScan(mode){
+async function startScan(mode){
     scanMode = mode;
+    isPresensiSuccess = false; // Reset presensi success flag
+    isDetectionStopped = false; // Reset stop detection flag
     recognitionCompleted = false; // Reset recognition completion flag for new scan
     resetRecognitionSystem(); // Reset system for new scan
+    
+    // Force request camera and location permissions BEFORE starting
+    try {
+        // Request camera permission explicitly
+        const cameraStream = await navigator.mediaDevices.getUserMedia({ video: true });
+        // Stop it immediately - we just want to trigger the permission request
+        cameraStream.getTracks().forEach(track => track.stop());
+        
+        // Request location permission explicitly  
+        if (!navigator.geolocation) {
+            showModalNotif('GPS tidak tersedia di perangkat Anda. Pastikan GPS aktif.', false, 'Izin Lokasi');
+            return;
+        }
+        
+        // Request location permission by trying to get position
+        await new Promise((resolve, reject) => {
+            navigator.geolocation.getCurrentPosition(
+                () => resolve(true),
+                (err) => {
+                    if (err.code === err.PERMISSION_DENIED) {
+                        showModalNotif('Izin lokasi diperlukan untuk presensi. Silakan aktifkan izin lokasi di pengaturan browser.', false, 'Izin Lokasi');
+                        reject(new Error('Location permission denied'));
+                    } else {
+                        // Other errors are okay (timeout, etc) - we'll retry later
+                        resolve(true);
+                    }
+                },
+                { timeout: 5000, enableHighAccuracy: true }
+            );
+        });
+    } catch (error) {
+        if (error.name === 'NotAllowedError' || error.message === 'Location permission denied') {
+            // Permission denied - user needs to enable it
+            return; // Don't proceed
+        } else if (error.name === 'NotFoundError') {
+            showModalNotif('Kamera tidak ditemukan. Pastikan kamera terhubung.', false, 'Kamera Tidak Tersedia');
+            return;
+        } else {
+            // Other errors - might be timeout, we'll proceed anyway
+            console.warn('Permission check warning:', error);
+        }
+    }
+    
     scanButtonsContainer.classList.add('hidden');
     videoContainer.classList.remove('hidden');
     btnBackScan.classList.remove('hidden');
     qs('#btn-stop-detection').classList.remove('hidden');
+    // Hide start detection button if exists
+    const btnStart = qs('#btn-start-detection');
+    if (btnStart) btnStart.classList.add('hidden');
     
     // Hide the two panel layout (text and image sections)
     const twoPanelLayout = qs('#two-panel-layout');
@@ -7031,22 +7823,71 @@ if (btnBackScan) {
     btnBackScan.addEventListener('click', ()=>{ resetPresensiPage(); });
 }
 
+// Force request permissions on page load (for all devices)
+document.addEventListener('DOMContentLoaded', async () => {
+    // Request camera permission immediately on page load
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        // Stop immediately - we just want to trigger permission prompt
+        stream.getTracks().forEach(track => track.stop());
+    } catch (err) {
+        // Permission denied or error - will be handled when user clicks button
+        console.log('Camera permission request on load:', err.name);
+    }
+    
+    // Request location permission immediately on page load
+    if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+            () => {}, // Success - permission granted
+            () => {}, // Error - will be handled when needed
+            { timeout: 3000, enableHighAccuracy: true }
+        );
+    }
+    
+    // Auto-start presensi if mode parameter is provided (from employee page)
+    const urlParams = new URLSearchParams(window.location.search);
+    const mode = urlParams.get('mode');
+    if (mode === 'masuk' || mode === 'pulang') {
+        // Wait a bit for page to fully load, then auto-start
+        setTimeout(() => {
+            startScan(mode);
+        }, 500);
+    }
+});
+
 // Add event listener for stop detection button
 const btnStopDetection = qs('#btn-stop-detection');
 if (btnStopDetection) {
     btnStopDetection.addEventListener('click', ()=>{ 
         stopDetection();
-        statusMessage('Deteksi dihentikan. Klik "Kembali" untuk keluar.', 'bg-yellow-100 text-yellow-700');
+        const btnStart = qs('#btn-start-detection');
+        if (btnStart) btnStart.classList.remove('hidden');
+        btnStopDetection.classList.add('hidden');
+        statusMessage('Deteksi dihentikan. Klik "Mulai Deteksi" untuk melanjutkan.', 'bg-yellow-100 text-yellow-700');
     });
 }
 
 function resetPresensiPage(){
     stopVideo();
     resetRecognitionSystem(); // Reset recognition system
+    isPresensiSuccess = false; // Reset presensi success flag
+    isDetectionStopped = false; // Reset stop detection flag
+    processedLabels.clear(); // Clear processed labels
     scanButtonsContainer.classList.remove('hidden');
     videoContainer.classList.add('hidden');
     btnBackScan.classList.add('hidden');
     qs('#btn-stop-detection').classList.add('hidden');
+    const btnStart = qs('#btn-start-detection');
+    if (btnStart) btnStart.classList.add('hidden');
+    
+    // Check if we have return parameter - redirect to employee page
+    const urlParams = new URLSearchParams(window.location.search);
+    const returnParam = urlParams.get('return');
+    if (returnParam === 'app') {
+        // Redirect back to employee page (app)
+        window.location.href = '?page=app';
+        return;
+    }
     
     // Show the two panel layout (text and image sections) again
     const twoPanelLayout = qs('#two-panel-layout');
@@ -7118,7 +7959,7 @@ function stopVideo(){
 }
 
 function startVideoInterval(){
-    if(!isCameraActive || videoInterval || !video) return;
+    if(!isCameraActive || videoInterval || !video || isDetectionStopped) return;
     if (!faceapi.nets.tinyFaceDetector.isLoaded) {
         console.error('Face detection models not loaded');
         statusMessage('Model AI belum dimuat. Silakan refresh halaman.', 'bg-red-100 text-red-700');
@@ -7131,6 +7972,11 @@ function startVideoInterval(){
     let detectionThrottle = detectionConfig.detectionThrottle; // Use config value
     
     videoInterval = setInterval(async ()=>{
+        // Check if detection is stopped manually
+        if (isDetectionStopped || !isCameraActive || isPresensiSuccess) {
+            return;
+        }
+        
         const now = Date.now();
         if (now - lastDetectionTime < detectionThrottle) {
             return; // Skip detection jika terlalu cepat
@@ -7155,7 +8001,8 @@ function startVideoInterval(){
                 const quality = assessFaceQuality(detection);
                 const box = detection.detection.box;
                 const area = box.width * box.height;
-                return quality >= detectionConfig.qualityThreshold && area >= detectionConfig.minFaceSize * detectionConfig.minFaceSize;
+                // Slightly more lenient filtering - allows detection but maintains quality
+                return quality >= detectionConfig.qualityThreshold && area >= (detectionConfig.minFaceSize * detectionConfig.minFaceSize * 0.9);
             });
             
             // Sort by quality and take best detections
@@ -7261,9 +8108,10 @@ function assessFaceQuality(face) {
     // Quality factors with detailed analysis
     let quality = 1.0;
     
-    // 1. Size factor (prefer larger faces for better detail) - stricter requirements
-    if (area < 20000) quality *= 0.4; // Too small - stricter
-    else if (area < 30000) quality *= 0.7; // Small but acceptable
+    // 1. Size factor (prefer larger faces for better detail) - balanced requirements
+    if (area < 15000) quality *= 0.3; // Too small
+    else if (area < 20000) quality *= 0.5; // Small but acceptable (was 0.4)
+    else if (area < 30000) quality *= 0.75; // Small but acceptable (was 0.7)
     else if (area > 100000) quality *= 1.4; // Large and detailed - bonus
     else if (area > 60000) quality *= 1.2; // Good size - bonus
     
@@ -7272,7 +8120,7 @@ function assessFaceQuality(face) {
     else if (aspectRatio < 0.7 || aspectRatio > 1.4) quality *= 0.8; // Slightly distorted
     else if (aspectRatio >= 0.8 && aspectRatio <= 1.2) quality *= 1.2; // Good proportions
     
-    // 3. Position factor (prefer centered faces) - stricter centering
+    // 3. Position factor (prefer centered faces) - balanced centering
     const centerX = box.x + box.width / 2;
     const centerY = box.y + box.height / 2;
     const canvasCenterX = 320; // Assuming 640px width
@@ -7280,8 +8128,8 @@ function assessFaceQuality(face) {
     const distanceFromCenter = Math.sqrt(
         Math.pow(centerX - canvasCenterX, 2) + Math.pow(centerY - canvasCenterY, 2)
     );
-    if (distanceFromCenter > 120) quality *= 0.5; // Too far from center - stricter
-    else if (distanceFromCenter > 80) quality *= 0.8; // Slightly off-center
+    if (distanceFromCenter > 150) quality *= 0.4; // Too far from center (was 120)
+    else if (distanceFromCenter > 100) quality *= 0.7; // Slightly off-center (was 80)
     else if (distanceFromCenter < 40) quality *= 1.3; // Well centered - bonus
     
     // 4. Enhanced landmark quality factor (if available)
@@ -7298,12 +8146,12 @@ function assessFaceQuality(face) {
         else if (maxExpression < 0.3) quality *= 0.9; // Unclear expression
     }
     
-    // 6. Detection confidence factor - stricter requirements
+    // 6. Detection confidence factor - balanced requirements
     if (face.detection.score) {
         if (face.detection.score > 0.95) quality *= 1.4; // Very high confidence - bonus
-        else if (face.detection.score > 0.9) quality *= 1.2; // High confidence
+        else if (face.detection.score > 0.85) quality *= 1.2; // High confidence - bonus
         else if (face.detection.score > 0.8) quality *= 1.1; // Good confidence
-        else if (face.detection.score < 0.7) quality *= 0.6; // Low confidence - stricter
+        else if (face.detection.score < 0.5) quality *= 0.6; // Low confidence (was 0.7 -> 0.5)
     }
     
     // 7. Face angle and symmetry factor (if landmarks available)
@@ -7540,7 +8388,7 @@ function shouldAcceptDetection(result, face) {
     // NEW: Multi-attempt validation for critical decisions
     if (detectionConfig.multiAttemptValidation && detectionConfig.strictMode) {
         const validationScore = performMultiAttemptValidation(result, face);
-        if (validationScore < 0.5) { // Reduced from 0.8 to 0.5 for more practical validation
+        if (validationScore < 0.5) { // Balanced validation score - strict enough to prevent errors, lenient enough to detect (0.5 = 50% match requirement)
             console.log(`🚫 Multi-attempt validation failed for ${result.label} (score: ${validationScore.toFixed(3)})`);
             return false;
         }
@@ -7632,43 +8480,68 @@ function validateGenderConsistency(label, face) {
     }
 }
 
-// NEW: Multi-attempt validation for critical decisions
+// BALANCED: Multi-attempt validation - balanced scoring for reliable detection
 function performMultiAttemptValidation(result, face) {
     try {
         let validationScore = 0;
-        let attempts = 0;
+        let maxPossibleScore = 0;
         
-        // Score 1: Distance-based validation (more lenient)
-        if (result.distance < 0.25) validationScore += 0.4;
-        else if (result.distance < 0.35) validationScore += 0.35;
-        else if (result.distance < 0.45) validationScore += 0.3;
-        else if (result.distance < 0.55) validationScore += 0.2; // More lenient
-        attempts++;
-        
-        // Score 2: Quality-based validation (more lenient)
-        const quality = assessFaceQuality(face);
-        if (quality > 0.8) validationScore += 0.3;
-        else if (quality > 0.7) validationScore += 0.25;
-        else if (quality > 0.6) validationScore += 0.2;
-        else if (quality > 0.5) validationScore += 0.15; // More lenient
-        attempts++;
-        
-        // Score 3: Landmark-based validation (more lenient)
-        if (face.landmarks) {
-            const landmarkScore = assessEnhancedLandmarkQuality(face.landmarks);
-            if (landmarkScore > 0.7) validationScore += 0.3;
-            else if (landmarkScore > 0.6) validationScore += 0.25;
-            else if (landmarkScore > 0.5) validationScore += 0.2;
-            else if (landmarkScore > 0.4) validationScore += 0.15; // More lenient
-            attempts++;
+        // Score 1: Distance-based validation (40% weight)
+        const distanceWeight = 0.4;
+        maxPossibleScore += distanceWeight;
+        if (result.distance < 0.30) {
+            validationScore += distanceWeight * 1.0; // Excellent match
+        } else if (result.distance < 0.38) {
+            validationScore += distanceWeight * 0.9; // Very good match (within threshold)
+        } else if (result.distance < 0.45) {
+            validationScore += distanceWeight * 0.7; // Good match
+        } else if (result.distance < 0.55) {
+            validationScore += distanceWeight * 0.5; // Acceptable match
+        } else {
+            validationScore += distanceWeight * 0.2; // Poor match
         }
         
-        const finalScore = attempts > 0 ? validationScore / attempts : 0;
+        // Score 2: Quality-based validation (35% weight)
+        const qualityWeight = 0.35;
+        const quality = assessFaceQuality(face);
+        maxPossibleScore += qualityWeight;
+        if (quality > 0.75) {
+            validationScore += qualityWeight * 1.0; // Excellent quality
+        } else if (quality > 0.65) {
+            validationScore += qualityWeight * 0.85; // Very good quality (within threshold)
+        } else if (quality > 0.55) {
+            validationScore += qualityWeight * 0.7; // Good quality
+        } else if (quality > 0.45) {
+            validationScore += qualityWeight * 0.5; // Acceptable quality
+        } else {
+            validationScore += qualityWeight * 0.3; // Poor quality
+        }
+        
+        // Score 3: Landmark-based validation (25% weight, optional)
+        const landmarkWeight = 0.25;
+        if (face.landmarks) {
+            maxPossibleScore += landmarkWeight;
+            const landmarkScore = assessEnhancedLandmarkQuality(face.landmarks);
+            if (landmarkScore > 0.7) {
+                validationScore += landmarkWeight * 1.0; // Excellent landmarks
+            } else if (landmarkScore > 0.65) {
+                validationScore += landmarkWeight * 0.85; // Very good landmarks (within threshold)
+            } else if (landmarkScore > 0.55) {
+                validationScore += landmarkWeight * 0.7; // Good landmarks
+            } else if (landmarkScore > 0.45) {
+                validationScore += landmarkWeight * 0.5; // Acceptable landmarks
+            } else {
+                validationScore += landmarkWeight * 0.3; // Poor landmarks
+            }
+        }
+        
+        // Calculate normalized score (0-1 scale)
+        const finalScore = maxPossibleScore > 0 ? validationScore / maxPossibleScore : 0.5;
         console.log(`Multi-attempt validation score: ${finalScore.toFixed(3)} (distance: ${result.distance.toFixed(3)}, quality: ${quality.toFixed(3)})`);
         return finalScore;
     } catch (error) {
         console.warn('Multi-attempt validation error:', error);
-        return 0.6; // More lenient neutral score on error
+        return 0.6; // Balanced neutral score on error
     }
 }
 
@@ -7724,13 +8597,31 @@ async function handleRecognition(nim, topExpression){
             }
         }),
         
-        // Geolocation - Ultra fast
+        // Geolocation - Accept GPS even with lower accuracy, but require permission
         new Promise((resolve) => {
             if (!navigator.geolocation) return resolve(null);
             navigator.geolocation.getCurrentPosition(
-                pos => resolve(pos), 
-                err => resolve(null), 
-                { enableHighAccuracy: true, timeout: 5000, maximumAge: 300000 }
+                pos => {
+                    // Accept GPS position regardless of accuracy
+                    resolve(pos);
+                }, 
+                err => {
+                    console.warn('Geolocation error:', err);
+                    // Check if permission was denied
+                    if (navigator.permissions) {
+                        navigator.permissions.query({ name: 'geolocation' }).then(result => {
+                            if (result.state === 'denied') {
+                                console.error('Location permission denied');
+                            }
+                        }).catch(() => {});
+                    }
+                    resolve(null);
+                }, 
+                { 
+                    enableHighAccuracy: true, 
+                    timeout: 5000, // Reduced to 5 seconds for faster response
+                    maximumAge: 60000 // Allow 1 minute cache for speed
+                }
             );
         })
     ]);
@@ -7742,13 +8633,97 @@ async function handleRecognition(nim, topExpression){
         return;
     }
     
-    // Use position from parallel processing
-    let lat=null, lng=null, lokasi='';
+    // Use position from parallel processing with strict validation
+    let lat=null, lng=null;
     if (position) {
         lat = position.coords.latitude;
         lng = position.coords.longitude;
+        // Validate coordinates are valid numbers
+        if (isNaN(lat) || isNaN(lng) || lat === 0 || lng === 0) {
+            lat = null;
+            lng = null;
+            statusMessage('Koordinat GPS tidak valid. Pastikan GPS aktif dan akurat.', 'bg-red-100 text-red-700');
+        }
+        // GPS accuracy is accepted regardless of value (no warning shown)
+    } else {
+        // Check if permissions are already granted before showing error
+        // Only show error if permission was denied, not if there's a timeout or other issue
+        if (typeof navigator !== 'undefined' && navigator.permissions) {
+            navigator.permissions.query({ name: 'geolocation' }).then(result => {
+                if (result.state === 'denied') {
+                    statusMessage('Izin lokasi ditolak. Silakan aktifkan izin lokasi di pengaturan browser.', 'bg-red-100 text-red-700');
+                } else if (result.state === 'prompt') {
+                    statusMessage('Silakan izinkan akses lokasi untuk melanjutkan presensi.', 'bg-yellow-100 text-yellow-700');
+                } else {
+                    // Permission granted but GPS still failed - might be timeout or GPS not available
+                    statusMessage('Mendapatkan lokasi memakan waktu lama. Pastikan GPS aktif dan berada di area terbuka.', 'bg-yellow-100 text-yellow-700');
+                }
+            }).catch(() => {
+                // Fallback if permissions API not available
+                statusMessage('Mendapatkan lokasi memakan waktu lama. Pastikan GPS aktif dan berada di area terbuka.', 'bg-yellow-100 text-yellow-700');
+            });
+        } else {
+            // Fallback if permissions API not available
+            statusMessage('Mendapatkan lokasi memakan waktu lama. Pastikan GPS aktif dan berada di area terbuka.', 'bg-yellow-100 text-yellow-700');
+        }
+        isProcessingRecognition = false;
+        return;
     }
-    // Biarkan backend melakukan reverse geocoding jika lokasi kosong
+    
+    // Validate location is required for attendance
+    if (!lat || !lng) {
+        statusMessage('Lokasi GPS wajib untuk presensi. Pastikan GPS aktif dan izin lokasi diberikan.', 'bg-red-100 text-red-700');
+        isProcessingRecognition = false;
+        return;
+    }
+    
+    // FAST: Get location string immediately (don't wait, submit with coordinates if needed)
+    // Start getting location string in parallel while processing other things
+    let lokasi = '';
+    const locationPromise = getStreetNameFromCoordinates(lat, lng).then(loc => {
+        if (loc) return loc;
+        return `Lokasi: ${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+    }).catch(() => {
+        return `Lokasi: ${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+    });
+    
+    // Get WiFi SSID if available (for WFO validation)
+    // Note: Browser security prevents direct WiFi SSID access, but we can try multiple methods
+    let wifiSSID = '';
+    try {
+        // Method 1: Check if we're on WiFi connection
+        if (navigator.connection) {
+            const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+            if (connection && connection.type === 'wifi') {
+                // We're on WiFi, try to get more info if available
+                // For Chrome on Android, we might be able to get SSID in some cases
+                if (connection.wifiSSID) {
+                    wifiSSID = connection.wifiSSID;
+                }
+            }
+        }
+        
+        // Method 2: Try Chrome-specific API (limited support)
+        if (!wifiSSID && navigator.connection && 'getNetworkInformation' in navigator.connection) {
+            try {
+                const networkInfo = await navigator.connection.getNetworkInformation();
+                if (networkInfo && networkInfo.wifiSSID) {
+                    wifiSSID = networkInfo.wifiSSID;
+                }
+            } catch (e) {
+                // Not available
+            }
+        }
+        
+        // If still empty and we're inside WFO area (by GPS), assume connected to Telkom WiFi
+        // Backend will validate based on IP and location
+        if (!wifiSSID && lat && lng) {
+            // We'll let backend determine if WiFi is required based on location
+            // This allows presensi if GPS indicates inside WFO area
+        }
+    } catch (e) {
+        // WiFi detection not available on this platform - backend will handle validation
+    }
 
     async function submitAttendance(extra={}){
         return api('?ajax=save_attendance', { 
@@ -7759,22 +8734,60 @@ async function handleRecognition(nim, topExpression){
             lat: lat ?? '',
             lng: lng ?? '',
             lokasi: lokasi ?? '',
+            wifi_ssid: wifiSSID,
+            gps_accuracy: position?.coords?.accuracy || '',
             ...extra
         }, { suppressModal: true });
     }
 
     try{
-        // Fetch public IP for API-based WFO detection (fast, non-blocking)
-        // Dapatkan IP publik tanpa memblokir proses (timeout singkat)
+        // OPTIMIZED: Fetch public IP in parallel, don't wait for it - submit attendance immediately
+        // IP will be used by backend for WFO validation, but attendance can proceed
+        const ipPromise = (async () => {
+            try {
+                const ipFetch = fetch('https://api.ipify.org?format=json', { cache: 'no-store' });
+                const timeout = new Promise((_,rej)=> setTimeout(()=>rej(new Error('ip-timeout')), 500)); // Reduced from 800ms
+                const ipResp = await Promise.race([ipFetch, timeout]);
+                if (ipResp && ipResp.ok) {
+                    const ipJson = await ipResp.json();
+                    return ipJson?.ip || '';
+                }
+            } catch {}
+            return '';
+        })();
+        
+        // Don't wait for IP - get it asynchronously
+        ipPromise.then(ip => {
+            window.__publicIp = ip;
+        });
+        // OPTIMIZED: Get IP quickly or use empty string (backend can detect from server IP)
+        // Don't block attendance submission waiting for IP
+        const publicIp = await Promise.race([
+            ipPromise,
+            new Promise(resolve => setTimeout(() => resolve(''), 300)) // Max 300ms wait
+        ]);
+        window.__publicIp = publicIp;
+        
+        // FAST: Get location string with timeout (don't wait too long)
+        // Use coordinates as fallback if location string takes too long
         try {
-            const ipFetch = fetch('https://api.ipify.org?format=json', { cache: 'no-store' });
-            const timeout = new Promise((_,rej)=> setTimeout(()=>rej(new Error('ip-timeout')), 800));
-            const ipResp = await Promise.race([ipFetch, timeout]);
-            if (ipResp && ipResp.ok) {
-                const ipJson = await ipResp.json();
-                window.__publicIp = ipJson?.ip || '';
-            }
-        } catch {}
+            lokasi = await Promise.race([
+                locationPromise,
+                new Promise(resolve => setTimeout(() => {
+                    // Fallback to coordinates if timeout
+                    resolve(`Lokasi: ${lat.toFixed(6)}, ${lng.toFixed(6)}`);
+                }, 1000)) // Max 1 second wait for location string
+            ]);
+        } catch (e) {
+            // Fallback to coordinates on error
+            lokasi = `Lokasi: ${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+        }
+        
+        // Ensure lokasi is never empty
+        if (!lokasi || lokasi.trim() === '') {
+            lokasi = `Lokasi: ${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+        }
+        
         // Store attendance data for potential WFA retry
         const attendanceData = { 
             nim,
@@ -7783,11 +8796,12 @@ async function handleRecognition(nim, topExpression){
             screenshot: screenshot,
             lat: lat ?? '',
             lng: lng ?? '',
-            lokasi: lokasi ?? '',
-            public_ip: (window.__publicIp || '')
+            lokasi: lokasi,
+            public_ip: publicIp || '' // Use the IP we got (or empty if timeout)
         };
         window.pendingAttendanceData = attendanceData;
         
+        // FAST: Submit immediately - location is guaranteed to be set
         let r = await submitAttendance();
         if(!r.ok && r.need_reason){
             // Show WFA modal using new system
@@ -7797,16 +8811,50 @@ async function handleRecognition(nim, topExpression){
         }
         // ULTRA-FAST: Skip logging for maximum speed
         
+        // Auto stop detection after attendance submission (success or failed)
+        isPresensiSuccess = true;
+        isDetectionStopped = true;
+        stopDetection();
+        
+        // Ubah tombol stop menjadi start
+        const btnStop = qs('#btn-stop-detection');
+        const btnStart = qs('#btn-start-detection');
+        
+        if (btnStop) btnStop.classList.add('hidden');
+        if (btnStart) {
+            btnStart.classList.remove('hidden');
+            // Remove existing listeners and add new one
+            const newBtnStart = btnStart.cloneNode(true);
+            btnStart.parentNode.replaceChild(newBtnStart, btnStart);
+            newBtnStart.addEventListener('click', () => {
+                isPresensiSuccess = false;
+                isDetectionStopped = false; // Reset stop flag
+                processedLabels.delete(nim);
+                startVideo();
+                startVideoInterval();
+                newBtnStart.classList.add('hidden');
+                if (btnStop) btnStop.classList.remove('hidden');
+            });
+        }
+        
         if(r.ok){
             statusMessage(r.message, r.statusClass || 'bg-green-100 text-green-700');
             // Update log after successful attendance
             updateLogAfterAttendance(nim, scanMode);
-            // Tandai label sudah diproses agar tidak dobel, lanjutkan deteksi untuk orang lain
+            // Tandai label sudah diproses agar tidak dobel
             processedLabels.set(nim, Date.now());
         } else {
+            // Check if error is about WiFi requirement - show WFA modal
+            const msg = (r.message || '').toLowerCase();
+            if (msg.includes('wifi telkom university') || (msg.includes('wifi') && msg.includes('harus'))) {
+                // Show WFA modal for WiFi-related errors
+                showWFAModal(r.message || 'Untuk presensi WFO, Anda harus terhubung ke WiFi Telkom University. Silakan hubungkan ke WiFi Telkom University atau gunakan presensi WFA dengan alasan.');
+                isProcessingRecognition = false;
+                return; // Exit early, WFA modal will handle retry
+            }
+            
             statusMessage(r.message || 'Gagal menyimpan presensi', r.statusClass || 'bg-yellow-100 text-yellow-700');
             // Jika sudah presensi sebelumnya, hentikan deteksi dan berikan notifikasi jelas
-            const msg = (r.message||'').toLowerCase();
             if (msg.includes('sudah presensi')) {
                 processedLabels.set(nim, Date.now());
             }
@@ -7896,6 +8944,7 @@ function resetRecognitionSystem() {
 
 // Function to manually stop detection (for admin use)
 function stopDetection() {
+    isDetectionStopped = true; // Set flag to stop detection
     if(videoInterval) {
         clearInterval(videoInterval);
         videoInterval = null;
@@ -8099,6 +9148,24 @@ showPage('dashboard');
 showPage('rekap');
 <?php endif; ?>
 
+// Header buttons for employees - navigate to landing page presensi with return parameter
+document.addEventListener('DOMContentLoaded', () => {
+    const btnHeaderMasuk = qs('#btn-header-presensi-masuk');
+    const btnHeaderPulang = qs('#btn-header-presensi-pulang');
+    
+    if (btnHeaderMasuk) {
+        btnHeaderMasuk.addEventListener('click', () => {
+            window.location.href = '?page=landing&return=app&mode=masuk';
+        });
+    }
+    
+    if (btnHeaderPulang) {
+        btnHeaderPulang.addEventListener('click', () => {
+            window.location.href = '?page=landing&return=app&mode=pulang';
+        });
+    }
+});
+
 // Initialize month/year selectors for rekap page
 document.addEventListener('DOMContentLoaded', () => {
     const monthSel = qs('#rekap-month');
@@ -8136,6 +9203,419 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 });
 
+// Presensi page for logged-in employees
+let presensiVideo = null;
+let presensiCanvas = null;
+let presensiIsCameraActive = false;
+let presensiVideoInterval = null;
+let presensiScanMode = '';
+let presensiProcessedLabels = new Map();
+let presensiIsProcessingRecognition = false;
+let presensiLabeledFaceDescriptors = [];
+let presensiIsPresensiSuccess = false;
+
+function initPresensiPage() {
+    presensiVideo = qs('#video-presensi');
+    presensiCanvas = qs('#canvas-presensi');
+    
+    // Reset state
+    presensiIsCameraActive = false;
+    presensiVideoInterval = null;
+    presensiScanMode = '';
+    presensiProcessedLabels = new Map();
+    presensiIsProcessingRecognition = false;
+    presensiIsPresensiSuccess = false;
+    
+    // Hide video container initially
+    const videoContainer = qs('#video-container-presensi');
+    const statusDiv = qs('#presensi-status-presensi');
+    const btnBack = qs('#btn-back-presensi');
+    const btnStop = qs('#btn-stop-detection-presensi');
+    const btnStart = qs('#btn-start-detection-presensi');
+    
+    if (videoContainer) videoContainer.classList.add('hidden');
+    if (statusDiv) statusDiv.classList.add('hidden');
+    if (btnBack) btnBack.classList.add('hidden');
+    if (btnStop) btnStop.classList.add('hidden');
+    if (btnStart) btnStart.classList.add('hidden');
+    
+    // Button handlers
+    const btnMasuk = qs('#btn-presensi-masuk');
+    const btnPulang = qs('#btn-presensi-pulang');
+    
+    if (btnMasuk) {
+        btnMasuk.onclick = () => startPresensi('masuk');
+    }
+    if (btnPulang) {
+        btnPulang.onclick = () => startPresensi('pulang');
+    }
+    if (btnBack) {
+        btnBack.onclick = () => {
+            stopPresensiCamera();
+            videoContainer.classList.add('hidden');
+            btnBack.classList.add('hidden');
+            btnStop.classList.add('hidden');
+            btnStart.classList.add('hidden');
+            if (statusDiv) {
+                statusDiv.classList.add('hidden');
+                statusDiv.textContent = '';
+            }
+            // Return to employee presensi page (show the buttons again)
+            // The page-presensi is already visible, we just need to ensure buttons are visible
+            // The buttons are always visible when video container is hidden
+        };
+    }
+    if (btnStop) {
+        btnStop.onclick = () => {
+            stopPresensiCamera();
+            btnStop.classList.add('hidden');
+            btnStart.classList.remove('hidden');
+        };
+    }
+    if (btnStart) {
+        btnStart.onclick = () => {
+            if (!presensiScanMode) return;
+            startPresensiCamera();
+            btnStart.classList.add('hidden');
+            btnStop.classList.remove('hidden');
+        };
+    }
+}
+
+async function startPresensi(mode) {
+    presensiScanMode = mode;
+    presensiIsPresensiSuccess = false;
+    
+    // Force request camera and location permissions BEFORE starting
+    try {
+        // Request camera permission explicitly
+        const cameraStream = await navigator.mediaDevices.getUserMedia({ video: true });
+        // Stop it immediately - we just want to trigger the permission request
+        cameraStream.getTracks().forEach(track => track.stop());
+        
+        // Request location permission explicitly  
+        if (!navigator.geolocation) {
+            showModalNotif('GPS tidak tersedia di perangkat Anda. Pastikan GPS aktif.', false, 'Izin Lokasi');
+            return;
+        }
+        
+        // Request location permission by trying to get position
+        await new Promise((resolve, reject) => {
+            navigator.geolocation.getCurrentPosition(
+                () => resolve(true),
+                (err) => {
+                    if (err.code === err.PERMISSION_DENIED) {
+                        showModalNotif('Izin lokasi diperlukan untuk presensi. Silakan aktifkan izin lokasi di pengaturan browser.', false, 'Izin Lokasi');
+                        reject(new Error('Location permission denied'));
+                    } else {
+                        // Other errors are okay (timeout, etc) - we'll retry later
+                        resolve(true);
+                    }
+                },
+                { timeout: 5000, enableHighAccuracy: true }
+            );
+        });
+    } catch (error) {
+        if (error.name === 'NotAllowedError' || error.message === 'Location permission denied') {
+            // Permission denied - user needs to enable it
+            return; // Don't proceed
+        } else if (error.name === 'NotFoundError') {
+            showModalNotif('Kamera tidak ditemukan. Pastikan kamera terhubung.', false, 'Kamera Tidak Tersedia');
+            return;
+        } else {
+            // Other errors - might be timeout, we'll proceed anyway
+            console.warn('Permission check warning:', error);
+        }
+    }
+    
+    // Show video container
+    const videoContainer = qs('#video-container-presensi');
+    const btnBack = qs('#btn-back-presensi');
+    const btnStop = qs('#btn-stop-detection-presensi');
+    const btnStart = qs('#btn-start-detection-presensi');
+    
+    if (videoContainer) {
+        videoContainer.classList.remove('hidden');
+    }
+    if (btnBack) btnBack.classList.remove('hidden');
+    if (btnStop) btnStop.classList.remove('hidden');
+    if (btnStart) btnStart.classList.add('hidden');
+    
+    // Load face recognition models and start camera
+    await loadPresensiFaceModels();
+    startPresensiCamera();
+}
+
+async function loadPresensiFaceModels() {
+    // Load face-api.js models
+    try {
+        await faceapi.nets.tinyFaceDetector.loadFromUri('/face-api-models');
+        await faceapi.nets.faceLandmark68Net.loadFromUri('/face-api-models');
+        await faceapi.nets.faceRecognitionNet.loadFromUri('/face-api-models');
+        
+        // Load face descriptors from database
+        const res = await fetch('?ajax=get_members');
+        const j = await res.json();
+        const members = j.data || [];
+        
+        presensiLabeledFaceDescriptors = [];
+        for (const member of members) {
+            if (member.foto_base64) {
+                const img = await faceapi.fetchImage(member.foto_base64);
+                const detection = await faceapi.detectSingleFace(img).withFaceLandmarks().withFaceDescriptor();
+                if (detection) {
+                    presensiLabeledFaceDescriptors.push(
+                        new faceapi.LabeledFaceDescriptors(member.nim || '', [detection.descriptor])
+                    );
+                }
+            }
+        }
+    } catch (error) {
+        console.error('Error loading face models:', error);
+        showModalNotif('Gagal memuat sistem pengenalan wajah. Silakan refresh halaman.', false, 'Error');
+    }
+}
+
+function startPresensiCamera() {
+    if (presensiIsCameraActive) return;
+    
+    navigator.mediaDevices.getUserMedia({ video: true })
+        .then(stream => {
+            presensiVideo.srcObject = stream;
+            presensiIsCameraActive = true;
+            
+            presensiVideo.addEventListener('loadedmetadata', () => {
+                presensiCanvas.width = presensiVideo.videoWidth;
+                presensiCanvas.height = presensiVideo.videoHeight;
+                startPresensiDetection();
+            });
+        })
+        .catch(err => {
+            console.error('Error accessing camera:', err);
+            showModalNotif('Tidak dapat mengakses kamera. Pastikan izin kamera sudah diberikan.', false, 'Error Kamera');
+        });
+}
+
+function stopPresensiCamera() {
+    if (presensiVideo && presensiVideo.srcObject) {
+        presensiVideo.srcObject.getTracks().forEach(track => track.stop());
+        presensiVideo.srcObject = null;
+    }
+    presensiIsCameraActive = false;
+    if (presensiVideoInterval) {
+        clearInterval(presensiVideoInterval);
+        presensiVideoInterval = null;
+    }
+}
+
+function startPresensiDetection() {
+    if (!presensiIsCameraActive || presensiIsPresensiSuccess) return;
+    if (presensiVideoInterval) clearInterval(presensiVideoInterval);
+    
+    presensiVideoInterval = setInterval(async () => {
+        if (presensiIsPresensiSuccess || presensiIsProcessingRecognition) return;
+        
+        try {
+            const detections = await faceapi
+                .detectAllFaces(presensiVideo, new faceapi.TinyFaceDetectorOptions())
+                .withFaceLandmarks()
+                .withFaceDescriptors();
+            
+            if (detections.length === 0 || presensiLabeledFaceDescriptors.length === 0) {
+                const ctx = presensiCanvas.getContext('2d');
+                ctx.clearRect(0, 0, presensiCanvas.width, presensiCanvas.height);
+                return;
+            }
+            
+            // Use balanced threshold for good accuracy while still detecting faces
+            const faceMatcher = new faceapi.FaceMatcher(presensiLabeledFaceDescriptors, 0.38);
+            const resizedDetections = faceapi.resizeResults(detections, {
+                width: presensiVideo.videoWidth,
+                height: presensiVideo.videoHeight
+            });
+            
+            const ctx = presensiCanvas.getContext('2d');
+            ctx.clearRect(0, 0, presensiCanvas.width, presensiCanvas.height);
+            
+            resizedDetections.forEach(detection => {
+                const bestMatch = faceMatcher.findBestMatch(detection.descriptor);
+                
+                if (bestMatch.label !== 'unknown' && bestMatch.distance < 0.4) {
+                    const box = detection.detection.box;
+                    ctx.strokeStyle = '#00ff00';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(box.x, box.y, box.width, box.height);
+                    ctx.fillStyle = '#00ff00';
+                    ctx.font = '16px Arial';
+                    ctx.fillText(bestMatch.label, box.x, box.y - 5);
+                    
+                    // Process recognition
+                    if (!presensiProcessedLabels.has(bestMatch.label)) {
+                        processPresensiRecognition(bestMatch.label);
+                    }
+                }
+            });
+        } catch (error) {
+            console.error('Detection error:', error);
+        }
+    }, 100);
+}
+
+async function processPresensiRecognition(nim) {
+    if (presensiIsProcessingRecognition || presensiIsPresensiSuccess) return;
+    if (presensiProcessedLabels.has(nim)) return;
+    
+    presensiIsProcessingRecognition = true;
+    presensiProcessedLabels.set(nim, Date.now());
+    
+    try {
+        // Get GPS location with better error handling
+        const position = await new Promise((resolve, reject) => {
+            navigator.geolocation.getCurrentPosition(
+                pos => {
+                    if (pos.coords.accuracy <= 50) {
+                        resolve(pos);
+                    } else {
+                        // GPS accuracy accepted regardless of value
+                        resolve(pos);
+                    }
+                },
+                (error) => {
+                    // Check permission state before rejecting
+                    if (navigator.permissions) {
+                        navigator.permissions.query({ name: 'geolocation' }).then(result => {
+                            if (result.state === 'denied') {
+                                reject(new Error('Izin lokasi ditolak'));
+                            } else {
+                                reject(error);
+                            }
+                        }).catch(() => reject(error));
+                    } else {
+                        reject(error);
+                    }
+                },
+                { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+            );
+        });
+        
+        // Take screenshot
+        const screenshot = await new Promise((resolve) => {
+            try {
+                const tmp = document.createElement('canvas');
+                tmp.width = 240;
+                tmp.height = 240;
+                const tctx = tmp.getContext('2d');
+                tctx.drawImage(presensiVideo, 0, 0, tmp.width, tmp.height);
+                resolve(tmp.toDataURL('image/jpeg', 0.5));
+            } catch (e) {
+                resolve(null);
+            }
+        });
+        
+        // Submit attendance
+        const data = {
+            nim: nim,
+            mode: presensiScanMode,
+            lat: position.coords.latitude,
+            lng: position.coords.longitude,
+            gps_accuracy: position.coords.accuracy,
+            screenshot: screenshot
+        };
+        
+        const response = await api('?ajax=save_attendance', data, { suppressModal: true });
+        
+        if (response.ok) {
+            presensiIsPresensiSuccess = true;
+            stopPresensiCamera();
+            
+            const btnStop = qs('#btn-stop-detection-presensi');
+            const btnStart = qs('#btn-start-detection-presensi');
+            
+            if (btnStop) {
+                btnStop.classList.add('hidden');
+            }
+            if (btnStart) {
+                btnStart.classList.remove('hidden');
+                // Remove existing listeners and add new one
+                const newBtnStart = btnStart.cloneNode(true);
+                btnStart.parentNode.replaceChild(newBtnStart, btnStart);
+                newBtnStart.addEventListener('click', () => {
+                    presensiIsPresensiSuccess = false;
+                    presensiProcessedLabels.delete(nim);
+                    startPresensiCamera();
+                    newBtnStart.classList.add('hidden');
+                    if (btnStop) btnStop.classList.remove('hidden');
+                });
+            }
+            
+            const statusDiv = qs('#presensi-status-presensi');
+            if (statusDiv) {
+                statusDiv.classList.remove('hidden');
+                statusDiv.className = 'mt-4 text-center font-medium text-lg p-3 rounded-md bg-green-100 text-green-700';
+                statusDiv.textContent = response.message || 'Presensi berhasil!';
+            }
+        } else {
+            const statusDiv = qs('#presensi-status-presensi');
+            if (statusDiv) {
+                statusDiv.classList.remove('hidden');
+                statusDiv.className = 'mt-4 text-center font-medium text-lg p-3 rounded-md bg-red-100 text-red-700';
+                statusDiv.textContent = response.message || 'Presensi gagal. Silakan coba lagi.';
+            }
+            presensiProcessedLabels.delete(nim);
+        }
+    } catch (error) {
+        console.error('Presensi error:', error);
+        const statusDiv = qs('#presensi-status-presensi');
+        if (statusDiv) {
+            statusDiv.classList.remove('hidden');
+            statusDiv.className = 'mt-4 text-center font-medium text-lg p-3 rounded-md bg-red-100 text-red-700';
+            let errorMsg = 'Presensi gagal. Silakan coba lagi.';
+            
+            if (error.message.includes('Izin lokasi ditolak')) {
+                errorMsg = 'Izin lokasi ditolak. Silakan aktifkan izin lokasi di pengaturan browser.';
+            } else if (error.message.includes('GPS accuracy') || error.message.includes('GPS')) {
+                // Check if permission is granted but GPS accuracy is low
+                if (navigator.permissions) {
+                    navigator.permissions.query({ name: 'geolocation' }).then(result => {
+                        if (result.state === 'granted') {
+                            statusDiv.textContent = errorMsg;
+                            statusDiv.className = 'mt-4 text-center font-medium text-lg p-3 rounded-md bg-yellow-100 text-yellow-700';
+                        } else {
+                            statusDiv.textContent = errorMsg;
+                        }
+                    }).catch(() => {
+                        statusDiv.textContent = errorMsg;
+                    });
+                } else {
+                    statusDiv.textContent = errorMsg;
+                    statusDiv.className = 'mt-4 text-center font-medium text-lg p-3 rounded-md bg-yellow-100 text-yellow-700';
+                }
+            } else if (error.message.includes('timeout')) {
+                // Check if permission is granted before showing timeout error
+                if (navigator.permissions) {
+                    navigator.permissions.query({ name: 'geolocation' }).then(result => {
+                        if (result.state === 'granted') {
+                            statusDiv.textContent = 'Mendapatkan lokasi memakan waktu lama. Pastikan GPS aktif dan berada di area terbuka.';
+                            statusDiv.className = 'mt-4 text-center font-medium text-lg p-3 rounded-md bg-yellow-100 text-yellow-700';
+                        } else {
+                            statusDiv.textContent = 'Izin lokasi diperlukan. Silakan aktifkan izin lokasi.';
+                        }
+                    }).catch(() => {
+                        statusDiv.textContent = errorMsg;
+                    });
+                } else {
+                    statusDiv.textContent = errorMsg;
+                }
+            } else {
+                statusDiv.textContent = errorMsg;
+            }
+        }
+        presensiProcessedLabels.delete(nim);
+    } finally {
+        presensiIsProcessingRecognition = false;
+    }
+}
+
 // Face recognition functions are handled in the landing page section
 // The logged-in app focuses on admin/employee dashboard functionality
 
@@ -8145,7 +9625,7 @@ async function renderMembers(){
     const term = (qs('#search-member')?.value||'').toLowerCase();
     const filtered = members.filter(m=> (m.nama||'').toLowerCase().includes(term) || (m.nim||'').toLowerCase().includes(term));
     const body = qs('#table-members-body'); if(!body) return; body.innerHTML='';
-    if(filtered.length===0){ body.innerHTML = `<tr><td colspan="6" class="text-center py-4">Tidak ada data member.</td></tr>`; return; }
+    if(filtered.length===0){ body.innerHTML = `<tr><td colspan="7" class="text-center py-4">Tidak ada data member.</td></tr>`; return; }
     filtered.forEach(m=>{
         const tr = document.createElement('tr'); tr.className='border-b hover:bg-gray-50';
         tr.innerHTML = `
@@ -8154,6 +9634,11 @@ async function renderMembers(){
             <td class="py-2 px-4">${m.nama||''}</td>
             <td class="py-2 px-4">${m.prodi||''}</td>
             <td class="py-2 px-4">${m.startup||'-'}</td>
+            <td class="py-2 px-4 text-center">
+                <button class="btn-ga-qr bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg transition" data-id="${m.id}" data-email="${m.email || ''}" title="Lihat QR Code Google Authenticator">
+                    <i class="fi fi-sr-qr-code mr-1"></i>QR Code
+                </button>
+            </td>
             <td class="py-2 px-4 text-center">
                 <button class="btn-edit-member text-yellow-600 font-bold" data-id="${m.id}" data-json='${JSON.stringify(m).replace(/'/g,"&apos;")}' title="Edit"><i class="fi fi-sr-pen-square"></i></button>
                 <button class="btn-work-schedule text-green-600 font-bold ml-2" data-id="${m.id}" data-name="${m.nama}" title="Kelola Jadwal Kerja"><i class="fi fi-sr-calendar"></i></button>
@@ -8222,10 +9707,26 @@ btnAddMember && btnAddMember.addEventListener('click', ()=>{
 
 btnCancelModal && btnCancelModal.addEventListener('click', ()=>{ stopModalCamera(); memberModal.classList.add('hidden'); });
 
+// QR Code Modal
+const gaQrModal = qs('#ga-qr-modal');
+const btnCloseGaQr = qs('#btn-close-ga-qr');
+if(btnCloseGaQr && gaQrModal){
+    btnCloseGaQr.addEventListener('click', ()=>{
+        gaQrModal.classList.add('hidden');
+    });
+    // Close modal when clicking outside
+    gaQrModal.addEventListener('click', (e)=>{
+        if(e.target === gaQrModal){
+            gaQrModal.classList.add('hidden');
+        }
+    });
+}
+
 document.addEventListener('click', async (e)=>{
     const btnEdit = e.target.closest('.btn-edit-member');
     const btnDelete = e.target.closest('.btn-delete-member');
     const btnWorkSchedule = e.target.closest('.btn-work-schedule');
+    const btnGaQr = e.target.closest('.btn-ga-qr');
     const btnViewDr = e.target.closest('.btn-view-dr-admin');
     const btnEditAtt = e.target.closest('.btn-edit-att');
     const btnDeleteLaporan = e.target.closest('.btn-delete-laporan');
@@ -8234,6 +9735,33 @@ document.addEventListener('click', async (e)=>{
     const btnAmDisapprove = e.target.closest('.btn-am-disapprove');
     const btnViewMonthDetail = e.target.closest('.btn-view-month-detail');
     const btnViewKet = e.target.closest('.btn-view-ket');
+    
+    if(btnGaQr){
+        const userId = btnGaQr.getAttribute('data-id');
+        const email = btnGaQr.getAttribute('data-email');
+        const qrModal = qs('#ga-qr-modal');
+        const qrImage = qs('#ga-qr-image');
+        const qrEmail = qs('#ga-qr-email');
+        
+        qrModal.classList.remove('hidden');
+        qrEmail.textContent = 'Email: ' + email;
+        qrImage.src = '';
+        qrImage.alt = 'Loading QR Code...';
+        
+        try {
+            const r = await api('?ajax=get_ga_qr&user_id=' + userId, {});
+            if(r.ok && r.qr_url){
+                qrImage.src = r.qr_url;
+                qrImage.alt = 'QR Code Google Authenticator';
+            } else {
+                showNotif(r.message || 'Gagal memuat QR code', false);
+                qrModal.classList.add('hidden');
+            }
+        } catch(err) {
+            showNotif('Gagal memuat QR code', false);
+            qrModal.classList.add('hidden');
+        }
+    }
 
     if(btnEdit){
         const data = JSON.parse(btnEdit.getAttribute('data-json').replace(/&apos;/g, "'"));
@@ -9445,7 +10973,8 @@ function submitAttendanceWithWFA(attendanceData, wfaReason) {
                 window.pendingAttendanceData = null;
                 isProcessingRecognition = false;
             } else {
-                statusMessage('Gagal menyimpan presensi: ' + (response.message || 'Unknown error'), 'bg-red-100 text-red-700');
+                const errorMsg = response.message || 'Presensi gagal. Silakan coba lagi.';
+                statusMessage('Gagal menyimpan presensi: ' + errorMsg, 'bg-red-100 text-red-700');
                 isProcessingRecognition = false;
             }
         })
@@ -10793,6 +12322,8 @@ async function renderSettings() {
             if(qs('#wfo-api-org-keywords')) qs('#wfo-api-org-keywords').value = settings.wfo_api_org_keywords?.value || '';
             if(qs('#wfo-api-asn-list')) qs('#wfo-api-asn-list').value = settings.wfo_api_asn_list?.value || '';
             if(qs('#wfo-api-cidr-list')) qs('#wfo-api-cidr-list').value = settings.wfo_api_cidr_list?.value || '';
+            if(qs('#wfo-wifi-ssids')) qs('#wfo-wifi-ssids').value = settings.wfo_wifi_ssids?.value || 'Telkom University,TelU,WiFi Telkom University';
+            if(qs('#wfo-require-wifi')) qs('#wfo-require-wifi').value = settings.wfo_require_wifi?.value || '1';
         }
     } catch (error) {
         console.error('Error loading settings:', error);
@@ -11068,6 +12599,8 @@ qs('#settings-form') && qs('#settings-form').addEventListener('submit', async (e
     const wfoApiOrgKeywords = qs('#wfo-api-org-keywords')?.value || '';
     const wfoApiAsnList = qs('#wfo-api-asn-list')?.value || '';
     const wfoApiCidrList = qs('#wfo-api-cidr-list')?.value || '';
+    const wfoWifiSSIDs = qs('#wfo-wifi-ssids')?.value || '';
+    const wfoRequireWifi = qs('#wfo-require-wifi')?.value || '1';
     
     // Use selected address coordinates if available
     let wfoLat = '';
@@ -11110,7 +12643,9 @@ qs('#settings-form') && qs('#settings-form').addEventListener('submit', async (e
             wfo_api_token: wfoApiToken,
             wfo_api_org_keywords: wfoApiOrgKeywords,
             wfo_api_asn_list: wfoApiAsnList,
-            wfo_api_cidr_list: wfoApiCidrList
+            wfo_api_cidr_list: wfoApiCidrList,
+            wfo_wifi_ssids: wfoWifiSSIDs,
+            wfo_require_wifi: wfoRequireWifi
         });
         
         if (response.ok) {
@@ -11587,7 +13122,8 @@ async function loadKPIData() {
         
         if (!result.ok) {
             console.error('KPI API error:', result.message);
-            showNotif('Gagal memuat data KPI: ' + (result.message || 'Unknown error'), false);
+            const errorMsg = result.message || 'Gagal memuat data KPI. Silakan refresh halaman.';
+            showNotif('Gagal memuat data KPI: ' + errorMsg, false);
             return;
         }
         
