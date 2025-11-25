@@ -11,13 +11,126 @@ $DB_PASS = '';
 $DB_NAME = 'absen_db';
 
 /**
- * Create database backup using mysqldump
+ * Create database backup using PHP/PDO (works on hosting without mysqldump)
+ * @param PDO|null $pdo Optional PDO connection, will create if not provided
+ * @return array Result array with success status and message
+ */
+function createDatabaseBackupPHP(PDO $pdo = null): array {
+    global $DB_HOST, $DB_USER, $DB_PASS, $DB_NAME;
+    
+    try {
+        // Create PDO connection if not provided
+        if (!$pdo) {
+            $pdo = new PDO(
+                "mysql:host={$DB_HOST};dbname={$DB_NAME};charset=utf8mb4",
+                $DB_USER,
+                $DB_PASS,
+                [
+                    PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
+                ]
+            );
+        }
+        
+        $sql = "-- Database Backup\n";
+        $sql .= "-- Generated: " . date('Y-m-d H:i:s') . "\n";
+        $sql .= "-- Database: " . $DB_NAME . "\n";
+        $sql .= "-- Host: " . $DB_HOST . "\n";
+        $sql .= "-- Backup Method: PHP/PDO\n\n";
+        $sql .= "SET FOREIGN_KEY_CHECKS=0;\n\n";
+        
+        // Get all tables
+        $tables = $pdo->query("SHOW TABLES")->fetchAll(PDO::FETCH_COLUMN);
+        
+        foreach ($tables as $table) {
+            $sql .= "-- Table structure for `{$table}`\n";
+            $sql .= "DROP TABLE IF EXISTS `{$table}`;\n";
+            
+            // Get table structure
+            $createTable = $pdo->query("SHOW CREATE TABLE `{$table}`")->fetch();
+            $sql .= $createTable['Create Table'] . ";\n\n";
+            
+            // Get table data
+            $rows = $pdo->query("SELECT * FROM `{$table}`")->fetchAll(PDO::FETCH_ASSOC);
+            
+            if (count($rows) > 0) {
+                $sql .= "-- Data for table `{$table}`\n";
+                
+                // Get column names
+                $columns = array_keys($rows[0]);
+                $columnList = '`' . implode('`, `', $columns) . '`';
+                
+                foreach ($rows as $row) {
+                    $values = [];
+                    foreach ($row as $value) {
+                        if ($value === null) {
+                            $values[] = 'NULL';
+                        } else {
+                            $values[] = $pdo->quote($value);
+                        }
+                    }
+                    $sql .= "INSERT INTO `{$table}` ({$columnList}) VALUES (" . implode(', ', $values) . ");\n";
+                }
+                $sql .= "\n";
+            }
+        }
+        
+        $sql .= "SET FOREIGN_KEY_CHECKS=1;\n";
+        
+        // Try to save to file if directory is writable
+        $backupDir = __DIR__ . '/database_backup';
+        $backupFile = $backupDir . '/absen_db_backup.sql';
+        $fileSaved = false;
+        
+        if (is_dir($backupDir) || @mkdir($backupDir, 0755, true)) {
+            if (is_writable($backupDir)) {
+                if (@file_put_contents($backupFile, $sql) !== false) {
+                    $fileSaved = true;
+                }
+            }
+        }
+        
+        return [
+            'success' => true, 
+            'message' => 'Backup berhasil dibuat' . ($fileSaved ? ' dan disimpan ke file' : ' (hanya dalam memori)'),
+            'sql_content' => $sql,
+            'size' => strlen($sql),
+            'file_saved' => $fileSaved,
+            'file' => $fileSaved ? $backupFile : null
+        ];
+        
+    } catch (Exception $e) {
+        return ['success' => false, 'message' => 'Error: ' . $e->getMessage()];
+    }
+}
+
+/**
+ * Create database backup using mysqldump (fallback for local development)
  * @return array Result array with success status and message
  */
 function createDatabaseBackup(): array {
     global $DB_HOST, $DB_USER, $DB_PASS, $DB_NAME;
     
     try {
+        // Try PHP-based backup first (works on hosting)
+        $pdo = new PDO(
+            "mysql:host={$DB_HOST};dbname={$DB_NAME};charset=utf8mb4",
+            $DB_USER,
+            $DB_PASS,
+            [
+                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
+            ]
+        );
+        
+        $result = createDatabaseBackupPHP($pdo);
+        
+        // If PHP backup succeeded, return it
+        if ($result['success']) {
+            return $result;
+        }
+        
+        // Fallback to mysqldump for local development
         // Ensure backup directory exists
         $backupDir = __DIR__ . '/database_backup';
         if (!is_dir($backupDir)) {

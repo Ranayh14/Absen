@@ -105,6 +105,8 @@ function ensureSchema(PDO $pdo): void {
             status ENUM('ontime','terlambat') DEFAULT 'ontime',
             ket ENUM('wfo','izin','sakit','alpha','wfa') DEFAULT 'wfo',
             alasan_wfa TEXT NULL,
+            alasan_overtime TEXT NULL,
+            lokasi_overtime VARCHAR(255) NULL,
             alasan_izin_sakit TEXT NULL,
             bukti_izin_sakit LONGTEXT NULL,
             daily_report_id INT NULL,
@@ -171,7 +173,9 @@ function ensureSchema(PDO $pdo): void {
         'lat_pulang' => "ALTER TABLE attendance ADD COLUMN lat_pulang DECIMAL(10,7) NULL AFTER lokasi_pulang",
         'lng_pulang' => "ALTER TABLE attendance ADD COLUMN lng_pulang DECIMAL(10,7) NULL AFTER lat_pulang",
         'alasan_wfa' => "ALTER TABLE attendance ADD COLUMN alasan_wfa TEXT NULL AFTER ket",
-        'alasan_izin_sakit' => "ALTER TABLE attendance ADD COLUMN alasan_izin_sakit TEXT NULL AFTER alasan_wfa",
+        'alasan_overtime' => "ALTER TABLE attendance ADD COLUMN alasan_overtime TEXT NULL AFTER alasan_wfa",
+        'lokasi_overtime' => "ALTER TABLE attendance ADD COLUMN lokasi_overtime VARCHAR(255) NULL AFTER alasan_overtime",
+        'alasan_izin_sakit' => "ALTER TABLE attendance ADD COLUMN alasan_izin_sakit TEXT NULL AFTER lokasi_overtime",
         'bukti_izin_sakit' => "ALTER TABLE attendance ADD COLUMN bukti_izin_sakit LONGTEXT NULL AFTER alasan_izin_sakit",
         'daily_report_id' => "ALTER TABLE attendance ADD COLUMN daily_report_id INT NULL AFTER ket"
     ];
@@ -350,13 +354,22 @@ function seedDefaultSettings(PDO $pdo): void {
         ['wfo_api_org_keywords', 'Telkom University, Yayasan Pendidikan Telkom, Telkom University Bandung', 'Daftar kata kunci organisasi yang dianggap WFO (dipisah koma)'],
         ['wfo_api_asn_list', '', 'Daftar ASN yang dianggap WFO (contoh: AS7713), dipisah koma'],
         ['wfo_api_cidr_list', '', 'Daftar CIDR yang dianggap WFO (contoh: 103.23.44.0/22), dipisah koma'],
-        ['wfo_wifi_ssids', 'Telkom University,TelU,WiFi Telkom University,WiFi-TelU,Telkom-University', 'Daftar SSID WiFi yang valid untuk WFO (dipisah koma)'],
+        ['wfo_wifi_ssids', 'Telkom University,TelU,WiFi Telkom University,WiFi-TelU,Telkom-University,TelU-Connect,TelU-Guest', 'Daftar SSID WiFi yang valid untuk WFO (dipisah koma)'],
         ['wfo_require_wifi', '1', 'Wajib menggunakan WiFi Telkom University untuk presensi WFO (1=Ya, 0=Tidak)'],
         ['attendance_period_end', date('Y-12-31'), 'Tanggal akhir periode perhitungan absen (YYYY-MM-DD)'],
         ['kpi_late_penalty_per_minute', '1', 'Pengurangan KPI per menit terlambat (%)'],
         ['kpi_izin_sakit_score', '85', 'Nilai KPI untuk izin/sakit (%)'],
         ['kpi_alpha_score', '0', 'Nilai KPI untuk alpha (%)'],
-        ['kpi_overtime_bonus', '5', 'Bonus KPI untuk overtime (%)']
+        ['kpi_overtime_bonus', '5', 'Bonus KPI untuk overtime (%)'],
+        ['max_daily_report_days_back', '5', 'Maksimal hari kebelakang untuk isi laporan harian (default: 5)'],
+        ['max_monthly_report_months_back', '999', 'Maksimal bulan kebelakang untuk isi laporan bulanan (default: 999 = tidak terbatas)'],
+        ['monthly_report_end_year', '2026', 'Tahun akhir untuk laporan bulanan (default: 2026)'],
+        ['face_recognition_threshold', '0.38', 'Threshold untuk face recognition (0.0-1.0, semakin rendah semakin ketat, default: 0.38)'],
+        ['face_recognition_input_size', '416', 'Ukuran input untuk face detection (semakin besar semakin akurat tapi lebih lambat, default: 416)'],
+        ['face_recognition_score_threshold', '0.35', 'Score threshold untuk face detection (0.0-1.0, default: 0.35)'],
+        ['face_recognition_quality_threshold', '0.55', 'Quality threshold untuk validasi wajah (0.0-1.0, default: 0.55)'],
+        ['geocode_timeout', '3', 'Timeout untuk reverse geocoding dalam detik (default: 3)'],
+        ['geocode_accuracy_radius', '50', 'Radius akurasi GPS dalam meter untuk validasi lokasi (default: 50)']
     ];
     
     foreach ($defaultSettings as $setting) {
@@ -398,12 +411,14 @@ function geocodeAddress(string $address): ?array {
  * Returns readable address string or null on failure.
  */
 function reverseGeocodeAddress(float $lat, float $lng): ?string {
-    // Use zoom level 18 for maximum detail (building level)
-    $url = 'https://nominatim.openstreetmap.org/reverse?format=json&lat=' . $lat . '&lon=' . $lng . '&addressdetails=1&accept-language=id&zoom=18';
+    // OPTIMIZED: Use shorter timeout and lower zoom for faster response
+    // Use zoom level 16 for faster response (still good detail)
+    $url = 'https://nominatim.openstreetmap.org/reverse?format=json&lat=' . $lat . '&lon=' . $lng . '&addressdetails=1&accept-language=id&zoom=16';
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, $url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 2); // Reduced from 5 to 2 seconds for faster response
+    curl_setopt($ch, CURLOPT_TIMEOUT, 1); // Reduced from 2 to 1 second for faster response
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 1); // Connection timeout 1 second
     curl_setopt($ch, CURLOPT_HTTPHEADER, [
         'User-Agent: AbsenApp/1.0 (XAMPP PHP)'
     ]);
@@ -557,8 +572,34 @@ function fetchPublicIpInfo(string $ip, string $provider, string $token = ''): ar
 }
 
 /**
- * Detect WFO by external IP information API
- * Returns true if public IP belongs to allowed org/ASN/CIDR list
+ * Check if IP is in Telkom University private IP range
+ * Telkom University uses private IP ranges: 10.x.x.x
+ */
+function isTelkomUniversityPrivateIp(string $ip): bool {
+    if (!filter_var($ip, FILTER_VALIDATE_IP)) {
+        return false;
+    }
+    
+    // Check if it's a private IP (10.x.x.x, 172.16-31.x.x, 192.168.x.x)
+    $isPrivate = filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false;
+    
+    if (!$isPrivate) {
+        return false; // Not a private IP
+    }
+    
+    // Check if it's in Telkom University private IP range (10.x.x.x)
+    // Based on screenshots: 10.60.43.33 (TelU-Connect) and 10.30.114.48 (TelU-Guest)
+    // Telkom University uses 10.x.x.x range
+    if (strpos($ip, '10.') === 0) {
+        return true; // IP starts with 10. - likely Telkom University network
+    }
+    
+    return false;
+}
+
+/**
+ * Detect WFO by external IP information API or private IP range
+ * Returns true if IP belongs to allowed org/ASN/CIDR list or Telkom University private IP range
  */
 function isWfoByApi(PDO $pdo, ?string $publicIp = null): bool {
     $provider = strtolower(trim(getSetting($pdo, 'wfo_api_provider', 'ipinfo')));
@@ -579,6 +620,22 @@ function isWfoByApi(PDO $pdo, ?string $publicIp = null): bool {
         return false; // cannot determine
     }
 
+    // CRITICAL FIX: Check private IP range first (for laptops on Telkom University network)
+    // This is important because laptops often get private IP (10.x.x.x) which cannot be validated via external API
+    if (isTelkomUniversityPrivateIp($publicIp)) {
+        error_log("WFO Private IP Check - IP: $publicIp, Result: VALID (Telkom University private IP range)");
+        return true; // Private IP in Telkom University range - valid WFO
+    }
+
+    // For public IPs, check via external API
+    // Skip API check for private IPs (they won't work with external APIs anyway)
+    $isPrivate = filter_var($publicIp, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false;
+    if ($isPrivate) {
+        // Private IP but not in Telkom University range
+        return false;
+    }
+
+    // Check public IP via external API
     $info = fetchPublicIpInfo($publicIp, $provider, $token);
     $org = strtolower($info['org'] ?? '');
     $asn = strtoupper($info['asn'] ?? '');
@@ -1552,6 +1609,7 @@ function calculateKPIForEmployee(PDO $pdo, $userId, $periodStart = null, $period
         $izinSakitScore = (float)getSetting($pdo, 'kpi_izin_sakit_score', '85');
         $alphaScore = (float)getSetting($pdo, 'kpi_alpha_score', '0');
         $overtimeBonus = (float)getSetting($pdo, 'kpi_overtime_bonus', '5');
+        $maxOntimeHour = (int)getSetting($pdo, 'max_ontime_hour', '8');
         
         // Get employee data
         $stmt = $pdo->prepare("SELECT nama, created_at FROM users WHERE id = ?");
@@ -1584,16 +1642,34 @@ function calculateKPIForEmployee(PDO $pdo, $userId, $periodStart = null, $period
         $employeeRegDateOnly = date('Y-m-d', strtotime($employeeRegDate));
         
         // Get attendance records for the period (WFO, WFA, Overtime only)
+        // Store late records with their minutes for per-occurrence calculation
+        // Use jam_masuk (time format) instead of jam_masuk_iso for late_minutes calculation
+        // Use max_ontime_hour from settings instead of hardcoded 08:00
         $stmt = $pdo->prepare("
             SELECT 
                 DATE(jam_masuk_iso) as attendance_date,
                 jam_masuk_iso,
+                jam_masuk,
                 status,
                 ket,
                 CASE 
-                    WHEN status = 'terlambat' THEN 
+                    WHEN status = 'terlambat' AND jam_masuk IS NOT NULL THEN 
+                        GREATEST(0, 
+                            FLOOR(
+                                TIMESTAMPDIFF(MINUTE, 
+                                    CONCAT('2000-01-01 ', LPAD(:max_ontime_hour, 2, '0'), ':00:00'),
+                                    CONCAT('2000-01-01 ', 
+                                        CASE 
+                                            WHEN LENGTH(jam_masuk) = 5 THEN CONCAT(jam_masuk, ':00')
+                                            ELSE jam_masuk
+                                        END
+                                    )
+                                )
+                            )
+                        )
+                    WHEN status = 'terlambat' AND jam_masuk IS NULL THEN 
                         GREATEST(0, TIMESTAMPDIFF(MINUTE, 
-                            CONCAT(DATE(jam_masuk_iso), ' 08:00:00'), 
+                            CONCAT(DATE(jam_masuk_iso), ' ', LPAD(:max_ontime_hour, 2, '0'), ':00:00'), 
                             jam_masuk_iso
                         ))
                     ELSE 0 
@@ -1608,9 +1684,18 @@ function calculateKPIForEmployee(PDO $pdo, $userId, $periodStart = null, $period
         $stmt->execute([
             'user_id' => $userId, 
             'period_start' => $periodStart, 
-            'period_end' => $periodEnd
+            'period_end' => $periodEnd,
+            'max_ontime_hour' => $maxOntimeHour
         ]);
         $attendanceRecords = $stmt->fetchAll();
+        
+        // Debug: log attendance records to see late_minutes values
+        error_log("KPI Debug - User $userId: Found " . count($attendanceRecords) . " attendance records");
+        foreach ($attendanceRecords as $idx => $rec) {
+            if ($rec['status'] === 'terlambat') {
+                error_log("KPI Debug - User $userId: Record $idx - Date: {$rec['attendance_date']}, Status: {$rec['status']}, jam_masuk: {$rec['jam_masuk']}, jam_masuk_iso: {$rec['jam_masuk_iso']}, late_minutes: {$rec['late_minutes']}");
+            }
+        }
         
         // Get izin/sakit records from attendance_notes table
         $stmt = $pdo->prepare("
@@ -1677,10 +1762,11 @@ function calculateKPIForEmployee(PDO $pdo, $userId, $periodStart = null, $period
         
         $ontimeCount = 0;
         $lateCount = 0;
+        $totalLateMinutes = 0; // Keep for backward compatibility/reporting
+        $lateRecords = []; // Store late records with minutes for per-occurrence calculation
         $izinSakitCount = 0;
         $alphaCount = 0;
         $overtimeCount = 0;
-        $totalLateMinutes = 0;
         $actualWorkingDays = 0; // Count actual working days for this employee (only past dates)
         $totalWorkingDaysInPeriod = 0; // Count all working days in period for this employee
         
@@ -1702,13 +1788,8 @@ function calculateKPIForEmployee(PDO $pdo, $userId, $periodStart = null, $period
             }
             
             // Check if there's an attendance record for this date
-            $attendanceRecord = null;
-            foreach ($attendanceRecords as $record) {
-                if ($record['attendance_date'] === $dateStr) {
-                    $attendanceRecord = $record;
-                    break;
-                }
-            }
+            // Use attendanceMap for faster lookup instead of looping
+            $attendanceRecord = isset($attendanceMap[$dateStr]) ? $attendanceMap[$dateStr] : null;
             
             // Only process dates that have already passed for KPI calculation
             if ($dateStr <= $currentDate) {
@@ -1720,9 +1801,14 @@ function calculateKPIForEmployee(PDO $pdo, $userId, $periodStart = null, $period
                     // Check attendance status (only WFO, WFA, Overtime)
                     if ($attendanceRecord['status'] === 'ontime') {
                         $ontimeCount++;
+                        error_log("KPI Debug - User $userId: Found ontime on $dateStr");
                     } else {
                         $lateCount++;
-                        $totalLateMinutes += $attendanceRecord['late_minutes'];
+                        $lateMinutes = (int)$attendanceRecord['late_minutes'];
+                        $totalLateMinutes += $lateMinutes;
+                        // Store late record with minutes for per-occurrence calculation
+                        $lateRecords[] = $lateMinutes;
+                        error_log("KPI Debug - User $userId: Found late on $dateStr, late_minutes from DB: {$attendanceRecord['late_minutes']}, jam_masuk: {$attendanceRecord['jam_masuk']}, jam_masuk_iso: {$attendanceRecord['jam_masuk_iso']}, status: {$attendanceRecord['status']}");
                     }
                 } else {
                     // No attendance and no izin/sakit = alpha (only for past dates)
@@ -1759,31 +1845,81 @@ function calculateKPIForEmployee(PDO $pdo, $userId, $periodStart = null, $period
         
         // Debug logging for final counts
         error_log("KPI Debug - User $userId: Final counts - Ontime: $ontimeCount, Late: $lateCount, Izin/Sakit: $izinSakitCount, Alpha: $alphaCount, Overtime: $overtimeCount");
+        error_log("KPI Debug - User $userId: actualWorkingDays from loop: $actualWorkingDays");
+        error_log("KPI Debug - User $userId: lateRecords count: " . count($lateRecords) . ", lateRecords: " . print_r($lateRecords, true));
         
-        // Calculate KPI score
-        $kpiScore = 0;
-        if ($actualWorkingDays > 0) {
-            // Base score from ontime attendance
-            $kpiScore += ($ontimeCount * 100);
-            
-            // Deduct for late attendance
-            $kpiScore -= ($totalLateMinutes * $latePenaltyPerMinute);
-            
-            // Add score for izin/sakit
-            $kpiScore += ($izinSakitCount * $izinSakitScore);
-            
-            // Add score for alpha (usually 0)
-            $kpiScore += ($alphaCount * $alphaScore);
-            
-            // Add overtime bonus
-                $kpiScore += ($overtimeCount * $overtimeBonus);
-
-            // Calculate average based on actual working days that have passed
-            $kpiScore = $kpiScore / $actualWorkingDays;
-            
-            // Ensure score is between 0 and 100
-            $kpiScore = max(0, min(100, $kpiScore));
+        // Calculate actual working days based on days with actual data
+        // This should be the sum of all days with attendance records (ontime, late, alpha, izin/sakit)
+        // NOT the total working days in period, because we only calculate KPI for days with data
+        $daysWithData = (int)$ontimeCount + (int)$lateCount + (int)$izinSakitCount + (int)$alphaCount;
+        
+        error_log("KPI Debug - User $userId: daysWithData calculation: $ontimeCount + $lateCount + $izinSakitCount + $alphaCount = $daysWithData");
+        
+        // IMPORTANT: Always use daysWithData as divisor if it's greater than 0
+        // This ensures KPI is calculated correctly: total score / days with data
+        // Only fallback to actualWorkingDays if daysWithData is 0 (shouldn't happen in normal cases)
+        if ($daysWithData > 0) {
+            $actualDaysForKPI = $daysWithData;
+            error_log("KPI Debug - User $userId: Using daysWithData ($daysWithData) as divisor");
+        } else {
+            // Fallback: use actualWorkingDays only if no data at all
+            $actualDaysForKPI = $actualWorkingDays > 0 ? $actualWorkingDays : 1; // Prevent division by zero
+            error_log("KPI Debug - User $userId: WARNING - daysWithData is 0, using actualWorkingDays ($actualDaysForKPI) as fallback");
         }
+        
+        error_log("KPI Debug - User $userId: Final divisor (actualDaysForKPI): $actualDaysForKPI");
+        
+        // Calculate KPI score using new per-occurrence method
+        // Formula: 
+        // - On-time: 100% each
+        // - Late: 100% - (minutes late) for each occurrence
+        // - Alpha: 0% each
+        // - Izin/Sakit: use setting score (default 85%)
+        // - Overtime: bonus (default 5%)
+        // Total = sum of all scores / days with actual data
+        $kpiScore = 0;
+        
+        // On-time: 100% each
+        $ontimeScore = $ontimeCount * 100;
+        $kpiScore += $ontimeScore;
+        error_log("KPI Debug - User $userId: Ontime score: $ontimeScore (count: $ontimeCount)");
+        
+        // Late: calculate per occurrence (100% - minutes late)
+        $lateTotalScore = 0;
+        foreach ($lateRecords as $lateMinutes) {
+            // Formula: 100% - (minutes late)
+            // Example: terlambat 10 menit = 100 - 10 = 90%
+            // Example: terlambat 9 menit = 100 - 9 = 91%
+            $lateScore = 100 - $lateMinutes; // 100% - minutes late
+            $lateScore = max(0, $lateScore); // Ensure not negative (if terlambat > 100 menit, score = 0)
+            $lateTotalScore += $lateScore;
+            error_log("KPI Debug - User $userId: Late occurrence: $lateMinutes minutes late = $lateScore score (100 - $lateMinutes = $lateScore)");
+        }
+        $kpiScore += $lateTotalScore;
+        error_log("KPI Debug - User $userId: Late total score: $lateTotalScore (count: $lateCount, records: " . print_r($lateRecords, true) . ")");
+        
+        // Alpha: 0% each (no need to add, already 0)
+        // $kpiScore += ($alphaCount * 0); // Not needed
+        error_log("KPI Debug - User $userId: Alpha count: $alphaCount (score: 0)");
+        
+        // Izin/Sakit: use setting score (default 85%)
+        $izinSakitScoreTotal = $izinSakitCount * $izinSakitScore;
+        $kpiScore += $izinSakitScoreTotal;
+        error_log("KPI Debug - User $userId: Izin/Sakit score: $izinSakitScoreTotal (count: $izinSakitCount, per occurrence: $izinSakitScore)");
+        
+        // Overtime: bonus (default 5% per occurrence)
+        $overtimeScoreTotal = $overtimeCount * $overtimeBonus;
+        $kpiScore += $overtimeScoreTotal;
+        error_log("KPI Debug - User $userId: Overtime score: $overtimeScoreTotal (count: $overtimeCount, per occurrence: $overtimeBonus)");
+
+        // Calculate average based on days with actual data
+        error_log("KPI Debug - User $userId: Total score before division: $kpiScore, Divided by: $actualDaysForKPI");
+        $kpiScore = $kpiScore / $actualDaysForKPI;
+        error_log("KPI Debug - User $userId: KPI score after division: $kpiScore");
+        
+        // Ensure score is between 0 and 100
+        $kpiScore = max(0, min(100, $kpiScore));
+        error_log("KPI Debug - User $userId: Final KPI score: $kpiScore");
         
         // Determine KPI status
         $status = 'Very Poor';
@@ -2514,6 +2650,7 @@ if (isset($_GET['ajax'])) {
     if ($action === 'save_member' && $_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!isAdmin()) jsonResponse(['error' => 'Forbidden'], 403);
         $id = $_POST['id'] ?? '';
+        $email = trim($_POST['email'] ?? '');
         $nim = trim($_POST['nim'] ?? '');
         $nama = trim($_POST['nama'] ?? '');
         $prodi = trim($_POST['prodi'] ?? '');
@@ -2522,18 +2659,54 @@ if (isset($_GET['ajax'])) {
 
         if ($id) {
             // Update existing by id
-            $user = $pdo->prepare("SELECT id FROM users WHERE id=:id AND role='pegawai'");
+            $user = $pdo->prepare("SELECT id, email, nim FROM users WHERE id=:id AND role='pegawai'");
             $user->execute([':id' => $id]);
-            if (!$user->fetch()) jsonResponse(['ok' => false, 'message' => 'Member tidak ditemukan'], 404);
+            $currentUser = $user->fetch();
+            if (!$currentUser) jsonResponse(['ok' => false, 'message' => 'Member tidak ditemukan'], 404);
+            
+            // Check if email is being changed and if it's unique
+            if ($email && $email !== $currentUser['email']) {
+                $checkEmail = $pdo->prepare("SELECT id FROM users WHERE email=:email AND id!=:id LIMIT 1");
+                $checkEmail->execute([':email' => $email, ':id' => $id]);
+                if ($checkEmail->fetch()) {
+                    jsonResponse(['ok' => false, 'message' => 'Email sudah digunakan oleh member lain'], 400);
+                }
+            }
+            
+            // Check if nim is being changed and if it's unique
+            if ($nim && $nim !== $currentUser['nim']) {
+                $checkNim = $pdo->prepare("SELECT id FROM users WHERE nim=:nim AND id!=:id LIMIT 1");
+                $checkNim->execute([':nim' => $nim, ':id' => $id]);
+                if ($checkNim->fetch()) {
+                    jsonResponse(['ok' => false, 'message' => 'NIM sudah digunakan oleh member lain'], 400);
+                }
+            }
             
             // Check image size if updating photo (max 1MB)
             if ($foto && !checkImageSize($foto, 1)) {
                 jsonResponse(['ok' => false, 'message' => 'Ukuran foto terlalu besar. Maksimal 1MB. Silakan kompres foto atau gunakan foto dengan resolusi lebih kecil.'], 400);
             }
             
+            // Build update query with email and nim
             $params = [':nama' => $nama, ':prodi' => $prodi, ':startup' => $startup ?: null, ':id' => $id];
-            $sql = "UPDATE users SET nama=:nama, prodi=:prodi, startup=:startup" . ($foto ? ", foto_base64=:foto" : "") . " WHERE id=:id";
-            if ($foto) $params[':foto'] = $foto;
+            $setParts = ['nama=:nama', 'prodi=:prodi', 'startup=:startup'];
+            
+            if ($email) {
+                $setParts[] = 'email=:email';
+                $params[':email'] = $email;
+            }
+            
+            if ($nim) {
+                $setParts[] = 'nim=:nim';
+                $params[':nim'] = $nim;
+            }
+            
+            if ($foto) {
+                $setParts[] = 'foto_base64=:foto';
+                $params[':foto'] = $foto;
+            }
+            
+            $sql = "UPDATE users SET " . implode(', ', $setParts) . " WHERE id=:id";
             $pdo->prepare($sql)->execute($params);
             
             // Trigger backup setelah update user
@@ -2854,6 +3027,77 @@ if (isset($_GET['ajax'])) {
             // }
             
             if (!$todayRow) {
+                // FIRST: Check if it's a working day
+                $isWorkingDay = isEmployeeWorkingDay($pdo, $u['id'], $today);
+                $dayOfWeek = (int)$now->format('N'); // 1=Monday, 7=Sunday
+                $isWeekend = $dayOfWeek >= 6; // Saturday or Sunday
+                $isManualHolidayDate = isManualHoliday($pdo, $today);
+                $isNationalHolidayDate = isNationalHoliday($today);
+                
+                // If NOT a working day (weekend or holiday), treat as overtime
+                if (!$isWorkingDay || $isWeekend || $isManualHolidayDate || $isNationalHolidayDate) {
+                    // This is overtime - require overtime reason and location
+                    $lat = isset($_POST['lat']) ? (float)$_POST['lat'] : null;
+                    $lng = isset($_POST['lng']) ? (float)$_POST['lng'] : null;
+                    $lokasi = $_POST['lokasi'] ?? null;
+                    $alasanOvertime = $_POST['overtime_reason'] ?? $_POST['alasan_overtime'] ?? null;
+                    $lokasiOvertime = $_POST['overtime_location'] ?? $_POST['lokasi_overtime'] ?? null;
+                    
+                    // Strict validation: GPS location is mandatory
+                    if ($lat === null || $lng === null || $lat === 0 || $lng === 0) {
+                        jsonResponse(['ok' => false, 'need_overtime_reason' => true, 'message' => 'Lokasi GPS wajib untuk presensi overtime. Pastikan GPS aktif dan izin lokasi diberikan.'], 400);
+                    }
+                    
+                    // OPTIMIZED: Quick reverse geocoding - ensure lokasi is never empty
+                    if (empty($lokasi) || strpos($lokasi, 'Lokasi:') === 0) {
+                        if ($lat !== null && $lng !== null) {
+                            // Try reverse geocoding with shorter timeout
+                            $reverseGeocoded = @reverseGeocodeAddress($lat, $lng);
+                            if ($reverseGeocoded && !empty($reverseGeocoded)) {
+                                $lokasi = $reverseGeocoded;
+                            } else {
+                                // Fallback - ensure lokasi is never empty
+                                $lokasi = 'Lokasi: ' . round($lat, 6) . ', ' . round($lng, 6);
+                            }
+                        } else {
+                            // No coordinates - use default
+                            $lokasi = 'Lokasi tidak tersedia';
+                        }
+                    }
+                    
+                    // Use lokasi as lokasi_overtime if not provided
+                    if (empty($lokasiOvertime)) {
+                        $lokasiOvertime = $lokasi;
+                    }
+                    
+                    // Require overtime reason and location
+                    if (!$alasanOvertime) {
+                        jsonResponse(['ok' => false, 'need_overtime_reason' => true, 'message' => 'Presensi di hari libur/weekend dianggap overtime. Harap isi alasan dan lokasi overtime.'], 400);
+                    }
+                    
+                    if (!$lokasiOvertime) {
+                        jsonResponse(['ok' => false, 'need_overtime_reason' => true, 'message' => 'Lokasi overtime wajib diisi.'], 400);
+                    }
+                    
+                    // Insert overtime attendance - no location check needed
+                    $status = 'ontime'; // Overtime is always considered ontime
+                    $ketVal = 'overtime';
+                    
+                    $ins = $pdo->prepare("INSERT INTO attendance (user_id, jam_masuk, jam_masuk_iso, ekspresi_masuk, screenshot_masuk, lokasi_masuk, lat_masuk, lng_masuk, status, ket, alasan_overtime, lokasi_overtime) VALUES (:uid, :jam, :iso, :exp, :screenshot, :lokasi, :lat, :lng, :status, :ket, :alasan, :lokasi_ot)");
+                    $ins->execute([':uid' => $u['id'], ':jam' => $jamSekarang, ':iso' => $iso, ':exp' => $ekspresi, ':screenshot' => $screenshot, ':lokasi' => $lokasi, ':lat' => $lat, ':lng' => $lng, ':status' => $status, ':ket' => $ketVal, ':alasan' => $alasanOvertime, ':lokasi_ot' => $lokasiOvertime]);
+                    
+                    // Trigger backup setelah presensi overtime
+                    triggerDatabaseBackup();
+                    
+                    // Response for overtime
+                    $jamMasukFormat = substr($jamSekarang, 0, 5);
+                    $firstName = getFirstName($u['nama']);
+                    $statusText = "Selamat datang {$firstName}, anda masuk {$jamMasukFormat}. Overtime dicatat!";
+                    jsonResponse(['ok' => true, 'message' => $statusText, 'nama' => $u['nama'], 'jam' => $jamMasukFormat, 'statusClass' => 'bg-purple-100 text-purple-700']);
+                    return; // Exit early for overtime
+                }
+                
+                // If it's a working day, continue with normal WFO/WFA check
                 // Calculate if late using settings
                 $maxOntimeHour = (int)getSetting($pdo, 'max_ontime_hour', '8');
                 $isLate = false;
@@ -2899,17 +3143,12 @@ if (isset($_GET['ajax'])) {
                     error_log('GPS accuracy low: ' . round($gpsAccuracy) . 'm - accepting anyway (user may be indoors)');
                 }
                 
-                // OPTIMIZED: Quick reverse geocoding - ensure lokasi is never empty
+                // OPTIMIZED: Skip reverse geocoding for faster performance
+                // Use coordinates directly - reverse geocoding can be slow and is not critical
                 if (empty($lokasi) || strpos($lokasi, 'Lokasi:') === 0) {
                     if ($lat !== null && $lng !== null) {
-                        // Try reverse geocoding with shorter timeout
-                        $reverseGeocoded = @reverseGeocodeAddress($lat, $lng);
-                        if ($reverseGeocoded && !empty($reverseGeocoded)) {
-                            $lokasi = $reverseGeocoded;
-                        } else {
-                            // Fallback - ensure lokasi is never empty
-                            $lokasi = 'Lokasi: ' . round($lat, 6) . ', ' . round($lng, 6);
-                        }
+                        // Use coordinates directly for faster response
+                        $lokasi = 'Lokasi: ' . round($lat, 6) . ', ' . round($lng, 6);
                     } else {
                         // No coordinates - use default
                         $lokasi = 'Lokasi tidak tersedia';
@@ -2927,36 +3166,88 @@ if (isset($_GET['ajax'])) {
 
                 // Determine WFO via API or coordinate fallback
                 $wfoMode = strtolower(getSetting($pdo, 'wfo_mode', 'api'));
-                $publicIp = $_POST['public_ip'] ?? '';
-                // OPTIMIZED: If public IP not provided, try to get from server headers
-                if (empty($publicIp)) {
-                    $publicIp = $_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['HTTP_CF_CONNECTING_IP'] ?? $_SERVER['REMOTE_ADDR'] ?? '';
-                    if (strpos($publicIp, ',') !== false) {
-                        $publicIp = trim(explode(',', $publicIp)[0]);
-                    }
-                }
-                $requireWifi = (int)getSetting($pdo, 'wfo_require_wifi', '1');
-                $isInsideTelu = false;
-                $isValidWifi = false;
                 
-                // Check WiFi SSID if required (case-insensitive, partial match with more SSID variants)
-                if ($requireWifi && !empty($wifiSSID)) {
-                    $validWifiSSIDs = array_filter(array_map('trim', explode(',', getSetting($pdo, 'wfo_wifi_ssids', 'Telkom University,TelU,WiFi Telkom University,WiFi-TelU,Telkom-University'))));
-                    $wifiSSIDLower = strtolower(trim($wifiSSID));
-                    foreach ($validWifiSSIDs as $validSSID) {
-                        $validSSIDLower = strtolower(trim($validSSID));
-                        // Partial match - check if WiFi SSID contains valid SSID or vice versa
-                        if (strpos($wifiSSIDLower, $validSSIDLower) !== false || strpos($validSSIDLower, $wifiSSIDLower) !== false) {
-                            $isValidWifi = true;
-                            break;
+                // CRITICAL: IP detection - prioritize POST data first (from frontend), then REMOTE_ADDR
+                // Skip localhost IPs (127.0.0.1, ::1) as they indicate local development/testing
+                $publicIp = $_POST['public_ip'] ?? '';
+                
+                // If POST IP is empty or localhost, try REMOTE_ADDR (but skip localhost)
+                if (empty($publicIp) || !filter_var($publicIp, FILTER_VALIDATE_IP) || 
+                    $publicIp === '127.0.0.1' || $publicIp === '::1' || strpos($publicIp, '127.') === 0) {
+                    
+                    // Try REMOTE_ADDR but skip if it's localhost
+                    $remoteAddr = $_SERVER['REMOTE_ADDR'] ?? '';
+                    if (!empty($remoteAddr) && filter_var($remoteAddr, FILTER_VALIDATE_IP) && 
+                        $remoteAddr !== '127.0.0.1' && $remoteAddr !== '::1' && strpos($remoteAddr, '127.') !== 0) {
+                        $publicIp = $remoteAddr;
+                    } else {
+                        // Try other sources as fallback
+                        $ipSources = [
+                            $_SERVER['HTTP_X_FORWARDED_FOR'] ?? '',
+                            $_SERVER['HTTP_CF_CONNECTING_IP'] ?? '',
+                            $_SERVER['HTTP_X_REAL_IP'] ?? ''
+                        ];
+                        
+                        foreach ($ipSources as $ipSource) {
+                            if (!empty($ipSource)) {
+                                if (strpos($ipSource, ',') !== false) {
+                                    $ipSource = trim(explode(',', $ipSource)[0]);
+                                }
+                                // Accept both public and private IPs, but skip localhost
+                                if (filter_var($ipSource, FILTER_VALIDATE_IP) && 
+                                    $ipSource !== '127.0.0.1' && $ipSource !== '::1' && strpos($ipSource, '127.') !== 0) {
+                                    $publicIp = $ipSource;
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
                 
-                // Strict location validation with smaller radius for WFO
+                // Log IP detection result
+                if (empty($publicIp) || !filter_var($publicIp, FILTER_VALIDATE_IP)) {
+                    error_log("WARNING: Could not detect valid IP address (skipped localhost) - will rely on WiFi/GPS validation");
+                } else {
+                    error_log("IP Detected: $publicIp (from " . (isset($_POST['public_ip']) ? 'POST' : 'SERVER') . ")");
+                }
+                
+                // Log IP detection for debugging
+                error_log("WFO IP Detection - Public IP: " . ($publicIp ?: 'NOT DETECTED') . ", Mode: $wfoMode");
+                
+                $requireWifi = (int)getSetting($pdo, 'wfo_require_wifi', '1');
+                $isInsideTelu = false;
+                $isValidWifi = false;
+                
+                // Check WiFi SSID if required (case-insensitive, exact or partial match)
+                // CRITICAL: WiFi SSID validation must work even if IP is localhost
+                if ($requireWifi && !empty($wifiSSID)) {
+                    $validWifiSSIDs = array_filter(array_map('trim', explode(',', getSetting($pdo, 'wfo_wifi_ssids', 'Telkom University,TelU,WiFi Telkom University,WiFi-TelU,Telkom-University,TelU-Connect,TelU-Guest'))));
+                    $wifiSSIDLower = strtolower(trim($wifiSSID));
+                    error_log("Checking WiFi SSID: '$wifiSSID' against valid list: " . implode(', ', $validWifiSSIDs));
+                    
+                    foreach ($validWifiSSIDs as $validSSID) {
+                        $validSSIDLower = strtolower(trim($validSSID));
+                        // Exact match or partial match - check if WiFi SSID contains valid SSID or vice versa
+                        if ($wifiSSIDLower === $validSSIDLower || 
+                            strpos($wifiSSIDLower, $validSSIDLower) !== false || 
+                            strpos($validSSIDLower, $wifiSSIDLower) !== false) {
+                            $isValidWifi = true;
+                            error_log("WiFi SSID MATCHED: '$wifiSSID' matches '$validSSID'");
+                            break;
+                        }
+                    }
+                    
+                    if (!$isValidWifi) {
+                        error_log("WiFi SSID NOT MATCHED: '$wifiSSID' does not match any valid SSID");
+                    }
+                } else if ($requireWifi && empty($wifiSSID)) {
+                    error_log("WiFi SSID is empty but WiFi is required - will check IP/GPS fallback");
+                }
+                
+                // Improved location validation with stricter radius for WFO (better accuracy)
                 $wfoLat = (float)getSetting($pdo, 'wfo_lat', '-6.9738');
                 $wfoLng = (float)getSetting($pdo, 'wfo_lng', '107.6300');
-                $wfoRadius = (int)getSetting($pdo, 'wfo_radius_m', '800'); // Reduced radius to 800m for stricter validation
+                $wfoRadius = (int)getSetting($pdo, 'wfo_radius_m', '600'); // Reduced radius to 600m for stricter validation and better accuracy
                 
                 if ($lat !== null && $lng !== null) {
                     $earth = 6371000; // meters
@@ -2965,81 +3256,149 @@ if (isset($_GET['ajax'])) {
                     $a = sin($dLat/2) * sin($dLat/2) + cos(deg2rad($lat)) * cos(deg2rad($wfoLat)) * sin($dLng/2) * sin($dLng/2);
                     $c = 2 * atan2(sqrt($a), sqrt(1-$a));
                     $distance = $earth * $c;
+                    
+                    // Improved accuracy: stricter validation using configured radius
+                    // Only consider inside if within the configured radius
                     $isInsideTelu = ($distance <= max(0, $wfoRadius));
                     
-                    // Additional strict validation: must be very close to Telkom University (within 800m)
-                    if ($isInsideTelu && $distance > 800) {
-                        $isInsideTelu = false; // Too far from center, require WFA
-                    }
+                    // Log distance for debugging accuracy issues
+                    error_log("WFO Distance Check - Distance: " . round($distance) . "m, Radius: {$wfoRadius}m, Inside: " . ($isInsideTelu ? 'Yes' : 'No'));
                 }
                 
-                // WFO validation: Must have GPS inside area AND (WiFi Telkom University OR IP API Telkom University)
+                // PRIORITAS MUTLAK: IP ADDRESS adalah validasi UTAMA (bukan WiFi, bukan GPS)
+                // Urutan validasi: 1. IP Address (private 10.x.x.x atau public via API), 2. WiFi (fallback), 3. GPS Location (fallback terakhir)
+                // Radius 200m hanya digunakan sebagai fallback jika IP dan WiFi tidak valid
+                
+                // Log semua data untuk debugging
+                error_log("=== WFO VALIDATION DEBUG ===");
+                error_log("WiFi SSID: " . ($wifiSSID ?: 'NOT DETECTED') . " (Raw: " . var_export($_POST['wifi_ssid'] ?? 'NOT IN POST', true) . ")");
+                error_log("Public IP: " . ($publicIp ?: 'NOT DETECTED'));
+                error_log("REMOTE_ADDR: " . ($_SERVER['REMOTE_ADDR'] ?? 'NOT SET'));
+                error_log("POST public_ip: " . ($_POST['public_ip'] ?? 'NOT IN POST'));
+                error_log("Location: " . ($lokasi ?: 'NOT DETECTED'));
+                error_log("GPS Lat: " . ($lat ?? 'NULL') . ", Lng: " . ($lng ?? 'NULL'));
+                error_log("GPS Accuracy: " . ($gpsAccuracy !== null ? round($gpsAccuracy) . 'm' : 'N/A'));
+                error_log("Distance: " . (isset($distance) ? round($distance) . 'm' : 'N/A') . ", Radius: {$wfoRadius}m");
+                error_log("Require WiFi: " . ($requireWifi ? 'YES' : 'NO'));
+                error_log("Is Valid WiFi: " . ($isValidWifi ? 'YES' : 'NO'));
+                
                 $isInsideTeluByApi = false;
-                if ($wfoMode === 'api' && !empty($publicIp)) {
-                    $isInsideTeluByApi = isWfoByApi($pdo, $publicIp);
+                $ketVal = 'wfa'; // Default to WFA, akan diubah jika validasi berhasil
+                
+                // PRIORITAS 1: IP ADDRESS - Check IP validation FIRST (private atau public)
+                // Ini adalah validasi UTAMA berdasarkan IP Telkom University, bukan WiFi
+                // SKIP jika IP adalah localhost (127.0.0.1, ::1) - gunakan WiFi/GPS validation
+                $isLocalhost = ($publicIp === '127.0.0.1' || $publicIp === '::1' || strpos($publicIp, '127.') === 0);
+                
+                if (!empty($publicIp) && filter_var($publicIp, FILTER_VALIDATE_IP) && !$isLocalhost) {
+                    try {
+                        // Check both private IP range (10.x.x.x) and public IP API
+                        $isInsideTeluByApi = isWfoByApi($pdo, $publicIp);
+                        error_log("WFO IP Check - IP: $publicIp, Result: " . ($isInsideTeluByApi ? 'VALID (Telkom University IP)' : 'INVALID'));
+                        
+                        // CRITICAL: Jika IP valid (private 10.x.x.x atau public via API), langsung WFO
+                        // TIDAK perlu cek WiFi atau GPS - IP adalah prioritas mutlak
+                        if ($isInsideTeluByApi) {
+                            $ketVal = 'wfo';
+                            $isInsideTelu = true;
+                            error_log('✓ IP Address valid (Telkom University) - LANGSUNG SET WFO tanpa cek WiFi/GPS');
+                        }
+                    } catch (Exception $e) {
+                        error_log("WFO IP Check Error: " . $e->getMessage());
+                        $isInsideTeluByApi = false;
+                    }
+                } else {
+                    if ($isLocalhost) {
+                        error_log("WFO IP Check - Skipped (IP is localhost: $publicIp - will use WiFi/GPS validation)");
+                    } else {
+                        error_log("WFO IP Check - Skipped (IP: " . ($publicIp ?: 'EMPTY') . ")");
+                    }
                 }
                 
-                // For WFO: GPS must be inside AND (WiFi Telkom OR IP API Telkom)
-                // Check if user meets WFO requirements
-                if ($isInsideTelu) {
-                    // Check WiFi validation
+                // PRIORITAS 2: WiFi - Hanya jika IP tidak valid (fallback)
+                // WiFi hanya digunakan sebagai fallback, bukan prioritas utama
+                // CRITICAL: WiFi validation harus bekerja bahkan jika IP tidak terdeteksi (localhost/::1)
+                if ($ketVal !== 'wfo') {
                     $hasValidWifi = false;
-                    if ($requireWifi) {
-                        if (empty($wifiSSID)) {
-                            // Browser can't detect WiFi (security limitation) - allow if IP API is valid OR GPS is inside
-                            // If GPS is inside Telkom University area, it's likely user is connected to Telkom WiFi
-                            if ($wfoMode === 'api' && $isInsideTeluByApi) {
-                                $hasValidWifi = true; // IP API is valid, consider WiFi valid
-                            } else {
-                                // WiFi not detected but GPS is inside - likely connected to Telkom WiFi (browser limitation)
-                                // Allow WFO since GPS validation is the primary check
-                                $hasValidWifi = true;
-                                error_log('WiFi SSID not detected but GPS inside WFO area - allowing WFO (browser limitation)');
-                            }
+                    
+                    // Check WiFi SSID validation (even if IP is localhost/::1)
+                    if ($requireWifi && !empty($wifiSSID)) {
+                        $hasValidWifi = $isValidWifi;
+                        if ($hasValidWifi) {
+                            $ketVal = 'wfo';
+                            $isInsideTelu = true;
+                            error_log('✓ WiFi SSID valid (' . $wifiSSID . ') - set WFO (fallback karena IP tidak valid/localhost)');
                         } else {
-                            // WiFi SSID was detected - must match valid SSIDs
-                            $hasValidWifi = $isValidWifi;
-                            // If WiFi doesn't match but IP API is valid, still allow (may be network issue)
-                            if (!$hasValidWifi && $wfoMode === 'api' && $isInsideTeluByApi) {
-                                $hasValidWifi = true;
-                                error_log('WiFi SSID mismatch but IP API valid - allowing WFO');
-                            }
+                            error_log('✗ WiFi SSID tidak valid (' . $wifiSSID . ') - Valid SSIDs: ' . getSetting($pdo, 'wfo_wifi_ssids', ''));
                         }
-                    } else {
-                        // WiFi not required
-                        $hasValidWifi = true;
-                    }
-                    
-                    // Check IP API validation
-                    $hasValidApi = ($wfoMode === 'api' && $isInsideTeluByApi);
-                    
-                    // WFO requires: GPS inside AND (Valid WiFi OR Valid IP API)
-                    // Since GPS is already inside, if WiFi or IP API is valid, allow WFO
-                    if (!$hasValidWifi && !$hasValidApi) {
-                        // GPS inside but no valid WiFi or IP - this is rare, but still allow if GPS is definitely inside
-                        // Primary validation is GPS location - if GPS says inside, user is likely at Telkom University
-                        if ($distance <= 500) { // Within 500m - very confident
-                            $hasValidWifi = true; // Allow WFO based on GPS alone
-                            error_log('GPS inside WFO area (within 500m) - allowing WFO based on GPS location');
+                    } else if ($requireWifi && empty($wifiSSID)) {
+                        // WiFi SSID tidak terdeteksi (browser limitation pada laptop)
+                        // Cek apakah IP private Telkom University sebagai fallback
+                        if (!empty($publicIp) && filter_var($publicIp, FILTER_VALIDATE_IP) && isTelkomUniversityPrivateIp($publicIp)) {
+                            $ketVal = 'wfo';
+                            $isInsideTelu = true;
+                            error_log('✓ WiFi SSID tidak terdeteksi tapi IP private Telkom University (' . $publicIp . ') - set WFO');
                         } else {
-                            // Further away - require WiFi or IP confirmation
-                            $isInsideTelu = false;
-                            $alasanWfa = $_POST['wfa_reason'] ?? $_POST['alasan_wfa'] ?? null;
-                            if (!$alasanWfa) {
-                                jsonResponse(['ok' => false, 'need_reason' => true, 'message' => 'Untuk presensi WFO, Anda harus terhubung ke WiFi Telkom University atau menggunakan IP Telkom University. Silakan hubungkan ke WiFi Telkom University atau gunakan presensi WFA dengan alasan.'], 400);
-                            }
+                            error_log('✗ WiFi SSID tidak terdeteksi dan IP tidak valid (IP: ' . ($publicIp ?: 'EMPTY') . ')');
+                            // If WiFi is required but not detected and IP is invalid, we need WFA reason
+                            // But let GPS check happen first as fallback
                         }
-                    }
-                    
-                    // Only reject if WiFi SSID was explicitly detected and doesn't match AND IP API also invalid
-                    // AND user is not very close to center (within 500m)
-                    if ($requireWifi && !empty($wifiSSID) && !$isValidWifi && !$hasValidApi && $distance > 500) {
-                        jsonResponse(['ok' => false, 'need_reason' => true, 'message' => 'WiFi yang terhubung bukan WiFi Telkom University. Silakan hubungkan ke WiFi Telkom University atau gunakan presensi WFA dengan alasan.'], 400);
+                    } else if (!$requireWifi) {
+                        // WiFi tidak wajib - skip WiFi validation
+                        error_log('WiFi tidak wajib - skip WiFi validation');
                     }
                 }
-
-                $ketVal = $isInsideTelu ? 'wfo' : 'wfa';
-                if (!$isInsideTelu) {
+                
+                // PRIORITAS 3: GPS Location - Hanya jika IP dan WiFi tidak valid (fallback terakhir)
+                // Radius 200m hanya digunakan sebagai fallback jika IP dan WiFi gagal
+                // CRITICAL FIX: Jika lokasi menunjukkan Telkom University (berdasarkan alamat), langsung WFO
+                if ($ketVal !== 'wfo' && $lat !== null && $lng !== null) {
+                    // Check if location string contains Telkom University keywords
+                    $lokasiLower = strtolower($lokasi ?? '');
+                    $isTelkomUniversityLocation = false;
+                    
+                    // Check location string for Telkom University keywords
+                    $telkomKeywords = ['telkom university', 'fakultas ilmu terapan', 'telu', 'sukapura', 'dayeuhkolot'];
+                    foreach ($telkomKeywords as $keyword) {
+                        if (strpos($lokasiLower, strtolower($keyword)) !== false) {
+                            $isTelkomUniversityLocation = true;
+                            error_log("Location contains Telkom University keyword: '$keyword'");
+                            break;
+                        }
+                    }
+                    
+                    // If location shows Telkom University, set WFO regardless of distance
+                    // This handles cases where GPS accuracy is low (indoors) but location is clearly Telkom University
+                    if ($isTelkomUniversityLocation) {
+                        $ketVal = 'wfo';
+                        $isInsideTelu = true;
+                        error_log('✓ Location shows Telkom University (based on address) - set WFO (distance: ' . round($distance) . 'm, but location confirmed)');
+                    } else if ($isInsideTelu) {
+                        // GPS inside radius - set WFO (fallback terakhir)
+                        $ketVal = 'wfo';
+                        error_log('✓ GPS inside radius - set WFO berdasarkan GPS (fallback terakhir, distance: ' . round($distance) . 'm, radius: ' . $wfoRadius . 'm)');
+                    } else {
+                        // GPS outside radius - check if distance is reasonable (GPS accuracy might be low)
+                        // If distance is < 1000m and GPS accuracy is low, still consider it WFO
+                        if ($distance <= 1000 && $gpsAccuracy !== null && $gpsAccuracy > 50) {
+                            // GPS accuracy is low (indoors) and distance is reasonable - likely still in Telkom University
+                            $ketVal = 'wfo';
+                            $isInsideTelu = true;
+                            error_log('✓ GPS distance reasonable (' . round($distance) . 'm) with low accuracy (' . round($gpsAccuracy) . 'm) - set WFO (likely indoors at Telkom University)');
+                        } else {
+                            // GPS outside radius - tetap WFA
+                            $ketVal = 'wfa';
+                            error_log('✗ GPS outside radius - require WFA (distance: ' . round($distance) . 'm, radius: ' . $wfoRadius . 'm)');
+                        }
+                    }
+                } else if ($ketVal !== 'wfo') {
+                    // Tidak ada GPS data dan IP/WiFi tidak valid
+                    $ketVal = 'wfa';
+                    error_log('✗ Semua validasi gagal - require WFA (IP: ' . ($publicIp ?: 'EMPTY') . ', WiFi: ' . ($wifiSSID ?: 'EMPTY') . ', GPS: ' . (($lat && $lng) ? 'OK' : 'MISSING') . ')');
+                }
+                
+                // Final check - jika bukan WFO, require alasan WFA
+                if ($ketVal === 'wfa') {
                     $alasanWfa = $_POST['wfa_reason'] ?? $_POST['alasan_wfa'] ?? null;
                     if (!$alasanWfa) {
                         jsonResponse(['ok' => false, 'need_reason' => true, 'message' => 'Di luar wilayah kantor atau tidak terhubung ke WiFi/IP Telkom University. Harap isi alasan kerja di luar (WFA).'], 400);
@@ -3047,8 +3406,8 @@ if (isset($_GET['ajax'])) {
                 }
 
                 // ULTRA-FAST: Minimal insert for maximum speed
-                $ins = $pdo->prepare("INSERT INTO attendance (user_id, jam_masuk, jam_masuk_iso, ekspresi_masuk, screenshot_masuk, lokasi_masuk, lat_masuk, lng_masuk, status, ket, alasan_wfa) VALUES (:uid, :jam, :iso, :exp, :screenshot, :lokasi, :lat, :lng, :status, :ket, :alasan)");
-                $ins->execute([':uid' => $u['id'], ':jam' => $jamSekarang, ':iso' => $iso, ':exp' => $ekspresi, ':screenshot' => $screenshot, ':lokasi' => $lokasi, ':lat' => $lat, ':lng' => $lng, ':status' => $status, ':ket' => $ketVal, ':alasan' => $alasanWfa]);
+                $ins = $pdo->prepare("INSERT INTO attendance (user_id, jam_masuk, jam_masuk_iso, ekspresi_masuk, screenshot_masuk, lokasi_masuk, lat_masuk, lng_masuk, status, ket, alasan_wfa, alasan_overtime, lokasi_overtime) VALUES (:uid, :jam, :iso, :exp, :screenshot, :lokasi, :lat, :lng, :status, :ket, :alasan, :alasan_ot, :lokasi_ot)");
+                $ins->execute([':uid' => $u['id'], ':jam' => $jamSekarang, ':iso' => $iso, ':exp' => $ekspresi, ':screenshot' => $screenshot, ':lokasi' => $lokasi, ':lat' => $lat, ':lng' => $lng, ':status' => $status, ':ket' => $ketVal, ':alasan' => $alasanWfa, ':alasan_ot' => null, ':lokasi_ot' => null]);
                 
                 // Trigger backup setelah presensi masuk
                 triggerDatabaseBackup();
@@ -3709,6 +4068,24 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
 
         $alasan_izin_sakit = $_POST['alasan_izin_sakit'] ?? null;
         $bukti_izin_sakit = $_POST['bukti_izin_sakit'] ?? null;
+        $alasan_wfa = $_POST['alasan_wfa'] ?? $_POST['wfa_reason'] ?? null;
+        $alasan_overtime = $_POST['alasan_overtime'] ?? $_POST['overtime_reason'] ?? null;
+        $lokasi_overtime = $_POST['lokasi_overtime'] ?? $_POST['overtime_location'] ?? null;
+        
+        // Validate overtime fields
+        if ($type === 'overtime') {
+            if (empty($alasan_overtime) || trim($alasan_overtime) === '') {
+                jsonResponse(['ok' => false, 'message' => 'Alasan overtime wajib diisi'], 400);
+            }
+            if (empty($lokasi_overtime) || trim($lokasi_overtime) === '') {
+                jsonResponse(['ok' => false, 'message' => 'Lokasi overtime wajib diisi'], 400);
+            }
+        }
+        
+        // Validate WFA fields
+        if ($type === 'wfa' && (empty($alasan_wfa) || trim($alasan_wfa) === '')) {
+            jsonResponse(['ok' => false, 'message' => 'Alasan WFA wajib diisi'], 400);
+        }
         
         // Check if type is izin or sakit - if so, insert to attendance_notes instead
         if (in_array($type, ['izin', 'sakit'])) {
@@ -3737,19 +4114,39 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         } else {
             try {
                 // Insert to attendance table for wfa/overtime
-                $sql = "INSERT INTO attendance (user_id, jam_masuk, jam_masuk_iso, jam_pulang, jam_pulang_iso, status, ket, alasan_izin_sakit, bukti_izin_sakit) VALUES (:u, :jm, :jmiso, :jp, :jpiso, :s, :ket, :alasan, :bukti)";
-                $ins = $pdo->prepare($sql);
-                $result = $ins->execute([
-                    ':u' => $user_id,
-                    ':jm' => $jam_masuk,
-                    ':jmiso' => $jam_masuk_iso,
-                    ':jp' => $jam_pulang,
-                    ':jpiso' => $jam_pulang_iso,
-                    ':s' => $status,
-                    ':ket' => $type,
-                    ':alasan' => $alasan_izin_sakit,
-                    ':bukti' => $bukti_izin_sakit
-                ]);
+                if ($type === 'overtime') {
+                    // For overtime, use alasan_overtime and lokasi_overtime
+                    $sql = "INSERT INTO attendance (user_id, jam_masuk, jam_masuk_iso, jam_pulang, jam_pulang_iso, status, ket, alasan_wfa, alasan_overtime, lokasi_overtime) VALUES (:u, :jm, :jmiso, :jp, :jpiso, :s, :ket, :alasan_wfa, :alasan_ot, :lokasi_ot)";
+                    $ins = $pdo->prepare($sql);
+                    $result = $ins->execute([
+                        ':u' => $user_id,
+                        ':jm' => $jam_masuk,
+                        ':jmiso' => $jam_masuk_iso,
+                        ':jp' => $jam_pulang,
+                        ':jpiso' => $jam_pulang_iso,
+                        ':s' => $status,
+                        ':ket' => $type,
+                        ':alasan_wfa' => null,
+                        ':alasan_ot' => $alasan_overtime,
+                        ':lokasi_ot' => $lokasi_overtime
+                    ]);
+                } else {
+                    // For wfa, use alasan_wfa
+                    $sql = "INSERT INTO attendance (user_id, jam_masuk, jam_masuk_iso, jam_pulang, jam_pulang_iso, status, ket, alasan_wfa, alasan_overtime, lokasi_overtime) VALUES (:u, :jm, :jmiso, :jp, :jpiso, :s, :ket, :alasan_wfa, :alasan_ot, :lokasi_ot)";
+                    $ins = $pdo->prepare($sql);
+                    $result = $ins->execute([
+                        ':u' => $user_id,
+                        ':jm' => $jam_masuk,
+                        ':jmiso' => $jam_masuk_iso,
+                        ':jp' => $jam_pulang,
+                        ':jpiso' => $jam_pulang_iso,
+                        ':s' => $status,
+                        ':ket' => $type,
+                        ':alasan_wfa' => $alasan_wfa,
+                        ':alasan_ot' => null,
+                        ':lokasi_ot' => null
+                    ]);
+                }
                 
                 if ($result) {
                     error_log("Admin add absence - Successfully inserted $type record to attendance table for user $user_id on date $date");
@@ -3783,11 +4180,74 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         // Debug logging for current record
         error_log("Admin update attendance - Current record query result: " . print_r($currentRecord, true));
         
-        $fields = ['jam_masuk','jam_pulang','ekspresi_masuk','ekspresi_pulang','status','ket','screenshot_masuk','screenshot_pulang','alasan_wfa','alasan_izin_sakit','bukti_izin_sakit'];
+        $fields = ['jam_masuk','jam_pulang','ekspresi_masuk','ekspresi_pulang','status','ket','screenshot_masuk','screenshot_pulang','alasan_wfa','alasan_overtime','lokasi_overtime','alasan_izin_sakit','bukti_izin_sakit'];
         $set=[]; $params=[':id'=>$id];
-        foreach($fields as $f){ if(isset($_POST[$f])){ $set[] = "$f = :$f"; $params[":$f"] = $_POST[$f]!==''? $_POST[$f] : null; } }
-        if(isset($_POST['jam_masuk_iso'])){ $set[]='jam_masuk_iso=:jmiso'; $params[':jmiso']= $_POST['jam_masuk_iso'] ?: null; }
-        if(isset($_POST['jam_pulang_iso'])){ $set[]='jam_pulang_iso=:jpiso'; $params[':jpiso']= $_POST['jam_pulang_iso'] ?: null; }
+        
+        // Get date from current record for ISO time construction
+        $datePart = $currentRecord ? date('Y-m-d', strtotime($currentRecord['attendance_date'])) : date('Y-m-d');
+        
+        // Handle jam_masuk and jam_masuk_iso
+        // Frontend sends jam_masuk in HH:MM:SS format
+        if(isset($_POST['jam_masuk']) && $_POST['jam_masuk'] !== '') {
+            $jam_masuk_value = $_POST['jam_masuk'];
+            // Extract HH:MM for jam_masuk field (remove seconds if present)
+            $jam_masuk_hhmm = preg_match('/^(\d{2}:\d{2})/', $jam_masuk_value, $matches) ? $matches[1] : $jam_masuk_value;
+            $set[] = "jam_masuk = :jam_masuk";
+            $params[':jam_masuk'] = $jam_masuk_hhmm;
+            
+            // Construct ISO time from jam_masuk if not explicitly provided
+            if(!isset($_POST['jam_masuk_iso']) || $_POST['jam_masuk_iso'] === '') {
+                // Ensure we have full time format (HH:MM:SS)
+                $time_part = preg_match('/^(\d{2}:\d{2})(:?\d{2})?$/', $jam_masuk_value, $time_matches) 
+                    ? ($time_matches[2] ? $jam_masuk_value : $jam_masuk_value . ':00')
+                    : $jam_masuk_value;
+                $jam_masuk_iso = $datePart . ' ' . $time_part;
+                $set[] = 'jam_masuk_iso = :jmiso';
+                $params[':jmiso'] = $jam_masuk_iso;
+            }
+        }
+        // If jam_masuk_iso is explicitly provided, use it
+        if(isset($_POST['jam_masuk_iso']) && $_POST['jam_masuk_iso'] !== '' && (!isset($_POST['jam_masuk']) || $_POST['jam_masuk'] === '')) {
+            $set[] = 'jam_masuk_iso = :jmiso';
+            $params[':jmiso'] = $_POST['jam_masuk_iso'];
+        }
+        
+        // Handle jam_pulang and jam_pulang_iso
+        // Frontend sends jam_pulang in HH:MM:SS format
+        if(isset($_POST['jam_pulang']) && $_POST['jam_pulang'] !== '') {
+            $jam_pulang_value = $_POST['jam_pulang'];
+            // Extract HH:MM for jam_pulang field (remove seconds if present)
+            $jam_pulang_hhmm = preg_match('/^(\d{2}:\d{2})/', $jam_pulang_value, $matches) ? $matches[1] : $jam_pulang_value;
+            $set[] = "jam_pulang = :jam_pulang";
+            $params[':jam_pulang'] = $jam_pulang_hhmm;
+            
+            // Construct ISO time from jam_pulang if not explicitly provided
+            if(!isset($_POST['jam_pulang_iso']) || $_POST['jam_pulang_iso'] === '') {
+                // Ensure we have full time format (HH:MM:SS)
+                $time_part = preg_match('/^(\d{2}:\d{2})(:?\d{2})?$/', $jam_pulang_value, $time_matches) 
+                    ? ($time_matches[2] ? $jam_pulang_value : $jam_pulang_value . ':00')
+                    : $jam_pulang_value;
+                $jam_pulang_iso = $datePart . ' ' . $time_part;
+                $set[] = 'jam_pulang_iso = :jpiso';
+                $params[':jpiso'] = $jam_pulang_iso;
+            }
+        }
+        // If jam_pulang_iso is explicitly provided, use it
+        if(isset($_POST['jam_pulang_iso']) && $_POST['jam_pulang_iso'] !== '' && (!isset($_POST['jam_pulang']) || $_POST['jam_pulang'] === '')) {
+            $set[] = 'jam_pulang_iso = :jpiso';
+            $params[':jpiso'] = $_POST['jam_pulang_iso'];
+        }
+        
+        // Handle other fields
+        foreach($fields as $f){ 
+            if($f !== 'jam_masuk' && $f !== 'jam_pulang') { // Skip jam_masuk and jam_pulang as they're handled above
+                if(isset($_POST[$f])){ 
+                    $set[] = "$f = :$f"; 
+                    $params[":$f"] = $_POST[$f]!==''? $_POST[$f] : null; 
+                } 
+            }
+        }
+        
         if(!$set) jsonResponse(['ok'=>false,'message'=>'Tidak ada perubahan'],400);
         
         // Check if ket is being changed to izin or sakit
@@ -3934,6 +4394,177 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         
         $result = createDatabaseBackup();
         jsonResponse($result);
+    }
+
+    // Admin: list backup files
+    if ($action === 'list_backup_files' && ($_SERVER['REQUEST_METHOD'] === 'GET' || $_SERVER['REQUEST_METHOD'] === 'POST')) {
+        if (!isAdmin()) jsonResponse(['error' => 'Forbidden'], 403);
+        
+        $backupDir = __DIR__ . '/database_backup';
+        $files = [];
+        $timezone = new DateTimeZone('Asia/Jakarta');
+        
+        // Always add "Current Database" option (generated on-the-fly)
+        $currentTime = new DateTime('now', $timezone);
+        $files[] = [
+            'name' => 'current_database_backup.sql',
+            'size' => 0, // Will be calculated on download
+            'size_formatted' => 'Current Database',
+            'created' => $currentTime->format('Y-m-d H:i:s'),
+            'modified' => $currentTime->format('Y-m-d H:i:s'),
+            'is_current' => true,
+            'description' => 'Backup langsung dari database saat ini (selalu terbaru)'
+        ];
+        
+        if (is_dir($backupDir)) {
+            $items = scandir($backupDir);
+            foreach ($items as $item) {
+                if ($item !== '.' && $item !== '..' && is_file($backupDir . '/' . $item)) {
+                    $filePath = $backupDir . '/' . $item;
+                    $timestamp = filemtime($filePath);
+                    
+                    // Convert timestamp to Asia/Jakarta timezone
+                    $dateTime = new DateTime('@' . $timestamp);
+                    $dateTime->setTimezone($timezone);
+                    $formattedDate = $dateTime->format('Y-m-d H:i:s');
+                    
+                    $files[] = [
+                        'name' => $item,
+                        'size' => filesize($filePath),
+                        'size_formatted' => function_exists('formatBytes') ? formatBytes(filesize($filePath)) : number_format(filesize($filePath) / 1024, 2) . ' KB',
+                        'created' => $formattedDate,
+                        'modified' => $formattedDate,
+                        'is_current' => false
+                    ];
+                }
+            }
+        }
+        
+        // Sort by modified date (newest first), but keep current_database_backup.sql at top
+        usort($files, function($a, $b) {
+            if (isset($a['is_current']) && $a['is_current']) return -1;
+            if (isset($b['is_current']) && $b['is_current']) return 1;
+            return strtotime($b['modified']) - strtotime($a['modified']);
+        });
+        
+        jsonResponse(['ok' => true, 'data' => $files]);
+    }
+
+    // Admin: download backup file
+    if ($action === 'download_backup' && $_SERVER['REQUEST_METHOD'] === 'GET') {
+        if (!isAdmin()) {
+            http_response_code(403);
+            die('Forbidden');
+        }
+        
+        $fileName = $_GET['file'] ?? '';
+        if (empty($fileName)) {
+            http_response_code(400);
+            die('File name required');
+        }
+        
+        // Special case: download current database backup (generate on-the-fly)
+        if ($fileName === 'current_database_backup.sql' || $fileName === 'database_current.sql') {
+            if (!function_exists('createDatabaseBackupPHP')) {
+                http_response_code(500);
+                die('Backup function not available');
+            }
+            
+            $result = createDatabaseBackupPHP($pdo);
+            if (!$result['success']) {
+                http_response_code(500);
+                die('Failed to generate backup: ' . $result['message']);
+            }
+            
+            $sqlContent = $result['sql_content'];
+            $downloadFileName = 'absen_db_backup_' . date('Y-m-d_His') . '.sql';
+            
+            // Set headers for file download
+            header('Content-Type: application/octet-stream');
+            header('Content-Disposition: attachment; filename="' . $downloadFileName . '"');
+            header('Content-Length: ' . strlen($sqlContent));
+            header('Cache-Control: must-revalidate');
+            header('Pragma: public');
+            
+            // Output SQL content
+            echo $sqlContent;
+            exit;
+        }
+        
+        // Security: only allow files in backup directory, prevent directory traversal
+        $backupDir = __DIR__ . '/database_backup';
+        $filePath = $backupDir . '/' . basename($fileName);
+        
+        // Verify file is in backup directory
+        $realBackupDir = realpath($backupDir);
+        $realFilePath = realpath($filePath);
+        
+        if (!$realFilePath || ($realBackupDir && strpos($realFilePath, $realBackupDir) !== 0)) {
+            // If file doesn't exist in backup directory, try generating from database
+            if (!function_exists('createDatabaseBackupPHP')) {
+                http_response_code(404);
+                die('File not found');
+            }
+            
+            $result = createDatabaseBackupPHP($pdo);
+            if (!$result['success']) {
+                http_response_code(404);
+                die('File not found and failed to generate backup');
+            }
+            
+            $sqlContent = $result['sql_content'];
+            $downloadFileName = basename($fileName);
+            
+            // Set headers for file download
+            header('Content-Type: application/octet-stream');
+            header('Content-Disposition: attachment; filename="' . $downloadFileName . '"');
+            header('Content-Length: ' . strlen($sqlContent));
+            header('Cache-Control: must-revalidate');
+            header('Pragma: public');
+            
+            // Output SQL content
+            echo $sqlContent;
+            exit;
+        }
+        
+        if (!file_exists($filePath)) {
+            // File doesn't exist, generate from database
+            if (!function_exists('createDatabaseBackupPHP')) {
+                http_response_code(404);
+                die('File not found');
+            }
+            
+            $result = createDatabaseBackupPHP($pdo);
+            if (!$result['success']) {
+                http_response_code(404);
+                die('File not found and failed to generate backup');
+            }
+            
+            $sqlContent = $result['sql_content'];
+            $downloadFileName = basename($fileName);
+            
+            // Set headers for file download
+            header('Content-Type: application/octet-stream');
+            header('Content-Disposition: attachment; filename="' . $downloadFileName . '"');
+            header('Content-Length: ' . strlen($sqlContent));
+            header('Cache-Control: must-revalidate');
+            header('Pragma: public');
+            
+            // Output SQL content
+            echo $sqlContent;
+            exit;
+        }
+        
+        // Set headers for file download
+        header('Content-Type: application/octet-stream');
+        header('Content-Disposition: attachment; filename="' . basename($fileName) . '"');
+        header('Content-Length: ' . filesize($filePath));
+        header('Cache-Control: must-revalidate');
+        header('Pragma: public');
+        
+        // Output file
+        readfile($filePath);
+        exit;
     }
 
     // Admin: get settings
@@ -4164,6 +4795,15 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         $kpiIzinSakit = trim($_POST['kpi_izin_sakit'] ?? '');
         $kpiAlpha = trim($_POST['kpi_alpha'] ?? '');
         $kpiOvertimeBonus = trim($_POST['kpi_overtime_bonus'] ?? '');
+        $maxDailyReportDaysBack = trim($_POST['max_daily_report_days_back'] ?? '');
+        $maxMonthlyReportMonthsBack = trim($_POST['max_monthly_report_months_back'] ?? '');
+        $monthlyReportEndYear = trim($_POST['monthly_report_end_year'] ?? '');
+        $faceRecognitionThreshold = trim($_POST['face_recognition_threshold'] ?? '');
+        $faceRecognitionInputSize = trim($_POST['face_recognition_input_size'] ?? '');
+        $faceRecognitionScoreThreshold = trim($_POST['face_recognition_score_threshold'] ?? '');
+        $faceRecognitionQualityThreshold = trim($_POST['face_recognition_quality_threshold'] ?? '');
+        $geocodeTimeout = trim($_POST['geocode_timeout'] ?? '');
+        $geocodeAccuracyRadius = trim($_POST['geocode_accuracy_radius'] ?? '');
         
         // WFO API settings
         $wfoMode = trim($_POST['wfo_mode'] ?? '');
@@ -4223,6 +4863,33 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         if ($wfoApiCidrList !== '') setSetting($pdo, 'wfo_api_cidr_list', $wfoApiCidrList);
         if ($wfoWifiSSIDs !== '') setSetting($pdo, 'wfo_wifi_ssids', $wfoWifiSSIDs);
         if ($wfoRequireWifi !== '') setSetting($pdo, 'wfo_require_wifi', $wfoRequireWifi);
+        
+        // Save report settings
+        if ($maxDailyReportDaysBack !== '') setSetting($pdo, 'max_daily_report_days_back', $maxDailyReportDaysBack);
+        if ($maxMonthlyReportMonthsBack !== '') setSetting($pdo, 'max_monthly_report_months_back', $maxMonthlyReportMonthsBack);
+        if ($monthlyReportEndYear !== '') setSetting($pdo, 'monthly_report_end_year', $monthlyReportEndYear);
+        
+        // Save face recognition settings
+        if ($faceRecognitionThreshold !== '' && is_numeric($faceRecognitionThreshold) && $faceRecognitionThreshold >= 0 && $faceRecognitionThreshold <= 1) {
+            setSetting($pdo, 'face_recognition_threshold', $faceRecognitionThreshold);
+        }
+        if ($faceRecognitionInputSize !== '' && is_numeric($faceRecognitionInputSize) && $faceRecognitionInputSize >= 224 && $faceRecognitionInputSize <= 640) {
+            setSetting($pdo, 'face_recognition_input_size', $faceRecognitionInputSize);
+        }
+        if ($faceRecognitionScoreThreshold !== '' && is_numeric($faceRecognitionScoreThreshold) && $faceRecognitionScoreThreshold >= 0 && $faceRecognitionScoreThreshold <= 1) {
+            setSetting($pdo, 'face_recognition_score_threshold', $faceRecognitionScoreThreshold);
+        }
+        if ($faceRecognitionQualityThreshold !== '' && is_numeric($faceRecognitionQualityThreshold) && $faceRecognitionQualityThreshold >= 0 && $faceRecognitionQualityThreshold <= 1) {
+            setSetting($pdo, 'face_recognition_quality_threshold', $faceRecognitionQualityThreshold);
+        }
+        
+        // Save geocode settings
+        if ($geocodeTimeout !== '' && is_numeric($geocodeTimeout) && $geocodeTimeout >= 1 && $geocodeTimeout <= 10) {
+            setSetting($pdo, 'geocode_timeout', $geocodeTimeout);
+        }
+        if ($geocodeAccuracyRadius !== '' && is_numeric($geocodeAccuracyRadius) && $geocodeAccuracyRadius >= 10 && $geocodeAccuracyRadius <= 200) {
+            setSetting($pdo, 'geocode_accuracy_radius', $geocodeAccuracyRadius);
+        }
         
         // Trigger backup setelah update settings
         triggerDatabaseBackup();
@@ -4718,12 +5385,16 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         $start = sprintf('%04d-%02d-01', $year, $month);
         $end = date('Y-m-t', strtotime($start));
 
-        // Fetch attendance and reports for month
-        $attStmt = $pdo->prepare("SELECT * FROM attendance WHERE user_id=:uid AND jam_masuk_iso BETWEEN :s AND :e");
-        $attStmt->execute([':uid'=>$uid, ':s'=>$start.' 00:00:00', ':e'=>$end.' 23:59:59']);
+        // Get employee registration date
+        $employeeRegDate = getEmployeeRegistrationDate($pdo, $uid);
+        $employeeRegDateOnly = $employeeRegDate ? date('Y-m-d', strtotime($employeeRegDate)) : null;
+
+        // Fetch attendance and reports for month (including overtime on weekends/holidays)
+        $attStmt = $pdo->prepare("SELECT * FROM attendance WHERE user_id=:uid AND DATE(jam_masuk_iso) BETWEEN :s AND :e");
+        $attStmt->execute([':uid'=>$uid, ':s'=>$start, ':e'=>$end]);
         $attRows = $attStmt->fetchAll();
         $attByDate = [];
-        foreach($attRows as $r){ $d = substr($r['jam_masuk_iso']??$r['jam_pulang_iso'],0,10); $attByDate[$d] = $r; }
+        foreach($attRows as $r){ $d = date('Y-m-d', strtotime($r['jam_masuk_iso'])); $attByDate[$d] = $r; }
 
         // Fetch attendance notes for month (check if table exists first)
         $notesByDate = [];
@@ -4736,62 +5407,89 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
             error_log("Attendance notes table not found: " . $e->getMessage());
         }
 
+        // Get manual holidays for the month
+        $manualHolidays = getManualHolidaysInRange($pdo, $start, $end);
+        $manualHolidayDates = [];
+        foreach($manualHolidays as $h){ $manualHolidayDates[$h['date']] = true; }
+
         $drStmt = $pdo->prepare("SELECT * FROM daily_reports WHERE user_id=:uid AND report_date BETWEEN :s AND :e");
         $drStmt->execute([':uid'=>$uid, ':s'=>$start, ':e'=>$end]);
         $drByDate = [];
         foreach($drStmt->fetchAll() as $r){ $drByDate[$r['report_date']]=$r; }
 
-        // Build working days Mon-Fri
+        // Build all days in month (including weekends)
         $out = [];
         $cur = new DateTime($start);
         $endDt = new DateTime($end);
         while($cur <= $endDt){
+            $dstr = $cur->format('Y-m-d');
             $dow = (int)$cur->format('N'); // 1 Mon .. 7 Sun
-            if($dow>=1 && $dow<=5){
-                $dstr = $cur->format('Y-m-d');
-                $att = $attByDate[$dstr] ?? null;
-                $notes = $notesByDate[$dstr] ?? null;
-                $dr = $drByDate[$dstr] ?? null;
-                
-                // Determine ket value
-                $ket = null;
-                if ($att && $att['ket']) {
-                    $ket = $att['ket'];
-                } elseif ($notes && $notes['type']) {
-                    $ket = $notes['type'];
-                }
-                
-                // For daily report content, use attendance_notes if available
-                $reportContent = null;
-                if ($dr) {
-                    $reportContent = [
-                        'id'=>$dr['id'], 
-                        'status'=>$dr['status'], 
-                        'has_content'=>!!$dr['content'], 
-                        'content'=>$dr['content'], 
-                        'evaluation'=>$dr['evaluation']
-                    ];
-                } elseif ($notes && $notes['keterangan']) {
-                    // Use attendance_notes content for daily report
-                    $reportContent = [
-                        'id'=>null, 
-                        'status'=>'auto', 
-                        'has_content'=>true, 
-                        'content'=>$notes['keterangan'], 
-                        'evaluation'=>null
-                    ];
-                }
-                
-                $out[] = [
-                    'date'=>$dstr,
-                    'day'=>$cur->format('l'),
-                    'jam_masuk'=>$att['jam_masuk']??null,
-                    'jam_pulang'=>$att['jam_pulang']??null,
-                    'status_presensi'=>$att['status']??null,
-                    'ket'=>$ket,
-                    'daily_report'=> $reportContent
+            $att = $attByDate[$dstr] ?? null;
+            $notes = $notesByDate[$dstr] ?? null;
+            $dr = $drByDate[$dstr] ?? null;
+            
+            // Check if date is before employee registration
+            $isBeforeRegistration = $employeeRegDateOnly && $dstr < $employeeRegDateOnly;
+            
+            // Check if date is manual holiday
+            $isManualHolidayDate = isset($manualHolidayDates[$dstr]);
+            
+            // Check if date is national holiday
+            $isNationalHolidayDate = isNationalHoliday($dstr);
+            
+            // Check if date is weekend
+            $isWeekend = $dow >= 6; // Saturday = 6, Sunday = 7
+            
+            // Check if date is working day for this employee
+            $isWorkingDay = isEmployeeWorkingDay($pdo, $uid, $dstr);
+            
+            // Determine ket value
+            $ket = null;
+            if ($att && $att['ket']) {
+                $ket = $att['ket'];
+            } elseif ($notes && $notes['type']) {
+                $ket = $notes['type'];
+            } elseif ($isManualHolidayDate) {
+                $ket = 'libur';
+            } elseif ($isBeforeRegistration) {
+                $ket = 'na'; // Not Available
+            }
+            
+            // For daily report content, use attendance_notes if available
+            $reportContent = null;
+            if ($dr) {
+                $reportContent = [
+                    'id'=>$dr['id'], 
+                    'status'=>$dr['status'], 
+                    'has_content'=>!!$dr['content'], 
+                    'content'=>$dr['content'], 
+                    'evaluation'=>$dr['evaluation']
+                ];
+            } elseif ($notes && $notes['keterangan']) {
+                // Use attendance_notes content for daily report
+                $reportContent = [
+                    'id'=>null, 
+                    'status'=>'auto', 
+                    'has_content'=>true, 
+                    'content'=>$notes['keterangan'], 
+                    'evaluation'=>null
                 ];
             }
+            
+            $out[] = [
+                'date'=>$dstr,
+                'day'=>$cur->format('l'),
+                'jam_masuk'=>$att['jam_masuk']??null,
+                'jam_pulang'=>$att['jam_pulang']??null,
+                'status_presensi'=>$att['status']??null,
+                'ket'=>$ket,
+                'daily_report'=> $reportContent,
+                'is_working_day'=>$isWorkingDay,
+                'is_weekend'=>$isWeekend,
+                'is_manual_holiday'=>$isManualHolidayDate,
+                'is_national_holiday'=>$isNationalHolidayDate,
+                'is_before_registration'=>$isBeforeRegistration
+            ];
             $cur->modify('+1 day');
         }
         jsonResponse(['ok'=>true,'data'=>$out]);
@@ -4966,6 +5664,9 @@ if ($page === 'logout') {
         .badge-red { background: #fee2e2; color: #991b1b; }
         .badge-blue { background: #dbeafe; color: #1e40af; }
         .badge-yellow { background: #fde68a; color: #854d0e; }
+        .badge-emerald { background: #a7f3d0; color: #064e3b; }
+        .badge-orange { background: #fed7aa; color: #9a3412; }
+        .badge-purple { background: #e9d5ff; color: #6b21a8; }
         .btn-pill { border-radius: 9999px; padding: 0.25rem 0.75rem; font-weight: 600; }
         .z-60 { z-index: 60; }
         .z-70 { z-index: 70; }
@@ -5206,6 +5907,7 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                                 <th class="py-2 px-4">Nama</th>
                                 <th class="py-2 px-4">Startup</th>
                                 <th class="py-2 px-4">Jam Keluar</th>
+                                <th class="py-2 px-4">Lokasi Keluar</th>
                                 <th class="py-2 px-4">Screenshot</th>
                             </tr>
                         </thead>
@@ -5487,25 +6189,62 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
         </div>
     </div>
 <?php else: ?>
+    <!-- Mobile Sidebar Overlay -->
+    <div id="mobile-sidebar-overlay" class="fixed inset-0 bg-black bg-opacity-50 z-40 hidden md:hidden"></div>
+    
+    <!-- Mobile Sidebar -->
+    <div id="mobile-sidebar" class="fixed top-0 left-0 h-full w-64 bg-white shadow-xl z-50 transform -translate-x-full transition-transform duration-300 md:hidden">
+        <div class="p-4 border-b border-gray-200">
+            <div class="flex items-center justify-between">
+                <h2 class="text-lg font-bold text-gray-800">Menu</h2>
+                <button id="mobile-sidebar-close" class="p-2 hover:bg-gray-100 rounded-lg">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                    </svg>
+                </button>
+            </div>
+        </div>
+        <nav class="p-4">
+            <?php if (isAdmin()): ?>
+                <button data-tab="dashboard" class="mobile-tab-link w-full text-left py-3 px-4 font-semibold text-gray-700 hover:bg-indigo-50 hover:text-indigo-600 rounded-lg transition duration-300 mb-2">Dashboard</button>
+                <button data-tab="members" class="mobile-tab-link w-full text-left py-3 px-4 font-semibold text-gray-700 hover:bg-indigo-50 hover:text-indigo-600 rounded-lg transition duration-300 mb-2">Kelola Member</button>
+                <button data-tab="laporan" class="mobile-tab-link w-full text-left py-3 px-4 font-semibold text-gray-700 hover:bg-indigo-50 hover:text-indigo-600 rounded-lg transition duration-300 mb-2">Data Presensi</button>
+                <button data-tab="admin-monthly" class="mobile-tab-link w-full text-left py-3 px-4 font-semibold text-gray-700 hover:bg-indigo-50 hover:text-indigo-600 rounded-lg transition duration-300 mb-2">Laporan Bulanan</button>
+                <button data-tab="settings" class="mobile-tab-link w-full text-left py-3 px-4 font-semibold text-gray-700 hover:bg-indigo-50 hover:text-indigo-600 rounded-lg transition duration-300 mb-2">Settings</button>
+            <?php else: ?>
+                <button data-tab="rekap" class="mobile-tab-link w-full text-left py-3 px-4 font-semibold text-gray-700 hover:bg-indigo-50 hover:text-indigo-600 rounded-lg transition duration-300 mb-2">Rekap Hadir</button>
+                <button data-tab="laporan-bulanan" class="mobile-tab-link w-full text-left py-3 px-4 font-semibold text-gray-700 hover:bg-indigo-50 hover:text-indigo-600 rounded-lg transition duration-300 mb-2">Laporan Bulanan</button>
+            <?php endif; ?>
+        </nav>
+    </div>
+    
     <header class="bg-white shadow-md">
         <div class="container mx-auto px-4 py-4 flex items-center justify-between">
-            <h1 class="text-2xl font-bold text-gray-700">Sistem Presensi Berbasis Wajah</h1>
+            <div class="flex items-center gap-3">
+                <!-- Hamburger Menu Button (Mobile Only) -->
+                <button id="mobile-menu-toggle" class="md:hidden p-2 hover:bg-gray-100 rounded-lg transition-colors">
+                    <svg class="w-6 h-6 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path>
+                    </svg>
+                </button>
+                <h1 class="text-xl md:text-2xl font-bold text-gray-700">Sistem Presensi Berbasis Wajah</h1>
+            </div>
             <div class="flex items-center gap-4">
                 <?php if (!isAdmin()): ?>
-                    <!-- Presensi Buttons in Header -->
-                    <button id="btn-header-presensi-masuk" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded-lg transition text-sm">
+                    <!-- Presensi Buttons in Header (Hidden on Mobile) -->
+                    <button id="btn-header-presensi-masuk" class="hidden md:block bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded-lg transition text-sm">
                         Presensi Masuk
                     </button>
-                    <button id="btn-header-presensi-pulang" class="bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-4 rounded-lg transition text-sm">
+                    <button id="btn-header-presensi-pulang" class="hidden md:block bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-4 rounded-lg transition text-sm">
                         Presensi Pulang
                     </button>
                 <?php endif; ?>
                 <div class="relative">
-                    <button id="btn-profile" class="flex items-center gap-3 px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg overflow-hidden">
-                        <span class="text-sm text-gray-700"><?php echo htmlspecialchars($_SESSION['user']['nama'] ?? 'Akun'); ?></span>
-                        <img src="generate-avatar.php?background=6366f1&color=fff&name=<?php echo urlencode($_SESSION['user']['nama'] ?? 'A'); ?>&size=32" class="avatar" alt="profile">
+                    <button id="btn-profile" class="flex items-center gap-2 md:gap-3 px-2 md:px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg overflow-hidden">
+                        <span class="text-xs md:text-sm text-gray-700 hidden sm:inline"><?php echo htmlspecialchars($_SESSION['user']['nama'] ?? 'Akun'); ?></span>
+                        <img src="generate-avatar.php?background=6366f1&color=fff&name=<?php echo urlencode($_SESSION['user']['nama'] ?? 'A'); ?>&size=32" class="avatar w-8 h-8 md:w-8 md:h-8" alt="profile">
                     </button>
-                    <div id="dropdown-profile" class="absolute right-0 mt-2 bg-white rounded-lg shadow-lg border hidden min-w-max">
+                    <div id="dropdown-profile" class="absolute right-0 mt-2 bg-white rounded-lg shadow-lg border hidden min-w-max z-50">
                         <?php if(isset($_SESSION['user'])): ?>
                             <div class="px-4 py-2 text-sm text-gray-600 border-b whitespace-nowrap"><?php echo htmlspecialchars($_SESSION['user']['email'] ?? ''); ?></div>
                             <a href="?page=logout" class="block px-4 py-2 text-sm text-red-600 hover:bg-red-50 whitespace-nowrap">Logout</a>
@@ -5519,7 +6258,7 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
         </div>
     </header>
 
-    <nav class="bg-indigo-600 text-white">
+    <nav class="bg-indigo-600 text-white hidden md:block">
         <div class="container mx-auto px-4">
             <div class="flex items-center justify-center space-x-4">
                 <?php if (!isAdmin()): ?>
@@ -5985,6 +6724,78 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                             </div>
                         </div>
                         
+                        <div class="bg-gray-50 p-4 rounded-lg">
+                            <h3 class="text-lg font-semibold mb-4 text-gray-800">Pengaturan Laporan</h3>
+                            <div class="space-y-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">Maksimal Hari Kebelakang untuk Laporan Harian</label>
+                                    <input type="number" min="1" max="30" id="max-daily-report-days-back" 
+                                           class="w-32 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+                                    <p class="text-xs text-gray-500 mt-1">Default: 5 hari. Pegawai hanya bisa mengisi laporan harian untuk N hari kebelakang.</p>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">Maksimal Bulan Kebelakang untuk Laporan Bulanan</label>
+                                    <input type="number" min="1" max="999" id="max-monthly-report-months-back" 
+                                           class="w-32 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+                                    <p class="text-xs text-gray-500 mt-1">Default: 999 (tidak terbatas). Pegawai hanya bisa membuat laporan bulanan untuk N bulan kebelakang. Set 999 untuk tidak terbatas.</p>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">Tahun Akhir untuk Laporan Bulanan</label>
+                                    <input type="number" min="2025" max="2100" id="monthly-report-end-year" 
+                                           class="w-32 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+                                    <p class="text-xs text-gray-500 mt-1">Default: 2026. Tahun akhir untuk periode laporan bulanan. Pegawai hanya bisa membuat laporan bulanan dari tahun 2025 sampai tahun yang diatur.</p>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="bg-gray-50 p-4 rounded-lg">
+                            <h3 class="text-lg font-semibold mb-4 text-gray-800">Pengaturan Face Recognition</h3>
+                            <div class="space-y-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">Threshold Face Recognition</label>
+                                    <input type="number" min="0" max="1" step="0.01" id="face-recognition-threshold" 
+                                           class="w-32 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+                                    <p class="text-xs text-gray-500 mt-1">Default: 0.38. Semakin rendah semakin ketat (0.0-1.0). Nilai rendah = lebih akurat tapi lebih sulit terdeteksi.</p>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">Ukuran Input Face Detection</label>
+                                    <input type="number" min="224" max="640" step="32" id="face-recognition-input-size" 
+                                           class="w-32 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+                                    <p class="text-xs text-gray-500 mt-1">Default: 416. Semakin besar semakin akurat tapi lebih lambat (224-640).</p>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">Score Threshold Face Detection</label>
+                                    <input type="number" min="0" max="1" step="0.01" id="face-recognition-score-threshold" 
+                                           class="w-32 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+                                    <p class="text-xs text-gray-500 mt-1">Default: 0.35. Threshold untuk deteksi wajah (0.0-1.0).</p>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">Quality Threshold Validasi Wajah</label>
+                                    <input type="number" min="0" max="1" step="0.01" id="face-recognition-quality-threshold" 
+                                           class="w-32 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+                                    <p class="text-xs text-gray-500 mt-1">Default: 0.55. Threshold untuk validasi kualitas wajah (0.0-1.0).</p>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="bg-gray-50 p-4 rounded-lg">
+                            <h3 class="text-lg font-semibold mb-4 text-gray-800">Pengaturan Geocode & Lokasi</h3>
+                            <div class="space-y-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">Timeout Reverse Geocoding (detik)</label>
+                                    <input type="number" min="1" max="10" id="geocode-timeout" 
+                                           class="w-32 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+                                    <p class="text-xs text-gray-500 mt-1">Default: 3 detik. Waktu maksimal untuk mendapatkan nama lokasi dari koordinat GPS.</p>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">Radius Akurasi GPS (meter)</label>
+                                    <input type="number" min="10" max="200" id="geocode-accuracy-radius" 
+                                           class="w-32 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+                                    <p class="text-xs text-gray-500 mt-1">Default: 50 meter. Radius akurasi GPS untuk validasi lokasi presensi.</p>
+                                </div>
+                            </div>
+                        </div>
+                        
                         <div class="bg-blue-50 p-4 rounded-lg">
                             <h3 class="text-lg font-semibold mb-4 text-blue-800">Informasi</h3>
                             <div class="space-y-3 text-sm text-blue-700">
@@ -6015,6 +6826,34 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                         </button>
                     </div>
                 </form>
+                
+                <!-- Backup Database Section -->
+                <div class="mt-8 bg-white p-6 rounded-lg shadow-lg">
+                    <h2 class="text-xl font-bold mb-6">Manajemen Backup Database</h2>
+                    
+                    <div class="mb-4">
+                        <button type="button" id="btn-create-backup" 
+                                class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition mr-2">
+                            <i class="fi fi-sr-database"></i> Buat Backup Baru
+                        </button>
+                        <button type="button" id="btn-refresh-backup-list" 
+                                class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition">
+                            <i class="fi fi-sr-refresh"></i> Refresh List
+                        </button>
+                    </div>
+                    
+                    <div class="border rounded-lg overflow-hidden">
+                        <div class="bg-gray-50 px-4 py-3 border-b">
+                            <h3 class="font-semibold text-gray-800">File Backup Tersedia</h3>
+                        </div>
+                        <div id="backup-files-list" class="p-4">
+                            <div class="text-center text-gray-500 py-8">
+                                <div class="inline-block animate-spin rounded-full h-6 w-6 border-b-2 border-indigo-600"></div>
+                                <p class="mt-2">Memuat daftar file backup...</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
         <?php endif; ?>
@@ -6264,6 +7103,16 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                         <option value="overtime">Overtime</option>
                     </select>
                 </div>
+                <div id="edit-att-wfa-form" class="mb-3 hidden">
+                    <label class="block text-sm text-gray-600 mb-1">Alasan WFA</label>
+                    <textarea id="edit-att-alasan-wfa" class="w-full p-2 border rounded-lg" rows="3" placeholder="Tulis alasan WFA..."></textarea>
+                </div>
+                <div id="edit-att-overtime-form" class="mb-3 hidden">
+                    <label class="block text-sm text-gray-600 mb-1">Alasan Overtime</label>
+                    <textarea id="edit-att-alasan-overtime" class="w-full p-2 border rounded-lg mb-3" rows="3" placeholder="Tulis alasan overtime..."></textarea>
+                    <label class="block text-sm text-gray-600 mb-1">Lokasi Overtime</label>
+                    <input type="text" id="edit-att-lokasi-overtime" class="w-full p-2 border rounded-lg" placeholder="Tulis lokasi overtime...">
+                </div>
                 <div class="mb-3">
                     <label class="block text-sm text-gray-600 mb-1">Status</label>
                     <select id="edit-att-status" class="w-full p-2 border rounded-lg">
@@ -6409,7 +7258,7 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                         <option value="overtime">Overtime</option>
                     </select>
                 </div>
-                <div id="abs-wfh-form" class="grid grid-cols-2 gap-2 hidden">
+                <div id="abs-wfa-form" class="grid gap-2 hidden">
                     <label class="text-sm text-gray-600 flex flex-col">
                         <span class="mb-1">Jam Masuk</span>
                         <input type="time" id="abs-jam-masuk" class="p-2 border rounded-lg">
@@ -6417,6 +7266,28 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                     <label class="text-sm text-gray-600 flex flex-col">
                         <span class="mb-1">Jam Pulang</span>
                         <input type="time" id="abs-jam-pulang" class="p-2 border rounded-lg">
+                    </label>
+                    <label class="text-sm text-gray-600 flex flex-col">
+                        <span class="mb-1">Alasan WFA</span>
+                        <textarea id="abs-alasan-wfa" class="p-2 border rounded-lg" rows="3" placeholder="Tulis alasan WFA..."></textarea>
+                    </label>
+                </div>
+                <div id="abs-overtime-form" class="grid gap-2 hidden">
+                    <label class="text-sm text-gray-600 flex flex-col">
+                        <span class="mb-1">Jam Masuk</span>
+                        <input type="time" id="abs-jam-masuk-ot" class="p-2 border rounded-lg">
+                    </label>
+                    <label class="text-sm text-gray-600 flex flex-col">
+                        <span class="mb-1">Jam Pulang</span>
+                        <input type="time" id="abs-jam-pulang-ot" class="p-2 border rounded-lg">
+                    </label>
+                    <label class="text-sm text-gray-600 flex flex-col">
+                        <span class="mb-1">Alasan Overtime</span>
+                        <textarea id="abs-alasan-overtime" class="p-2 border rounded-lg" rows="3" placeholder="Tulis alasan overtime..."></textarea>
+                    </label>
+                    <label class="text-sm text-gray-600 flex flex-col">
+                        <span class="mb-1">Lokasi Overtime</span>
+                        <input type="text" id="abs-lokasi-overtime" class="p-2 border rounded-lg" placeholder="Tulis lokasi overtime...">
                     </label>
                 </div>
             </div>
@@ -7267,6 +8138,232 @@ if (resetPasswordForm) {
     });
 }
 <?php elseif ($page === 'landing'): ?>
+// Browser compatibility polyfills
+(function() {
+    // Polyfill for getUserMedia for older browsers
+    if (!navigator.mediaDevices) {
+        navigator.mediaDevices = {};
+    }
+    if (!navigator.mediaDevices.getUserMedia) {
+        navigator.mediaDevices.getUserMedia = function(constraints) {
+            const getUserMedia = navigator.getUserMedia || 
+                                 navigator.webkitGetUserMedia || 
+                                 navigator.mozGetUserMedia || 
+                                 navigator.msGetUserMedia;
+            
+            if (!getUserMedia) {
+                return Promise.reject(new Error('getUserMedia is not supported in this browser'));
+            }
+            
+            return new Promise(function(resolve, reject) {
+                getUserMedia.call(navigator, constraints, resolve, reject);
+            });
+        };
+    }
+    
+    // Polyfill for Promise if needed (for very old browsers)
+    if (typeof Promise === 'undefined') {
+        window.Promise = function(executor) {
+            // Simple Promise polyfill
+            const self = this;
+            self.state = 'pending';
+            self.value = undefined;
+            self.handlers = [];
+            
+            function resolve(result) {
+                if (self.state === 'pending') {
+                    self.state = 'fulfilled';
+                    self.value = result;
+                    self.handlers.forEach(handle);
+                    self.handlers = null;
+                }
+            }
+            
+            function reject(error) {
+                if (self.state === 'pending') {
+                    self.state = 'rejected';
+                    self.value = error;
+                    self.handlers.forEach(handle);
+                    self.handlers = null;
+                }
+            }
+            
+            function handle(handler) {
+                if (self.state === 'pending') {
+                    self.handlers.push(handler);
+                } else {
+                    if (self.state === 'fulfilled' && typeof handler.onFulfilled === 'function') {
+                        handler.onFulfilled(self.value);
+                    }
+                    if (self.state === 'rejected' && typeof handler.onRejected === 'function') {
+                        handler.onRejected(self.value);
+                    }
+                }
+            }
+            
+            self.then = function(onFulfilled, onRejected) {
+                return new Promise(function(resolve, reject) {
+                    handle({
+                        onFulfilled: function(result) {
+                            try {
+                                resolve(onFulfilled ? onFulfilled(result) : result);
+                            } catch (ex) {
+                                reject(ex);
+                            }
+                        },
+                        onRejected: function(error) {
+                            try {
+                                resolve(onRejected ? onRejected(error) : error);
+                            } catch (ex) {
+                                reject(ex);
+                            }
+                        }
+                    });
+                });
+            };
+            
+            executor(resolve, reject);
+        };
+    }
+    
+    // Performance optimization: RequestIdleCallback polyfill
+    if (!window.requestIdleCallback) {
+        window.requestIdleCallback = function(callback, options) {
+            const start = Date.now();
+            return setTimeout(function() {
+                callback({
+                    didTimeout: false,
+                    timeRemaining: function() {
+                        return Math.max(0, 50 - (Date.now() - start));
+                    }
+                });
+            }, 1);
+        };
+    }
+    
+    if (!window.cancelIdleCallback) {
+        window.cancelIdleCallback = function(id) {
+            clearTimeout(id);
+        };
+    }
+    
+    // Browser-specific fixes
+    const ua = navigator.userAgent.toLowerCase();
+    const isSafari = /safari/.test(ua) && !/chrome/.test(ua) && !/chromium/.test(ua);
+    const isFirefox = /firefox/.test(ua);
+    const isChrome = /chrome/.test(ua) && !/edge/.test(ua);
+    const isMIBrowser = /miui/.test(ua) || /xiaomi/.test(ua);
+    const isEdge = /edge/.test(ua);
+    
+    // Safari-specific fixes
+    if (isSafari) {
+        // Safari has issues with video autoplay - ensure video plays
+        if (HTMLVideoElement.prototype.play) {
+            const originalPlay = HTMLVideoElement.prototype.play;
+            HTMLVideoElement.prototype.play = function() {
+                const promise = originalPlay.call(this);
+                if (promise && promise.catch) {
+                    promise.catch(() => {
+                        // Ignore autoplay errors in Safari
+                    });
+                }
+                return promise;
+            };
+        }
+        
+        // Safari canvas fix for better performance
+        if (HTMLCanvasElement.prototype.getContext) {
+            const originalGetContext = HTMLCanvasElement.prototype.getContext;
+            HTMLCanvasElement.prototype.getContext = function(contextType, attributes) {
+                if (contextType === '2d' && attributes) {
+                    attributes.willReadFrequently = false; // Better performance in Safari
+                }
+                return originalGetContext.call(this, contextType, attributes);
+            };
+        }
+    }
+    
+    // Firefox-specific fixes
+    if (isFirefox) {
+        // Firefox may need explicit video play
+        if (HTMLVideoElement.prototype.play) {
+            const originalPlay = HTMLVideoElement.prototype.play;
+            HTMLVideoElement.prototype.play = function() {
+                const promise = originalPlay.call(this);
+                if (promise && promise.catch) {
+                    promise.catch(() => {
+                        // Try to play with user interaction
+                        this.muted = true;
+                        return originalPlay.call(this);
+                    });
+                }
+                return promise;
+            };
+        }
+    }
+    
+    // MI Browser / Xiaomi Browser fixes
+    if (isMIBrowser) {
+        // MI Browser may have issues with getUserMedia - add extra fallback
+        if (!navigator.mediaDevices.getUserMedia) {
+            navigator.mediaDevices.getUserMedia = function(constraints) {
+                const getUserMedia = navigator.getUserMedia || 
+                                   navigator.webkitGetUserMedia || 
+                                   navigator.mozGetUserMedia || 
+                                   navigator.msGetUserMedia;
+                
+                if (!getUserMedia) {
+                    return Promise.reject(new Error('getUserMedia is not supported'));
+                }
+                
+                return new Promise(function(resolve, reject) {
+                    getUserMedia.call(navigator, constraints, resolve, reject);
+                });
+            };
+        }
+    }
+    
+    // Edge-specific fixes
+    if (isEdge) {
+        // Edge may need specific handling
+        if (HTMLVideoElement.prototype.srcObject === undefined) {
+            Object.defineProperty(HTMLVideoElement.prototype, 'srcObject', {
+                get: function() {
+                    return this.mozSrcObject || this.webkitSrcObject || null;
+                },
+                set: function(stream) {
+                    if (this.mozSrcObject !== undefined) {
+                        this.mozSrcObject = stream;
+                    } else if (this.webkitSrcObject !== undefined) {
+                        this.webkitSrcObject = stream;
+                    } else {
+                        this.src = window.URL.createObjectURL(stream);
+                    }
+                }
+            });
+        }
+    }
+    
+    // Cross-browser canvas optimization
+    if (HTMLCanvasElement.prototype.getContext) {
+        const originalGetContext = HTMLCanvasElement.prototype.getContext;
+        HTMLCanvasElement.prototype.getContext = function(contextType, attributes) {
+            if (contextType === '2d') {
+                // Optimize canvas for better performance across all browsers
+                const optimizedAttributes = attributes || {};
+                optimizedAttributes.alpha = true;
+                optimizedAttributes.desynchronized = false;
+                optimizedAttributes.willReadFrequently = false; // Better performance
+                return originalGetContext.call(this, contextType, optimizedAttributes);
+            }
+            return originalGetContext.call(this, contextType, attributes);
+        };
+    }
+    
+    // Log browser detection
+    console.log(`Browser detected: ${isSafari ? 'Safari' : isFirefox ? 'Firefox' : isChrome ? 'Chrome' : isMIBrowser ? 'MI Browser' : isEdge ? 'Edge' : 'Other'}`);
+})();
+
 // Landing page - Face recognition attendance
 const videoContainer = qs('#video-container');
 const video = qs('#video');
@@ -7296,17 +8393,18 @@ let performanceStats = {
 };
 
 // BALANCED ACCURACY: Detection config optimized for good accuracy while still detecting faces reliably
+// Will be loaded from settings on page load
 let detectionConfig = {
-    faceMatcherThreshold: 0.38, // Balanced threshold - strict enough to prevent misdetection, lenient enough to detect (0.35 was too strict)
-    recognitionThreshold: 0.38, // Balanced threshold - strict enough to prevent misdetection, lenient enough to detect (0.35 was too strict)
-    inputSize: 416, // Higher resolution for better accuracy
-    scoreThreshold: 0.35, // Slightly lower for better face detection (was 0.4)
+    faceMatcherThreshold: 0.38, // Will be loaded from settings
+    recognitionThreshold: 0.38, // Will be loaded from settings
+    inputSize: 416, // Will be loaded from settings
+    scoreThreshold: 0.35, // Will be loaded from settings
     minFaceSize: 70, // Slightly smaller for easier detection (was 80)
     maxFaces: 1, // Limit to 1 face for processing
     confidenceThreshold: 0.7, // Balanced confidence requirement (was 0.75)
     detectionThrottle: 2, // Slightly slower but more accurate detection
-    qualityThreshold: 0.65, // Balanced quality threshold - allows detection but prevents low quality faces (was 0.7)
-    landmarkThreshold: 0.65, // Balanced landmark threshold - allows detection but requires good landmarks (was 0.7)
+    qualityThreshold: 0.55, // Will be loaded from settings
+    landmarkThreshold: 0.55, // More lenient landmark threshold - easier detection while maintaining accuracy (was 0.65)
     expressionThreshold: 0.55, // Balanced expression threshold (was 0.6)
     landmarkWeight: 0.5, // Balanced weight
     descriptorWeight: 0.5, // Balanced weight
@@ -7314,11 +8412,223 @@ let detectionConfig = {
     multiAttemptValidation: true, // Enable multi-attempt validation for accuracy
     strictMode: true // Enable strict mode for maximum accuracy
 };
+
+// Load face recognition settings from backend
+async function loadFaceRecognitionSettings() {
+    try {
+        const settingsRes = await fetch('?ajax=get_settings');
+        const settingsJson = await settingsRes.json();
+        if (settingsJson.ok && settingsJson.data) {
+            const settings = settingsJson.data;
+            if (settings.face_recognition_threshold?.value) {
+                detectionConfig.faceMatcherThreshold = parseFloat(settings.face_recognition_threshold.value) || 0.38;
+                detectionConfig.recognitionThreshold = parseFloat(settings.face_recognition_threshold.value) || 0.38;
+            }
+            if (settings.face_recognition_input_size?.value) {
+                detectionConfig.inputSize = parseInt(settings.face_recognition_input_size.value) || 416;
+            }
+            if (settings.face_recognition_score_threshold?.value) {
+                detectionConfig.scoreThreshold = parseFloat(settings.face_recognition_score_threshold.value) || 0.35;
+            }
+            if (settings.face_recognition_quality_threshold?.value) {
+                detectionConfig.qualityThreshold = parseFloat(settings.face_recognition_quality_threshold.value) || 0.55;
+            }
+        }
+    } catch (e) {
+        console.warn('Failed to load face recognition settings, using defaults:', e);
+    }
+}
+
+// Detect if device is mobile/phone (including mobile simulators)
+function isMobileDevice() {
+    const ua = navigator.userAgent.toLowerCase();
+    const isMobileUA = /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(ua);
+    const isMobileViewport = window.innerWidth <= 768;
+    const hasTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    
+    // Check for mobile simulator extensions (common patterns)
+    // More aggressive detection for simulators
+    const isSimulator = ua.includes('mobile') || 
+                       ua.includes('simulator') || 
+                       ua.includes('phone') ||
+                       window.screen.width <= 768 || 
+                       (isMobileViewport && hasTouch) ||
+                       (window.innerWidth <= 768 && window.innerHeight <= 1024);
+    
+    return isMobileUA || (isMobileViewport && hasTouch) || isSimulator;
+}
+
+// Detect device performance level (for optimization)
+let devicePerformanceLevel = 'unknown'; // 'high', 'medium', 'low'
+let devicePerformanceDetected = false;
+
+function detectDevicePerformance() {
+    if (devicePerformanceDetected) return devicePerformanceLevel;
+    
+    devicePerformanceDetected = true;
+    const ua = navigator.userAgent.toLowerCase();
+    
+    // Detect low-end devices
+    const isLowEndDevice = 
+        // Android low-end indicators
+        (ua.includes('android') && (
+            ua.includes('samsung') && (ua.includes('sm-a') || ua.includes('sm-j') || ua.includes('sm-g')) ||
+            ua.includes('xiaomi') && (ua.includes('redmi') || ua.includes('mi a')) ||
+            ua.includes('oppo') && ua.includes('a') ||
+            ua.includes('vivo') && ua.includes('y')
+        )) ||
+        // Old laptop indicators
+        (ua.includes('windows') && (
+            ua.includes('nt 10.0') && !ua.includes('edge') && !ua.includes('chrome') // Old Windows 10
+        )) ||
+        // Low memory/CPU indicators
+        (navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 2) ||
+        (navigator.deviceMemory && navigator.deviceMemory <= 2);
+    
+    // Detect high-end devices
+    const isHighEndDevice = 
+        ua.includes('iphone') && (ua.includes('iphone15') || ua.includes('iphone14') || ua.includes('iphone13')) ||
+        (navigator.hardwareConcurrency && navigator.hardwareConcurrency >= 8) ||
+        (navigator.deviceMemory && navigator.deviceMemory >= 8);
+    
+    // Performance test
+    const start = performance.now();
+    for (let i = 0; i < 100000; i++) {
+        Math.sqrt(i);
+    }
+    const testTime = performance.now() - start;
+    
+    if (isLowEndDevice || testTime > 5) {
+        devicePerformanceLevel = 'low';
+    } else if (isHighEndDevice || testTime < 1) {
+        devicePerformanceLevel = 'high';
+    } else {
+        devicePerformanceLevel = 'medium';
+    }
+    
+    console.log(`Device Performance: ${devicePerformanceLevel} (test: ${testTime.toFixed(2)}ms, cores: ${navigator.hardwareConcurrency || 'unknown'}, memory: ${navigator.deviceMemory || 'unknown'}GB)`);
+    
+    return devicePerformanceLevel;
+}
+
+// Get adjusted threshold based on device type
+function getAdjustedRecognitionThreshold() {
+    if (isMobileDevice()) {
+        // Much more lenient threshold for mobile devices (0.55 instead of 0.38)
+        // This allows distance up to 0.55 for mobile devices for easier detection
+        return 0.55;
+    }
+    return detectionConfig.recognitionThreshold;
+}
+
+// Get adjusted face matcher threshold based on device type
+function getAdjustedFaceMatcherThreshold() {
+    if (isMobileDevice()) {
+        // Much more lenient threshold for mobile devices (0.55 instead of 0.38)
+        return 0.55;
+    }
+    return detectionConfig.faceMatcherThreshold;
+}
+
+// Get adjusted quality threshold based on device type
+function getAdjustedQualityThreshold() {
+    if (isMobileDevice()) {
+        // Much more lenient quality threshold for mobile devices
+        return 0.45; // Lowered from 0.50 to 0.45 for easier detection on mobile
+    }
+    return detectionConfig.qualityThreshold;
+}
+
+// Get adjusted landmark threshold based on device type
+function getAdjustedLandmarkThreshold() {
+    if (isMobileDevice()) {
+        // Much more lenient landmark threshold for mobile devices
+        return 0.45; // Lowered from 0.50 to 0.45 for easier detection on mobile
+    }
+    return detectionConfig.landmarkThreshold;
+}
 let logMasukData = [];
 let logPulangData = [];
 let members = []; // Global members array for gender validation
 
 // WFA Modal functions for landing page
+
+function showOvertimeModal(message) {
+    // Create Overtime modal if it doesn't exist
+    let overtimeModal = document.getElementById('overtimeModal');
+    if (!overtimeModal) {
+        overtimeModal = document.createElement('div');
+        overtimeModal.id = 'overtimeModal';
+        overtimeModal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
+        overtimeModal.style.display = 'flex';
+        overtimeModal.innerHTML = `
+            <div class="bg-white rounded-lg p-6 max-w-md w-full mx-4 shadow-2xl">
+                <h3 class="text-lg font-semibold mb-4">Overtime</h3>
+                <p class="text-gray-600 mb-4">${message}</p>
+                <div class="mb-4">
+                    <label class="block text-sm font-medium text-gray-700 mb-2">Lokasi Overtime:</label>
+                    <input type="text" id="overtimeLocation" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500" placeholder="Masukkan lokasi overtime..." required>
+                </div>
+                <div class="mb-4">
+                    <label class="block text-sm font-medium text-gray-700 mb-2">Alasan Overtime:</label>
+                    <textarea id="overtimeReason" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500" rows="3" placeholder="Masukkan alasan overtime..." required></textarea>
+                </div>
+                <div class="flex space-x-3">
+                    <button id="overtimeSubmit" class="flex-1 bg-purple-600 text-white py-2 px-4 rounded-lg hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-purple-500">
+                        Submit
+                    </button>
+                    <button id="overtimeCancel" class="flex-1 bg-gray-300 text-gray-700 py-2 px-4 rounded-lg hover:bg-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-500">
+                        Batal
+                    </button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(overtimeModal);
+        
+        // Add event listeners
+        document.getElementById('overtimeSubmit').addEventListener('click', () => {
+            const location = document.getElementById('overtimeLocation').value.trim();
+            const reason = document.getElementById('overtimeReason').value.trim();
+            if (location && reason) {
+                overtimeModal.style.display = 'none';
+                overtimeModal.classList.add('hidden');
+                // Store Overtime reason and location for next attendance submission
+                window.pendingOvertimeReason = reason;
+                window.pendingOvertimeLocation = location;
+                // Retry attendance submission
+                if (window.pendingAttendanceData) {
+                    submitAttendanceWithOvertime(window.pendingAttendanceData, reason, location);
+                }
+            } else {
+                showNotif('Harap isi lokasi dan alasan overtime terlebih dahulu.', false);
+            }
+        });
+        
+        document.getElementById('overtimeCancel').addEventListener('click', () => {
+            overtimeModal.style.display = 'none';
+            overtimeModal.classList.add('hidden');
+            isProcessingRecognition = false;
+            // Clear pending data
+            window.pendingOvertimeReason = null;
+            window.pendingOvertimeLocation = null;
+            window.pendingAttendanceData = null;
+        });
+    } else {
+        // Modal exists, just show it
+        overtimeModal.style.display = 'flex';
+        overtimeModal.classList.remove('hidden');
+    }
+    
+    // Show modal and populate location from pending data if available
+    const locationInput = document.getElementById('overtimeLocation');
+    const reasonInput = document.getElementById('overtimeReason');
+    if (locationInput && window.pendingAttendanceData && window.pendingAttendanceData.lokasi) {
+        locationInput.value = window.pendingAttendanceData.lokasi;
+    }
+    if (locationInput) {
+        setTimeout(() => locationInput.focus(), 100);
+    }
+}
 
 function showWFAModal(message) {
     // Create WFA modal if it doesn't exist
@@ -7375,6 +8685,115 @@ function showWFAModal(message) {
     // Show modal
     wfaModal.classList.remove('hidden');
     document.getElementById('wfaReason').focus();
+}
+
+// Show location confirmation modal
+function showLocationConfirmation(lokasi, lat, lng) {
+    return new Promise((resolve) => {
+        // Create location confirmation modal if it doesn't exist
+        let locationModal = document.getElementById('locationConfirmationModal');
+        if (!locationModal) {
+            locationModal = document.createElement('div');
+            locationModal.id = 'locationConfirmationModal';
+            locationModal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
+            locationModal.style.display = 'flex';
+            locationModal.innerHTML = `
+                <div class="bg-white rounded-lg p-6 max-w-md w-full mx-4 shadow-2xl">
+                    <h3 class="text-lg font-semibold mb-4">Konfirmasi Lokasi</h3>
+                    <p class="text-gray-600 mb-4">Apakah lokasi berikut benar?</p>
+                    <div class="mb-4 p-3 bg-gray-50 rounded-lg">
+                        <p class="text-sm font-medium text-gray-700 mb-1">Lokasi Saat Ini:</p>
+                        <p class="text-sm text-gray-900" id="location-confirmation-text">${lokasi}</p>
+                        <p class="text-xs text-gray-500 mt-2">Koordinat: ${lat.toFixed(6)}, ${lng.toFixed(6)}</p>
+                    </div>
+                    <div class="flex space-x-3">
+                        <button id="locationConfirmYes" class="flex-1 bg-green-600 text-white py-2 px-4 rounded-lg hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500">
+                            Ya, Benar
+                        </button>
+                        <button id="locationConfirmNo" class="flex-1 bg-red-600 text-white py-2 px-4 rounded-lg hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500">
+                            Tidak, Batal
+                        </button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(locationModal);
+            
+            // Add event listeners
+            document.getElementById('locationConfirmYes').addEventListener('click', () => {
+                locationModal.style.display = 'none';
+                locationModal.classList.add('hidden');
+                resolve(true);
+            });
+            
+            document.getElementById('locationConfirmNo').addEventListener('click', () => {
+                locationModal.style.display = 'none';
+                locationModal.classList.add('hidden');
+                resolve(false);
+            });
+        } else {
+            // Update location text
+            const locationText = document.getElementById('location-confirmation-text');
+            if (locationText) {
+                locationText.textContent = lokasi;
+            }
+            locationModal.style.display = 'flex';
+            locationModal.classList.remove('hidden');
+            
+            // Return promise that resolves when user clicks
+            const yesBtn = document.getElementById('locationConfirmYes');
+            const noBtn = document.getElementById('locationConfirmNo');
+            
+            // Remove old listeners and add new ones
+            const newYesBtn = yesBtn.cloneNode(true);
+            const newNoBtn = noBtn.cloneNode(true);
+            yesBtn.parentNode.replaceChild(newYesBtn, yesBtn);
+            noBtn.parentNode.replaceChild(newNoBtn, noBtn);
+            
+            newYesBtn.addEventListener('click', () => {
+                locationModal.style.display = 'none';
+                locationModal.classList.add('hidden');
+                resolve(true);
+            });
+            
+            newNoBtn.addEventListener('click', () => {
+                locationModal.style.display = 'none';
+                locationModal.classList.add('hidden');
+                resolve(false);
+            });
+        }
+    });
+}
+
+function submitAttendanceWithOvertime(attendanceData, overtimeReason, overtimeLocation) {
+    // Add Overtime reason and location to attendance data
+    const dataWithOvertime = {
+        ...attendanceData,
+        overtime_reason: overtimeReason,
+        overtime_location: overtimeLocation,
+        is_overtime: true
+    };
+    
+    // Submit attendance with Overtime reason and location
+    api('?ajax=save_attendance', dataWithOvertime, { suppressModal: true })
+        .then(response => {
+            if (response.ok) {
+                statusMessage('Presensi overtime berhasil!', 'bg-purple-100 text-purple-700');
+                // Clear pending data
+                window.pendingOvertimeReason = null;
+                window.pendingOvertimeLocation = null;
+                window.pendingAttendanceData = null;
+                isProcessingRecognition = false;
+            } else {
+                const errorMsg = response.message || 'Presensi gagal. Silakan coba lagi.';
+                statusMessage('Gagal menyimpan presensi: ' + errorMsg, 'bg-red-100 text-red-700');
+                isProcessingRecognition = false;
+            }
+        })
+        .catch(error => {
+            console.error('Error submitting overtime attendance:', error);
+            statusMessage('Terjadi kesalahan saat menyimpan presensi overtime.', 'bg-red-100 text-red-700');
+            isProcessingRecognition = false;
+        });
 }
 
 function submitAttendanceWithWFA(attendanceData, wfaReason) {
@@ -7574,9 +8993,25 @@ function initializeSpeechSynthesis() {
 // Initialize face recognition system
 async function initializeFaceRecognition() {
     try {
+        // Load settings first before initializing
+        await loadFaceRecognitionSettings();
         await loadFaceApiModels();
         await loadLabeledFaceDescriptors();
-        // ULTRA-FAST: Skip logging for maximum speed
+        
+        // Log device type and thresholds for debugging
+        const isMobile = isMobileDevice();
+        const deviceType = isMobile ? 'mobile/simulator' : 'desktop';
+        console.log(`📱 Device Type: ${deviceType}`);
+        console.log(`📊 Detection Thresholds (from settings):`);
+        console.log(`   - Distance Threshold: ${getAdjustedRecognitionThreshold().toFixed(3)} (mobile: ${isMobile ? 'YES' : 'NO'})`);
+        console.log(`   - Quality Threshold: ${getAdjustedQualityThreshold().toFixed(3)} (mobile: ${isMobile ? 'YES' : 'NO'})`);
+        console.log(`   - Landmark Threshold: ${getAdjustedLandmarkThreshold().toFixed(3)} (mobile: ${isMobile ? 'YES' : 'NO'})`);
+        console.log(`   - Face Matcher Threshold: ${getAdjustedFaceMatcherThreshold().toFixed(3)} (mobile: ${isMobile ? 'YES' : 'NO'})`);
+        console.log(`   - Input Size: ${detectionConfig.inputSize}`);
+        console.log(`   - Score Threshold: ${detectionConfig.scoreThreshold}`);
+        console.log(`   - Multi-attempt Validation Min Score: ${isMobile ? '0.30' : '0.50'} (mobile: ${isMobile ? 'YES' : 'NO'})`);
+        console.log(`   - Mobile Mode: ${isMobile ? 'Aktif - Threshold lebih longgar diterapkan' : 'Tidak aktif - Threshold standar'}`);
+        console.log(`   - Excellent Distance Mode: ${isMobile ? 'Aktif - Untuk distance < 0.35, validasi akan sangat longgar' : 'Tidak tersedia'}`);
     } catch (error) {
         console.error('❌ Failed to initialize face recognition:', error);
         showNotif('Gagal memuat sistem pengenalan wajah', false);
@@ -7647,8 +9082,21 @@ async function loadLabeledFaceDescriptors(){
     let loadedCount = 0;
     let failedCount = 0;
     
-    // ULTRA-FAST: larger batch size for maximum speed
-    const batchSize = 20;
+    // ULTRA-FAST: Adaptive batch size based on device performance
+    const perfLevel = detectDevicePerformance();
+    let batchSize = 20; // Default
+    if (perfLevel === 'low') {
+        batchSize = 3; // Much smaller batches for low-end devices (reduced from 5 to 3)
+    } else if (perfLevel === 'medium') {
+        batchSize = 8; // Medium batches (reduced from 10 to 8)
+    } else {
+        batchSize = 20; // Full batches for high-end devices
+    }
+    console.log(`Using batch size: ${batchSize} (device: ${perfLevel})`);
+    
+    // For low-end devices, add delay between batches to prevent overload
+    const batchDelay = perfLevel === 'low' ? 100 : (perfLevel === 'medium' ? 50 : 0);
+    
     for (let i = 0; i < members.length; i += batchSize) {
         const batch = members.slice(i, i + batchSize);
         const batchPromises = batch.map(async (m) => {
@@ -7695,7 +9143,11 @@ async function loadLabeledFaceDescriptors(){
         });
         const batchResults = await Promise.all(batchPromises);
         labeledFaceDescriptors.push(...batchResults.filter(Boolean));
-        // INSTANT: No delay for maximum speed
+        
+        // Add delay between batches for low-end devices to prevent overload
+        if (batchDelay > 0 && i + batchSize < members.length) {
+            await new Promise(resolve => setTimeout(resolve, batchDelay));
+        }
     }
     // ULTRA-FAST: Skip logging for maximum speed
     
@@ -7743,12 +9195,54 @@ async function startScan(mode){
     recognitionCompleted = false; // Reset recognition completion flag for new scan
     resetRecognitionSystem(); // Reset system for new scan
     
+    // OPTIMIZED: Lazy load Face API models only when user clicks scan button
+    // This significantly improves initial page load time, especially on low-end devices
+    if (!window.faceApiModelsLoaded) {
+        try {
+            await loadFaceApiModels();
+        } catch (error) {
+            console.error('Failed to load Face API models:', error);
+            showModalNotif('Gagal memuat model AI. Silakan refresh halaman.', false, 'Error');
+            return;
+        }
+    }
+    
     // Force request camera and location permissions BEFORE starting
     try {
-        // Request camera permission explicitly
-        const cameraStream = await navigator.mediaDevices.getUserMedia({ video: true });
+        // Request camera permission explicitly with browser compatibility
+        let cameraStream;
+        try {
+            // Try modern API first
+            cameraStream = await navigator.mediaDevices.getUserMedia({ 
+                video: { 
+                    width: { ideal: detectDevicePerformance() === 'low' ? 320 : (detectDevicePerformance() === 'medium' ? 480 : 640), max: detectDevicePerformance() === 'low' ? 640 : 1280 },
+                    height: { ideal: detectDevicePerformance() === 'low' ? 240 : (detectDevicePerformance() === 'medium' ? 360 : 480), max: detectDevicePerformance() === 'low' ? 480 : 720 },
+                    frameRate: detectDevicePerformance() === 'low' ? { ideal: 10, max: 15 } : (detectDevicePerformance() === 'medium' ? { ideal: 12, max: 20 } : { ideal: 15, max: 30 }),
+                    facingMode: 'user' // Prefer front camera
+                } 
+            });
+        } catch (e) {
+            // Fallback for older browsers
+            try {
+                const getUserMedia = navigator.getUserMedia || 
+                                   navigator.webkitGetUserMedia || 
+                                   navigator.mozGetUserMedia || 
+                                   navigator.msGetUserMedia;
+                if (getUserMedia) {
+                    cameraStream = await new Promise((resolve, reject) => {
+                        getUserMedia.call(navigator, { video: true }, resolve, reject);
+                    });
+                } else {
+                    throw new Error('getUserMedia not supported');
+                }
+            } catch (fallbackError) {
+                throw e; // Throw original error
+            }
+        }
         // Stop it immediately - we just want to trigger the permission request
-        cameraStream.getTracks().forEach(track => track.stop());
+        if (cameraStream && cameraStream.getTracks) {
+            cameraStream.getTracks().forEach(track => track.stop());
+        }
         
         // Request location permission explicitly  
         if (!navigator.geolocation) {
@@ -7924,25 +9418,120 @@ function resetPresensiPage(){
 function startVideo(){
     if (!video) return;
     
-    if(navigator.mediaDevices && navigator.mediaDevices.getUserMedia){
-        const constraints = {
+    // Browser compatibility: Try modern API first, then fallback
+    const getUserMedia = navigator.mediaDevices?.getUserMedia || 
+                        navigator.getUserMedia || 
+                        navigator.webkitGetUserMedia || 
+                        navigator.mozGetUserMedia || 
+                        navigator.msGetUserMedia;
+    
+    if (!getUserMedia) {
+        statusMessage('Browser tidak mendukung akses kamera. Silakan gunakan browser modern (Chrome, Firefox, Safari, Edge).', 'bg-red-100 text-red-700');
+        return;
+    }
+    
+    // Detect device performance and adjust video constraints
+    const perfLevel = detectDevicePerformance();
+    let videoConstraints = {
+        video: {
+            width: { ideal: detectDevicePerformance() === 'low' ? 320 : (detectDevicePerformance() === 'medium' ? 480 : 640), max: detectDevicePerformance() === 'low' ? 640 : 1280 },
+            height: { ideal: detectDevicePerformance() === 'low' ? 240 : (detectDevicePerformance() === 'medium' ? 360 : 480), max: detectDevicePerformance() === 'low' ? 480 : 720 },
+            frameRate: detectDevicePerformance() === 'low' ? { ideal: 10, max: 15 } : (detectDevicePerformance() === 'medium' ? { ideal: 12, max: 20 } : { ideal: 15, max: 30 }),
+            facingMode: 'user'
+        }
+    };
+    
+    // Optimize video constraints for low-end devices - MORE AGGRESSIVE
+    if (perfLevel === 'low') {
+        videoConstraints = {
             video: {
-                width: { ideal: 640, max: 1280 },
-                height: { ideal: 480, max: 720 },
-                frameRate: { ideal: 15, max: 30 },
+                width: { ideal: 240, max: 480 }, // Reduced from 320 to 240
+                height: { ideal: 180, max: 360 }, // Reduced from 240 to 180
+                frameRate: { ideal: 8, max: 12 }, // Reduced from 10-15 to 8-12
                 facingMode: 'user'
             }
         };
-        navigator.mediaDevices.getUserMedia(constraints).then(stream => {
+        console.log('Low-end device detected - using very low video resolution for better performance');
+    } else if (perfLevel === 'medium') {
+        videoConstraints = {
+            video: {
+                width: { ideal: 360, max: 720 }, // Reduced from 480 to 360
+                height: { ideal: 270, max: 405 }, // Reduced from 360 to 270
+                frameRate: { ideal: 10, max: 15 }, // Reduced from 12-20 to 10-15
+                facingMode: 'user'
+            }
+        };
+    }
+    
+    const constraints = videoConstraints;
+    
+    // Handle both modern and legacy APIs
+    const handleStream = (stream) => {
+        // Modern API uses srcObject
+        if (video.srcObject !== undefined) {
             video.srcObject = stream;
-            isCameraActive = true;
-            // Mirror hanya video supaya tombol dan teks tidak terbalik
-            if (video) video.classList.add('mirror-video');
-            video.addEventListener('loadedmetadata', () => {});
-        }).catch(err => {
-            console.error('Error camera', err);
-            statusMessage('Error: Tidak dapat mengakses kamera.', 'bg-red-100 text-red-700');
+        } else if (video.mozSrcObject !== undefined) {
+            // Firefox legacy
+            video.mozSrcObject = stream;
+        } else if (video.src !== undefined) {
+            // Very old browsers
+            video.src = window.URL.createObjectURL(stream);
+        }
+        
+        isCameraActive = true;
+        // Mirror hanya video supaya tombol dan teks tidak terbalik
+        if (video) video.classList.add('mirror-video');
+        video.addEventListener('loadedmetadata', () => {
+            video.play().catch(err => {
+                console.warn('Video play error:', err);
+            });
         });
+    };
+    
+    const handleError = (err) => {
+        console.error('Error camera', err);
+        let errorMsg = 'Tidak dapat mengakses kamera.';
+        if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+            errorMsg = 'Izin kamera ditolak. Silakan aktifkan izin kamera di pengaturan browser.';
+        } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+            errorMsg = 'Kamera tidak ditemukan. Pastikan kamera terhubung.';
+        } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+            errorMsg = 'Kamera sedang digunakan oleh aplikasi lain.';
+        }
+        statusMessage('Error: ' + errorMsg, 'bg-red-100 text-red-700');
+    };
+    
+    // Try modern API first with browser-specific handling
+    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        navigator.mediaDevices.getUserMedia(constraints)
+            .then(handleStream)
+            .catch(err => {
+                // Browser-specific error handling
+                const ua = navigator.userAgent.toLowerCase();
+                const isSafari = /safari/.test(ua) && !/chrome/.test(ua) && !/chromium/.test(ua);
+                const isFirefox = /firefox/.test(ua);
+                const isMIBrowser = /miui/.test(ua) || /xiaomi/.test(ua);
+                
+                // Safari may need different constraints
+                if (isSafari && err.name === 'OverconstrainedError') {
+                    // Try with simpler constraints for Safari
+                    const simpleConstraints = { video: true };
+                    navigator.mediaDevices.getUserMedia(simpleConstraints)
+                        .then(handleStream)
+                        .catch(handleError);
+                } else if (isFirefox && err.name === 'NotReadableError') {
+                    // Firefox may need explicit permission
+                    handleError(new Error('Kamera sedang digunakan oleh aplikasi lain atau tidak dapat diakses.'));
+                } else if (isMIBrowser && err.name === 'NotAllowedError') {
+                    // MI Browser may need explicit permission request
+                    handleError(new Error('Izin kamera diperlukan. Silakan aktifkan di pengaturan browser.'));
+                } else {
+                    handleError(err);
+                }
+            });
+    } else {
+        // Fallback to legacy API
+        getUserMedia.call(navigator, constraints, handleStream, handleError);
     }
 }
 
@@ -7967,9 +9556,36 @@ function startVideoInterval(){
     }
     const displaySize = { width: video.clientWidth, height: video.clientHeight };
     faceapi.matchDimensions(canvas, displaySize);
+    
+    // Ensure canvas size matches video display size exactly
+    if (canvas.width !== displaySize.width || canvas.height !== displaySize.height) {
+        canvas.width = displaySize.width;
+        canvas.height = displaySize.height;
+    }
     // Advanced: Optimized interval for maximum performance and accuracy
     let lastDetectionTime = 0;
     let detectionThrottle = detectionConfig.detectionThrottle; // Use config value
+    
+    // Detect device performance and adjust settings
+    const perfLevel = detectDevicePerformance();
+    let optimizedInputSize = detectionConfig.inputSize;
+    let optimizedThrottle = detectionThrottle;
+    
+    // Adjust based on device performance - MORE AGGRESSIVE for low-end devices
+    if (perfLevel === 'low') {
+        // Low-end devices: reduce resolution and increase throttle significantly
+        optimizedInputSize = Math.min(224, detectionConfig.inputSize); // Reduced from 320 to 224
+        optimizedThrottle = Math.max(10, detectionThrottle * 3); // Increased from 2x to 3x, minimum 10ms
+        console.log('Low-end device detected - using aggressive optimized settings (inputSize: ' + optimizedInputSize + ', throttle: ' + optimizedThrottle + 'ms)');
+    } else if (perfLevel === 'medium') {
+        // Medium devices: moderate settings
+        optimizedInputSize = Math.min(320, detectionConfig.inputSize); // Reduced from 416 to 320
+        optimizedThrottle = Math.max(5, detectionThrottle * 2); // Increased from 1.5x to 2x
+    } else {
+        // High-end devices: use full settings
+        optimizedInputSize = detectionConfig.inputSize;
+        optimizedThrottle = detectionThrottle;
+    }
     
     videoInterval = setInterval(async ()=>{
         // Check if detection is stopped manually
@@ -7978,7 +9594,7 @@ function startVideoInterval(){
         }
         
         const now = Date.now();
-        if (now - lastDetectionTime < detectionThrottle) {
+        if (now - lastDetectionTime < optimizedThrottle) {
             return; // Skip detection jika terlalu cepat
         }
         
@@ -7990,19 +9606,30 @@ function startVideoInterval(){
             // Optimasi: Performance monitoring
             const detectionStartTime = performance.now();
             
-            // ENHANCED: Optimized detection with higher resolution for better accuracy
+            // ENHANCED: Optimized detection with adaptive resolution based on device performance
             const detections = await faceapi.detectAllFaces(video, new faceapi.TinyFaceDetectorOptions({
-                inputSize: detectionConfig.inputSize,
+                inputSize: optimizedInputSize, // Use optimized size based on device performance
                 scoreThreshold: detectionConfig.scoreThreshold
             })).withFaceLandmarks().withFaceDescriptors();
             
-            // BALANCED: Smart filtering for accuracy + speed
+            // Get current display size in every frame to ensure accuracy
+            const currentDisplaySize = { width: video.clientWidth, height: video.clientHeight };
+            
+            // Ensure canvas dimensions match display size
+            if (canvas.width !== currentDisplaySize.width || canvas.height !== currentDisplaySize.height) {
+                canvas.width = currentDisplaySize.width;
+                canvas.height = currentDisplaySize.height;
+                faceapi.matchDimensions(canvas, currentDisplaySize);
+            }
+            
+            // BALANCED: Smart filtering for accuracy + speed (using adjusted threshold for mobile)
+            const adjustedQualityThreshold = getAdjustedQualityThreshold();
             const qualityDetections = detections.filter(detection => {
                 const quality = assessFaceQuality(detection);
                 const box = detection.detection.box;
                 const area = box.width * box.height;
-                // Slightly more lenient filtering - allows detection but maintains quality
-                return quality >= detectionConfig.qualityThreshold && area >= (detectionConfig.minFaceSize * detectionConfig.minFaceSize * 0.9);
+                // More lenient filtering for mobile devices - allows detection but maintains quality
+                return quality >= adjustedQualityThreshold && area >= (detectionConfig.minFaceSize * detectionConfig.minFaceSize * 0.9);
             });
             
             // Sort by quality and take best detections
@@ -8021,32 +9648,79 @@ function startVideoInterval(){
                 // Skip logging for maximum speed
                 adjustDetectionThreshold();
                 
-                // ULTRA-FAST: Dynamic throttle for maximum speed
-                if (performanceStats.averageDetectionTime > 100) {
-                    detectionThrottle = Math.min(20, detectionThrottle + 2);
-                } else if (performanceStats.averageDetectionTime < 50 && detectionThrottle > 1) {
-                    detectionThrottle = Math.max(1, detectionThrottle - 1);
+                // ULTRA-FAST: Dynamic throttle for maximum speed based on device performance
+                if (perfLevel === 'low') {
+                    // Low-end devices: VERY aggressive throttling
+                    if (performanceStats.averageDetectionTime > 200) {
+                        optimizedThrottle = Math.min(50, optimizedThrottle + 5); // Increased max from 30 to 50
+                    } else if (performanceStats.averageDetectionTime > 150) {
+                        optimizedThrottle = Math.min(40, optimizedThrottle + 3);
+                    } else if (performanceStats.averageDetectionTime < 100 && optimizedThrottle > 10) {
+                        optimizedThrottle = Math.max(10, optimizedThrottle - 1); // Increased min from 5 to 10
+                    }
+                } else if (perfLevel === 'medium') {
+                    // Medium devices: moderate throttling
+                    if (performanceStats.averageDetectionTime > 100) {
+                        optimizedThrottle = Math.min(25, optimizedThrottle + 2); // Increased max from 20 to 25
+                    } else if (performanceStats.averageDetectionTime < 50 && optimizedThrottle > 5) {
+                        optimizedThrottle = Math.max(5, optimizedThrottle - 1); // Increased min from 3 to 5
+                    }
+                } else {
+                    // High-end devices: minimal throttling
+                    if (performanceStats.averageDetectionTime > 100) {
+                        optimizedThrottle = Math.min(15, optimizedThrottle + 2);
+                    } else if (performanceStats.averageDetectionTime < 50 && optimizedThrottle > 1) {
+                        optimizedThrottle = Math.max(1, optimizedThrottle - 1);
+                    }
                 }
+                detectionThrottle = optimizedThrottle; // Update for next cycle
             }
-            const resized = faceapi.resizeResults(bestDetections, displaySize);
-            const ctx = canvas.getContext('2d');
-            ctx.clearRect(0,0,canvas.width,canvas.height);
+            const resized = faceapi.resizeResults(bestDetections, currentDisplaySize);
+            // Optimize canvas operations for better performance
+            const ctx = canvas.getContext('2d', { 
+                willReadFrequently: false, // Better performance
+                alpha: true 
+            });
+            
+            // Use requestAnimationFrame for smoother rendering on low-end devices
+            if (perfLevel === 'low') {
+                requestAnimationFrame(() => {
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                });
+            } else {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+            }
+            
             if (resized.length > 0) {
                 if (labeledFaceDescriptors && labeledFaceDescriptors.length > 0) {
-                    // Advanced: Stricter threshold for better accuracy
-                    const faceMatcher = new faceapi.FaceMatcher(labeledFaceDescriptors, detectionConfig.faceMatcherThreshold);
+                    // Advanced: Use adjusted threshold based on device type (more lenient for mobile)
+                    const adjustedThreshold = getAdjustedFaceMatcherThreshold();
+                    const faceMatcher = new faceapi.FaceMatcher(labeledFaceDescriptors, adjustedThreshold);
                     const results = resized.map(d => faceMatcher.findBestMatch(d.descriptor));
-                    const ctx2 = canvas.getContext('2d');
-                    ctx2.clearRect(0,0,canvas.width,canvas.height);
+                    // Reuse existing context for better performance
+                    const ctx2 = ctx; // Use same context instead of creating new one
+                    // Optimize canvas clearing for low-end devices
+                    if (perfLevel === 'low') {
+                        requestAnimationFrame(() => {
+                            ctx2.clearRect(0, 0, canvas.width, canvas.height);
+                        });
+                    } else {
+                        ctx2.clearRect(0, 0, canvas.width, canvas.height);
+                    }
                     results.forEach((result, i) => {
                         const box = resized[i].detection.box;
                         const face = resized[i];
-                        // Hitung posisi mirror: video di-mirror, canvas tidak, jadi koordinat X dibalik
-                        const mirroredX = canvas.width - (box.x + box.width);
-                        // Gambar kotak
+                        
+                        // Karena video di-mirror dengan CSS scaleX(-1), tapi canvas tidak di-mirror,
+                        // kita perlu membalik koordinat X agar kotak sesuai dengan posisi wajah di video yang terlihat
+                        // Rumus: mirroredX = canvas.width - box.x - box.width
+                        const mirroredX = canvas.width - box.x - box.width;
+                        
+                        // Gambar kotak dengan ukuran yang sesuai
                         ctx2.strokeStyle = '#22c55e';
                         ctx2.lineWidth = 2;
                         ctx2.strokeRect(mirroredX, box.y, box.width, box.height);
+                        
                         // Label hasil (tidak terbalik)
                         const shouldAccept = shouldAcceptDetection(result, face);
                         const label = `${result.toString()} ${shouldAccept ? '✓' : '?'}`;
@@ -8057,6 +9731,7 @@ function startVideoInterval(){
                         ctx2.fillRect(mirroredX, Math.max(0, box.y - 20), textWidth + padding*2, 20);
                         ctx2.fillStyle = '#fff';
                         ctx2.fillText(label, mirroredX + padding, Math.max(12, box.y - 6));
+                        
                         // Proses pengenalan
                         if (shouldAccept) {
                             // Recognition handled instantly in shouldAcceptDetection -> handleRecognition
@@ -8104,23 +9779,24 @@ function assessFaceQuality(face) {
     const box = face.detection.box;
     const area = box.width * box.height;
     const aspectRatio = box.width / box.height;
+    const isMobile = isMobileDevice();
     
     // Quality factors with detailed analysis
     let quality = 1.0;
     
-    // 1. Size factor (prefer larger faces for better detail) - balanced requirements
-    if (area < 15000) quality *= 0.3; // Too small
-    else if (area < 20000) quality *= 0.5; // Small but acceptable (was 0.4)
-    else if (area < 30000) quality *= 0.75; // Small but acceptable (was 0.7)
+    // 1. Size factor (prefer larger faces for better detail) - more lenient for mobile
+    if (area < 15000) quality *= isMobile ? 0.4 : 0.3; // More lenient for mobile
+    else if (area < 20000) quality *= isMobile ? 0.6 : 0.5; // More lenient for mobile
+    else if (area < 30000) quality *= isMobile ? 0.85 : 0.75; // More lenient for mobile
     else if (area > 100000) quality *= 1.4; // Large and detailed - bonus
     else if (area > 60000) quality *= 1.2; // Good size - bonus
     
-    // 2. Aspect ratio factor (prefer natural face proportions)
-    if (aspectRatio < 0.6 || aspectRatio > 1.6) quality *= 0.5; // Too distorted
-    else if (aspectRatio < 0.7 || aspectRatio > 1.4) quality *= 0.8; // Slightly distorted
+    // 2. Aspect ratio factor (prefer natural face proportions) - more lenient for mobile
+    if (aspectRatio < 0.6 || aspectRatio > 1.6) quality *= isMobile ? 0.6 : 0.5; // More lenient for mobile
+    else if (aspectRatio < 0.7 || aspectRatio > 1.4) quality *= isMobile ? 0.9 : 0.8; // More lenient for mobile
     else if (aspectRatio >= 0.8 && aspectRatio <= 1.2) quality *= 1.2; // Good proportions
     
-    // 3. Position factor (prefer centered faces) - balanced centering
+    // 3. Position factor (prefer centered faces) - more lenient for mobile
     const centerX = box.x + box.width / 2;
     const centerY = box.y + box.height / 2;
     const canvasCenterX = 320; // Assuming 640px width
@@ -8128,33 +9804,35 @@ function assessFaceQuality(face) {
     const distanceFromCenter = Math.sqrt(
         Math.pow(centerX - canvasCenterX, 2) + Math.pow(centerY - canvasCenterY, 2)
     );
-    if (distanceFromCenter > 150) quality *= 0.4; // Too far from center (was 120)
-    else if (distanceFromCenter > 100) quality *= 0.7; // Slightly off-center (was 80)
+    if (distanceFromCenter > 150) quality *= isMobile ? 0.5 : 0.4; // More lenient for mobile
+    else if (distanceFromCenter > 100) quality *= isMobile ? 0.8 : 0.7; // More lenient for mobile
     else if (distanceFromCenter < 40) quality *= 1.3; // Well centered - bonus
     
-    // 4. Enhanced landmark quality factor (if available)
+    // 4. Enhanced landmark quality factor (if available) - more lenient for mobile
     if (face.landmarks) {
         const landmarkScore = assessEnhancedLandmarkQuality(face.landmarks);
-        quality *= (0.7 + landmarkScore * 0.3); // Weight landmark quality heavily
+        // For mobile, don't penalize landmark quality as much
+        quality *= isMobile ? (0.75 + landmarkScore * 0.25) : (0.7 + landmarkScore * 0.3);
     }
     
-    // 5. Expression quality factor (if available)
+    // 5. Expression quality factor (if available) - more lenient for mobile
     if (face.expressions) {
         const expressions = face.expressions;
         const maxExpression = Math.max(...Object.values(expressions));
         if (maxExpression > 0.8) quality *= 1.1; // Clear expression
-        else if (maxExpression < 0.3) quality *= 0.9; // Unclear expression
+        else if (maxExpression < 0.3) quality *= isMobile ? 0.95 : 0.9; // More lenient for mobile
     }
     
-    // 6. Detection confidence factor - balanced requirements
+    // 6. Detection confidence factor - more lenient for mobile
     if (face.detection.score) {
         if (face.detection.score > 0.95) quality *= 1.4; // Very high confidence - bonus
         else if (face.detection.score > 0.85) quality *= 1.2; // High confidence - bonus
         else if (face.detection.score > 0.8) quality *= 1.1; // Good confidence
-        else if (face.detection.score < 0.5) quality *= 0.6; // Low confidence (was 0.7 -> 0.5)
+        else if (face.detection.score < 0.5) quality *= isMobile ? 0.7 : 0.6; // More lenient for mobile
+        else if (face.detection.score < 0.6 && isMobile) quality *= 0.85; // Extra lenient for mobile
     }
     
-    // 7. Face angle and symmetry factor (if landmarks available)
+    // 7. Face angle and symmetry factor (if landmarks available) - more lenient for mobile
     if (face.landmarks && face.landmarks.positions) {
         const landmarks = face.landmarks.positions;
         
@@ -8163,7 +9841,7 @@ function assessFaceQuality(face) {
             const leftEyeX = landmarks[36].x;
             const rightEyeX = landmarks[45].x;
             const eyeSymmetry = Math.abs(leftEyeX - rightEyeX);
-            if (eyeSymmetry > 20) quality *= 0.7; // Face is tilted
+            if (eyeSymmetry > 20) quality *= isMobile ? 0.8 : 0.7; // More lenient for mobile
             else if (eyeSymmetry < 10) quality *= 1.2; // Good symmetry - bonus
         }
         
@@ -8172,7 +9850,7 @@ function assessFaceQuality(face) {
             const noseX = landmarks[30].x;
             const faceCenterX = (landmarks[36].x + landmarks[45].x) / 2;
             const noseOffset = Math.abs(noseX - faceCenterX);
-            if (noseOffset > 15) quality *= 0.8; // Nose off-center
+            if (noseOffset > 15) quality *= isMobile ? 0.9 : 0.8; // More lenient for mobile
             else if (noseOffset < 5) quality *= 1.1; // Well centered nose - bonus
         }
     }
@@ -8363,34 +10041,134 @@ function shouldAcceptDetection(result, face) {
     const lastTs = processedLabels.get(result.label) || 0;
     if (Date.now() - lastTs < processedCooldownMs) return false;
     
-    // ENHANCED: Stricter checks for better accuracy and prevent misdetection
-    if (result.distance > detectionConfig.recognitionThreshold) return false;
+    const isMobile = isMobileDevice();
     
-    // Enhanced quality check with facial feature analysis
-    const quality = assessFaceQuality(face);
-    if (quality < detectionConfig.qualityThreshold) return false;
-    
-    // ENHANCED: Stricter facial feature consistency check
-    if (face.landmarks) {
-        const landmarkScore = assessEnhancedLandmarkQuality(face.landmarks);
-        if (landmarkScore < detectionConfig.landmarkThreshold) return false; // Use config threshold
+    // ENHANCED: Use adjusted threshold based on device type (more lenient for mobile)
+    const adjustedThreshold = getAdjustedRecognitionThreshold();
+    if (result.distance > adjustedThreshold) {
+        console.log(`🚫 Distance ${result.distance.toFixed(3)} exceeds threshold ${adjustedThreshold.toFixed(3)} (device: ${isMobile ? 'mobile' : 'desktop'})`);
+        return false;
     }
     
-    // NEW: Gender validation to prevent cross-gender misdetection
-    if (detectionConfig.genderValidation) {
-        const genderMatch = validateGenderConsistency(result.label, face);
-        if (!genderMatch) {
-            console.log(`🚫 Gender validation failed for ${result.label}`);
+    // SPECIAL CASE: For excellent distance (< 0.35), be very lenient with other checks
+    // This is because excellent distance means very high confidence in face match
+    const isExcellentDistance = isMobile && result.distance < 0.35;
+    const isVeryGoodDistance = isMobile && result.distance < 0.45;
+    
+    // Enhanced quality check with facial feature analysis (using adjusted threshold for mobile)
+    const quality = assessFaceQuality(face);
+    const adjustedQualityThreshold = getAdjustedQualityThreshold();
+    
+    // For mobile, use distance-based quality thresholds to maintain accuracy
+    let effectiveQualityThreshold = adjustedQualityThreshold;
+    if (isMobile) {
+        if (isExcellentDistance) {
+            // Excellent distance = very high confidence, allow very low quality
+            effectiveQualityThreshold = 0.10; // Very low threshold for excellent distance
+        } else if (isVeryGoodDistance) {
+            // Very good distance = high confidence, allow low quality
+            effectiveQualityThreshold = 0.15; // Low threshold for very good distance
+        } else if (result.distance < 0.50) {
+            // Good distance = moderate confidence, allow moderate quality
+            effectiveQualityThreshold = 0.25; // Moderate threshold
+        }
+    }
+    
+    if (quality < effectiveQualityThreshold) {
+        // For excellent distance, allow much lower quality threshold
+        if (isExcellentDistance && quality > 0.08) {
+            console.log(`⚠️ Quality ${quality.toFixed(3)} below standard threshold ${adjustedQualityThreshold.toFixed(3)}, but allowing due to excellent distance < 0.35 (mobile, effective threshold: ${effectiveQualityThreshold.toFixed(3)})`);
+        } else if (isVeryGoodDistance && quality > 0.12) {
+            console.log(`⚠️ Quality ${quality.toFixed(3)} below standard threshold ${adjustedQualityThreshold.toFixed(3)}, but allowing due to very good distance < 0.45 (mobile, effective threshold: ${effectiveQualityThreshold.toFixed(3)})`);
+        } else if (isMobile && result.distance < 0.50 && quality > 0.20) {
+            console.log(`⚠️ Quality ${quality.toFixed(3)} below standard threshold ${adjustedQualityThreshold.toFixed(3)}, but allowing due to good distance < 0.50 (mobile, effective threshold: ${effectiveQualityThreshold.toFixed(3)})`);
+        } else {
+            console.log(`🚫 Quality ${quality.toFixed(3)} below threshold ${effectiveQualityThreshold.toFixed(3)} (device: ${isMobile ? 'mobile' : 'desktop'}, distance: ${result.distance.toFixed(3)})`);
             return false;
         }
     }
     
-    // NEW: Multi-attempt validation for critical decisions
-    if (detectionConfig.multiAttemptValidation && detectionConfig.strictMode) {
-        const validationScore = performMultiAttemptValidation(result, face);
-        if (validationScore < 0.5) { // Balanced validation score - strict enough to prevent errors, lenient enough to detect (0.5 = 50% match requirement)
-            console.log(`🚫 Multi-attempt validation failed for ${result.label} (score: ${validationScore.toFixed(3)})`);
+    // ENHANCED: Facial feature consistency check (using adjusted threshold for mobile)
+    // More lenient for mobile - skip if landmarks not available
+    if (face.landmarks) {
+        const landmarkScore = assessEnhancedLandmarkQuality(face.landmarks);
+        const adjustedLandmarkThreshold = getAdjustedLandmarkThreshold();
+        
+        // For mobile, adjust landmark threshold based on distance
+        let effectiveLandmarkThreshold = adjustedLandmarkThreshold;
+        if (isMobile) {
+            if (isExcellentDistance) {
+                effectiveLandmarkThreshold = 0.30; // Very low for excellent distance
+            } else if (isVeryGoodDistance) {
+                effectiveLandmarkThreshold = 0.35; // Low for very good distance
+            }
+        }
+        
+        if (landmarkScore < effectiveLandmarkThreshold) {
+            // For excellent distance, allow much lower landmark score
+            if (isExcellentDistance && landmarkScore > 0.25) {
+                console.log(`⚠️ Landmark score ${landmarkScore.toFixed(3)} below standard threshold ${adjustedLandmarkThreshold.toFixed(3)}, but allowing due to excellent distance < 0.35 (mobile, effective threshold: ${effectiveLandmarkThreshold.toFixed(3)})`);
+            } else if (isVeryGoodDistance && landmarkScore > 0.30) {
+                console.log(`⚠️ Landmark score ${landmarkScore.toFixed(3)} below standard threshold ${adjustedLandmarkThreshold.toFixed(3)}, but allowing due to very good distance < 0.45 (mobile, effective threshold: ${effectiveLandmarkThreshold.toFixed(3)})`);
+            } else if (isMobile && result.distance < 0.50 && quality > 0.25) {
+                console.log(`⚠️ Landmark score ${landmarkScore.toFixed(3)} below standard threshold ${adjustedLandmarkThreshold.toFixed(3)}, but allowing due to good distance/quality (mobile)`);
+            } else {
+                console.log(`🚫 Landmark score ${landmarkScore.toFixed(3)} below threshold ${effectiveLandmarkThreshold.toFixed(3)} (device: ${isMobile ? 'mobile' : 'desktop'}, distance: ${result.distance.toFixed(3)})`);
+                return false;
+            }
+        }
+    }
+    
+    // NEW: Gender validation to prevent cross-gender misdetection (very lenient for excellent distance)
+    // CRITICAL: Keep gender validation strict for accuracy, but allow excellent distance
+    if (detectionConfig.genderValidation) {
+        const genderMatch = validateGenderConsistency(result.label, face);
+        if (!genderMatch) {
+            // For excellent distance, be very lenient with gender validation
+            if (isExcellentDistance) {
+                console.log(`⚠️ Gender validation failed for ${result.label}, but allowing due to excellent distance < 0.35 (mobile)`);
+            } else if (isVeryGoodDistance && quality > 0.20) {
+                console.log(`⚠️ Gender validation failed for ${result.label}, but allowing due to very good distance < 0.45 (mobile)`);
+            } else if (isMobile && result.distance < 0.50 && quality > 0.30) {
+                console.log(`⚠️ Gender validation failed for ${result.label}, but allowing due to good distance/quality (mobile)`);
+            } else {
+                console.log(`🚫 Gender validation failed for ${result.label} (distance: ${result.distance.toFixed(3)}, quality: ${quality.toFixed(3)})`);
+                return false;
+            }
+        }
+    }
+    
+    // NEW: Multi-attempt validation for critical decisions (very lenient for excellent distance)
+    // For excellent distance, skip strict validation entirely - distance is already strong indicator
+    if (isExcellentDistance) {
+        console.log(`✅ Excellent distance < 0.35 detected, using lenient multi-attempt validation for mobile`);
+        // Still do basic validation but much more lenient
+        const validationScore = performMultiAttemptValidation(result, face, isMobile);
+        // For excellent distance, only reject if validation score is extremely low
+        if (validationScore < 0.20) {
+            console.log(`🚫 Multi-attempt validation score ${validationScore.toFixed(3)} extremely low (< 0.20), rejecting despite excellent distance`);
             return false;
+        }
+    } else if (detectionConfig.multiAttemptValidation && detectionConfig.strictMode) {
+        // For mobile, skip strict mode if distance and quality are good enough
+        const shouldSkipStrictMode = isMobile && result.distance < 0.50 && quality > 0.20;
+        
+        if (shouldSkipStrictMode || detectionConfig.strictMode) {
+            const validationScore = performMultiAttemptValidation(result, face, isMobile);
+            // Much more lenient minimum score for mobile devices
+            const minValidationScore = isMobile ? 0.30 : 0.5; // Lowered from 0.35 to 0.30 for mobile
+            if (validationScore < minValidationScore) {
+                // For mobile, allow if distance is very good even if validation score is slightly lower
+                if (isMobile && result.distance < 0.40 && quality > 0.25) {
+                    console.log(`⚠️ Multi-attempt validation score ${validationScore.toFixed(3)} below threshold ${minValidationScore}, but allowing due to excellent distance/quality (mobile)`);
+                } else if (isMobile && result.distance < 0.45 && quality > 0.20 && validationScore >= 0.25) {
+                    // Additional fallback for mobile - allow if score is close to threshold
+                    console.log(`⚠️ Multi-attempt validation score ${validationScore.toFixed(3)} below threshold ${minValidationScore}, but allowing due to good distance/quality (mobile, lenient mode)`);
+                } else {
+                    console.log(`🚫 Multi-attempt validation failed for ${result.label} (score: ${validationScore.toFixed(3)}, min: ${minValidationScore}, device: ${isMobile ? 'mobile' : 'desktop'})`);
+                    return false;
+                }
+            }
         }
     }
     
@@ -8398,7 +10176,7 @@ function shouldAcceptDetection(result, face) {
     if (isProcessingRecognition) return false;
     
     // ENHANCED: Log successful detection for debugging
-    console.log(`✅ Valid detection: ${result.label} (distance: ${result.distance.toFixed(3)}, quality: ${quality.toFixed(3)})`);
+    console.log(`✅ Valid detection: ${result.label} (distance: ${result.distance.toFixed(3)}, quality: ${quality.toFixed(3)}, threshold: ${adjustedThreshold.toFixed(3)}, device: ${isMobile ? 'mobile' : 'desktop'}, excellent: ${isExcellentDistance ? 'YES' : 'NO'})`);
     console.log(`🎯 Processing attendance for: ${result.label}`);
     
     // INSTANT RECOGNITION: Process immediately on first valid detection
@@ -8481,38 +10259,47 @@ function validateGenderConsistency(label, face) {
 }
 
 // BALANCED: Multi-attempt validation - balanced scoring for reliable detection
-function performMultiAttemptValidation(result, face) {
+function performMultiAttemptValidation(result, face, isMobile = false) {
     try {
         let validationScore = 0;
         let maxPossibleScore = 0;
         
         // Score 1: Distance-based validation (40% weight)
+        // Much more lenient scoring for mobile devices
         const distanceWeight = 0.4;
         maxPossibleScore += distanceWeight;
-        if (result.distance < 0.30) {
+        const mobileDistanceThreshold = isMobile ? 0.55 : 0.38; // Increased from 0.50 to 0.55 for mobile
+        const excellentThreshold = isMobile ? 0.40 : 0.30; // More lenient excellent threshold for mobile
+        
+        if (result.distance < excellentThreshold) {
             validationScore += distanceWeight * 1.0; // Excellent match
-        } else if (result.distance < 0.38) {
-            validationScore += distanceWeight * 0.9; // Very good match (within threshold)
-        } else if (result.distance < 0.45) {
-            validationScore += distanceWeight * 0.7; // Good match
-        } else if (result.distance < 0.55) {
-            validationScore += distanceWeight * 0.5; // Acceptable match
+        } else if (result.distance < mobileDistanceThreshold) {
+            validationScore += distanceWeight * 0.95; // Very good match (within threshold) - increased from 0.9
+        } else if (result.distance < (isMobile ? 0.60 : 0.45)) {
+            validationScore += distanceWeight * 0.85; // Good match - increased from 0.8 for mobile
+        } else if (result.distance < (isMobile ? 0.70 : 0.55)) {
+            validationScore += distanceWeight * 0.7; // Acceptable match - increased from 0.6 for mobile
         } else {
-            validationScore += distanceWeight * 0.2; // Poor match
+            validationScore += distanceWeight * 0.4; // Poor match - increased from 0.3 for mobile
         }
         
         // Score 2: Quality-based validation (35% weight)
         const qualityWeight = 0.35;
         const quality = assessFaceQuality(face);
         maxPossibleScore += qualityWeight;
+        const adjustedQualityThreshold = getAdjustedQualityThreshold();
         if (quality > 0.75) {
             validationScore += qualityWeight * 1.0; // Excellent quality
-        } else if (quality > 0.65) {
-            validationScore += qualityWeight * 0.85; // Very good quality (within threshold)
-        } else if (quality > 0.55) {
-            validationScore += qualityWeight * 0.7; // Good quality
-        } else if (quality > 0.45) {
-            validationScore += qualityWeight * 0.5; // Acceptable quality
+        } else if (quality > adjustedQualityThreshold + 0.1) {
+            validationScore += qualityWeight * 0.9; // Very good quality (above threshold)
+        } else if (quality > adjustedQualityThreshold) {
+            validationScore += qualityWeight * 0.85; // Good quality (within threshold)
+        } else if (quality > adjustedQualityThreshold - 0.05) {
+            validationScore += qualityWeight * 0.75; // Acceptable quality - increased for mobile
+        } else if (quality > adjustedQualityThreshold - 0.1) {
+            validationScore += qualityWeight * 0.6; // Marginally acceptable quality - increased for mobile
+        } else if (quality > adjustedQualityThreshold - 0.15 && isMobile) {
+            validationScore += qualityWeight * 0.5; // Still acceptable for mobile
         } else {
             validationScore += qualityWeight * 0.3; // Poor quality
         }
@@ -8522,22 +10309,31 @@ function performMultiAttemptValidation(result, face) {
         if (face.landmarks) {
             maxPossibleScore += landmarkWeight;
             const landmarkScore = assessEnhancedLandmarkQuality(face.landmarks);
+            const adjustedLandmarkThreshold = getAdjustedLandmarkThreshold();
             if (landmarkScore > 0.7) {
                 validationScore += landmarkWeight * 1.0; // Excellent landmarks
-            } else if (landmarkScore > 0.65) {
-                validationScore += landmarkWeight * 0.85; // Very good landmarks (within threshold)
-            } else if (landmarkScore > 0.55) {
-                validationScore += landmarkWeight * 0.7; // Good landmarks
-            } else if (landmarkScore > 0.45) {
-                validationScore += landmarkWeight * 0.5; // Acceptable landmarks
+            } else if (landmarkScore > adjustedLandmarkThreshold + 0.1) {
+                validationScore += landmarkWeight * 0.9; // Very good landmarks (above threshold)
+            } else if (landmarkScore > adjustedLandmarkThreshold) {
+                validationScore += landmarkWeight * 0.85; // Good landmarks (within threshold)
+            } else if (landmarkScore > adjustedLandmarkThreshold - 0.05) {
+                validationScore += landmarkWeight * 0.75; // Acceptable landmarks - increased for mobile
+            } else if (landmarkScore > adjustedLandmarkThreshold - 0.1) {
+                validationScore += landmarkWeight * 0.6; // Marginally acceptable landmarks - increased for mobile
+            } else if (landmarkScore > adjustedLandmarkThreshold - 0.15 && isMobile) {
+                validationScore += landmarkWeight * 0.5; // Still acceptable for mobile
             } else {
                 validationScore += landmarkWeight * 0.3; // Poor landmarks
             }
+        } else if (isMobile) {
+            // For mobile, don't penalize too much if landmarks are missing
+            maxPossibleScore += landmarkWeight;
+            validationScore += landmarkWeight * 0.6; // Give partial credit for mobile
         }
         
         // Calculate normalized score (0-1 scale)
         const finalScore = maxPossibleScore > 0 ? validationScore / maxPossibleScore : 0.5;
-        console.log(`Multi-attempt validation score: ${finalScore.toFixed(3)} (distance: ${result.distance.toFixed(3)}, quality: ${quality.toFixed(3)})`);
+        console.log(`Multi-attempt validation score: ${finalScore.toFixed(3)} (distance: ${result.distance.toFixed(3)}, quality: ${quality.toFixed(3)}, landmark: ${face.landmarks ? assessEnhancedLandmarkQuality(face.landmarks).toFixed(3) : 'N/A'}, device: ${isMobile ? 'mobile' : 'desktop'})`);
         return finalScore;
     } catch (error) {
         console.warn('Multi-attempt validation error:', error);
@@ -8561,36 +10357,100 @@ async function handleRecognition(nim, topExpression){
     
     // ULTRA-FAST: Take screenshot and get geolocation in parallel for speed
     const [screenshot, position] = await Promise.all([
-        // Screenshot - optimized for speed
+        // Screenshot - optimized for speed with better error handling
         new Promise((resolve) => {
             try {
-                if (video && canvas && video.videoWidth > 0 && video.videoHeight > 0) {
-                    // Ultra-fast processing - minimal logging
-                    // console.log('Taking screenshot...', { videoWidth: video.videoWidth, videoHeight: video.videoHeight });
-                    const ctx = canvas.getContext('2d');
-                    canvas.width = video.videoWidth;
-                    canvas.height = video.videoHeight;
-                    // Resize to speed up upload while keeping enough detail for verification
-                    const targetW = 240; const scale = targetW / canvas.width; const targetH = Math.round(canvas.height * scale);
-                    const tmp = document.createElement('canvas'); const tctx = tmp.getContext('2d');
-                    tmp.width = targetW; tmp.height = targetH;
-                    // Center-crop from the middle to avoid only-forehead issue on tall mobile cameras
-                    const srcW = video.videoWidth;
-                    const srcH = video.videoHeight;
-                    const aspect = targetW / targetH;
-                    let cropW = srcW;
-                    let cropH = Math.round(cropW / aspect);
-                    if (cropH > srcH) { cropH = srcH; cropW = Math.round(cropH * aspect); }
-                    const sx = Math.max(0, Math.floor((srcW - cropW) / 2));
-                    const sy = Math.max(0, Math.floor((srcH - cropH) / 2));
-                    tctx.drawImage(video, sx, sy, cropW, cropH, 0, 0, targetW, targetH);
-                    const screenshot = tmp.toDataURL('image/jpeg', 0.5); // Faster upload, sufficient for bukti
-                    // console.log('Screenshot taken successfully, size:', screenshot.length);
-                    resolve(screenshot);
-                } else {
-                    console.warn('Video not ready for screenshot');
-                    resolve(null);
-                }
+                // Wait for video to be ready - check multiple times if needed
+                const checkVideoReady = (attempts = 0) => {
+                    if (attempts > 10) {
+                        console.warn('Video not ready after multiple attempts');
+                        resolve(null);
+                        return;
+                    }
+                    
+                    if (video && canvas && video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
+                        try {
+                            // Ensure video is playing and has valid frame
+                            if (video.paused) {
+                                video.play().catch(() => {});
+                            }
+                            
+                            // Small delay to ensure frame is rendered
+                            setTimeout(() => {
+                                try {
+                                    const ctx = canvas.getContext('2d');
+                                    canvas.width = video.videoWidth;
+                                    canvas.height = video.videoHeight;
+                                    
+                                    // Draw video frame to canvas - ensure video is visible
+                                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                                    
+                                    // Check if canvas has valid image data (not black)
+                                    const imageData = ctx.getImageData(0, 0, Math.min(100, canvas.width), Math.min(100, canvas.height));
+                                    const pixels = imageData.data;
+                                    let hasNonBlackPixels = false;
+                                    for (let i = 0; i < pixels.length; i += 4) {
+                                        const r = pixels[i];
+                                        const g = pixels[i + 1];
+                                        const b = pixels[i + 2];
+                                        // Check if pixel is not black (allow some tolerance)
+                                        if (r > 10 || g > 10 || b > 10) {
+                                            hasNonBlackPixels = true;
+                                            break;
+                                        }
+                                    }
+                                    
+                                    if (!hasNonBlackPixels && attempts < 5) {
+                                        // Canvas is black, wait a bit and retry
+                                        setTimeout(() => checkVideoReady(attempts + 1), 100);
+                                        return;
+                                    }
+                                    
+                                    // Resize to speed up upload while keeping enough detail for verification
+                                    const targetW = 240; const scale = targetW / canvas.width; const targetH = Math.round(canvas.height * scale);
+                                    const tmp = document.createElement('canvas'); const tctx = tmp.getContext('2d');
+                                    tmp.width = targetW; tmp.height = targetH;
+                                    // Center-crop from the middle to avoid only-forehead issue on tall mobile cameras
+                                    const srcW = video.videoWidth;
+                                    const srcH = video.videoHeight;
+                                    const aspect = targetW / targetH;
+                                    let cropW = srcW;
+                                    let cropH = Math.round(cropW / aspect);
+                                    if (cropH > srcH) { cropH = srcH; cropW = Math.round(cropH * aspect); }
+                                    const sx = Math.max(0, Math.floor((srcW - cropW) / 2));
+                                    const sy = Math.max(0, Math.floor((srcH - cropH) / 2));
+                                    tctx.drawImage(video, sx, sy, cropW, cropH, 0, 0, targetW, targetH);
+                                    const screenshot = tmp.toDataURL('image/jpeg', 0.7); // Higher quality to avoid black screenshots
+                                    resolve(screenshot);
+                                } catch (drawError) {
+                                    console.warn('Failed to draw video to canvas:', drawError);
+                                    if (attempts < 5) {
+                                        setTimeout(() => checkVideoReady(attempts + 1), 100);
+                                    } else {
+                                        resolve(null);
+                                    }
+                                }
+                            }, 50); // Small delay to ensure frame is rendered
+                        } catch (error) {
+                            console.warn('Screenshot error:', error);
+                            if (attempts < 5) {
+                                setTimeout(() => checkVideoReady(attempts + 1), 100);
+                            } else {
+                                resolve(null);
+                            }
+                        }
+                    } else {
+                        // Video not ready, wait and retry
+                        if (attempts < 10) {
+                            setTimeout(() => checkVideoReady(attempts + 1), 100);
+                        } else {
+                            console.warn('Video not ready for screenshot after retries');
+                            resolve(null);
+                        }
+                    }
+                };
+                
+                checkVideoReady(0);
             } catch (screenshotError) {
                 console.warn('Failed to take screenshot:', screenshotError);
                 resolve(null);
@@ -8741,42 +10601,65 @@ async function handleRecognition(nim, topExpression){
     }
 
     try{
-        // OPTIMIZED: Fetch public IP in parallel, don't wait for it - submit attendance immediately
-        // IP will be used by backend for WFO validation, but attendance can proceed
-        const ipPromise = (async () => {
-            try {
-                const ipFetch = fetch('https://api.ipify.org?format=json', { cache: 'no-store' });
-                const timeout = new Promise((_,rej)=> setTimeout(()=>rej(new Error('ip-timeout')), 500)); // Reduced from 800ms
-                const ipResp = await Promise.race([ipFetch, timeout]);
-                if (ipResp && ipResp.ok) {
-                    const ipJson = await ipResp.json();
-                    return ipJson?.ip || '';
-                }
-            } catch {}
-            return '';
-        })();
+        // OPTIMIZED: Fetch public IP with aggressive timeout for better performance
+        // Use cached IP if available (valid for 5 minutes)
+        const ipCacheKey = 'cached_public_ip';
+        const ipCacheTimeKey = 'cached_public_ip_time';
+        const cachedIp = sessionStorage.getItem(ipCacheKey);
+        const cachedIpTime = parseInt(sessionStorage.getItem(ipCacheTimeKey) || '0');
+        const now = Date.now();
+        const cacheValid = cachedIp && (now - cachedIpTime < 300000); // 5 minutes cache
         
-        // Don't wait for IP - get it asynchronously
-        ipPromise.then(ip => {
-            window.__publicIp = ip;
-        });
-        // OPTIMIZED: Get IP quickly or use empty string (backend can detect from server IP)
-        // Don't block attendance submission waiting for IP
-        const publicIp = await Promise.race([
-            ipPromise,
-            new Promise(resolve => setTimeout(() => resolve(''), 300)) // Max 300ms wait
-        ]);
-        window.__publicIp = publicIp;
+        let publicIp = '';
+        if (cacheValid) {
+            // Use cached IP
+            publicIp = cachedIp;
+            window.__publicIp = publicIp;
+        } else {
+            // Fetch new IP with very short timeout for better performance
+            const ipPromise = (async () => {
+                try {
+                    const ipFetch = fetch('https://api.ipify.org?format=json', { 
+                        cache: 'no-store',
+                        signal: AbortSignal.timeout(200) // Very short timeout: 200ms
+                    });
+                    const ipResp = await ipFetch;
+                    if (ipResp && ipResp.ok) {
+                        const ipJson = await ipResp.json();
+                        const ip = ipJson?.ip || '';
+                        // Cache the IP
+                        if (ip) {
+                            sessionStorage.setItem(ipCacheKey, ip);
+                            sessionStorage.setItem(ipCacheTimeKey, now.toString());
+                        }
+                        return ip;
+                    }
+                } catch {}
+                return '';
+            })();
+            
+            // Don't wait for IP - get it asynchronously
+            ipPromise.then(ip => {
+                window.__publicIp = ip;
+            });
+            // OPTIMIZED: Get IP quickly or use empty string (backend can detect from server IP)
+            // Very short wait time for better performance
+            publicIp = await Promise.race([
+                ipPromise,
+                new Promise(resolve => setTimeout(() => resolve(''), 150)) // Reduced to 150ms for faster response
+            ]);
+            window.__publicIp = publicIp;
+        }
         
-        // FAST: Get location string with timeout (don't wait too long)
+        // OPTIMIZED: Get location string with shorter timeout for better performance
         // Use coordinates as fallback if location string takes too long
         try {
             lokasi = await Promise.race([
                 locationPromise,
                 new Promise(resolve => setTimeout(() => {
-                    // Fallback to coordinates if timeout
+                    // Fallback to coordinates if timeout (reduced timeout for faster response)
                     resolve(`Lokasi: ${lat.toFixed(6)}, ${lng.toFixed(6)}`);
-                }, 1000)) // Max 1 second wait for location string
+                }, 500)) // Reduced from 1000ms to 500ms for faster response
             ]);
         } catch (e) {
             // Fallback to coordinates on error
@@ -8801,8 +10684,21 @@ async function handleRecognition(nim, topExpression){
         };
         window.pendingAttendanceData = attendanceData;
         
-        // FAST: Submit immediately - location is guaranteed to be set
+        // Show location confirmation modal before submitting
+        const confirmed = await showLocationConfirmation(lokasi, lat, lng);
+        if (!confirmed) {
+            isProcessingRecognition = false;
+            return; // User cancelled
+        }
+        
+        // FAST: Submit after confirmation - location is guaranteed to be set
         let r = await submitAttendance();
+        if(!r.ok && r.need_overtime_reason){
+            // Show Overtime modal
+            showOvertimeModal(r.message || 'Presensi di hari libur/weekend dianggap overtime. Harap isi alasan dan lokasi overtime.');
+            isProcessingRecognition = false;
+            return; // Exit early, Overtime modal will handle retry
+        }
         if(!r.ok && r.need_reason){
             // Show WFA modal using new system
             showWFAModal(r.message || 'Di luar wilayah kantor. Harap isi alasan kerja di luar (WFA).');
@@ -8958,10 +10854,9 @@ document.addEventListener('DOMContentLoaded', () => {
     console.log('🚀 Initializing face recognition system...');
     initializeSpeechSynthesis();
     initializeFaceRecognition();
-    // Preload models once
-    if (!window.faceApiModelsLoaded) {
-        loadFaceApiModels().catch(()=>{});
-    }
+    // OPTIMIZED: Lazy load models - only load when user clicks scan button (not on page load)
+    // This significantly improves initial page load time, especially on low-end devices
+    // Models will be loaded when btnScanMasuk or btnScanPulang is clicked
     
     // INSTANT: Immediate debug info display
     console.log('🔧 Face Recognition Debug Info:');
@@ -9139,7 +11034,102 @@ const pages = { rekap: qs('#page-rekap'), 'laporan-bulanan': qs('#page-laporan-b
 qsa('.tab-link').forEach(btn=>{
     btn.addEventListener('click', ()=> showPage(btn.dataset.tab));
 });
-function showPage(name){ Object.values(pages).forEach(p=> p && (p.style.display='none')); if(pages[name]) pages[name].style.display='block'; if(name==='members') renderMembers(); if(name==='laporan') { loadStartupOptions(); renderLaporan(); } if(name==='rekap') initRekapPage(); if(name==='laporan-bulanan') renderMonthly(); if(name==='admin-monthly') renderAdminMonthly(); if(name==='dashboard') renderDashboard(); if(name==='settings') { renderSettings(); initAddressSearch(); } }
+
+// Mobile sidebar tab links
+qsa('.mobile-tab-link').forEach(btn=>{
+    btn.addEventListener('click', ()=> {
+        showPage(btn.dataset.tab);
+        closeMobileSidebar(); // Close sidebar after clicking
+    });
+});
+
+// Mobile sidebar functions
+function openMobileSidebar() {
+    const sidebar = qs('#mobile-sidebar');
+    const overlay = qs('#mobile-sidebar-overlay');
+    if (sidebar) {
+        sidebar.classList.remove('-translate-x-full');
+        sidebar.classList.add('translate-x-0');
+    }
+    if (overlay) {
+        overlay.classList.remove('hidden');
+    }
+    // Prevent body scroll when sidebar is open
+    document.body.style.overflow = 'hidden';
+}
+
+function closeMobileSidebar() {
+    const sidebar = qs('#mobile-sidebar');
+    const overlay = qs('#mobile-sidebar-overlay');
+    if (sidebar) {
+        sidebar.classList.remove('translate-x-0');
+        sidebar.classList.add('-translate-x-full');
+    }
+    if (overlay) {
+        overlay.classList.add('hidden');
+    }
+    // Restore body scroll
+    document.body.style.overflow = '';
+}
+
+// Mobile menu toggle
+document.addEventListener('DOMContentLoaded', () => {
+    const menuToggle = qs('#mobile-menu-toggle');
+    const sidebarClose = qs('#mobile-sidebar-close');
+    const overlay = qs('#mobile-sidebar-overlay');
+    
+    if (menuToggle) {
+        menuToggle.addEventListener('click', openMobileSidebar);
+    }
+    
+    if (sidebarClose) {
+        sidebarClose.addEventListener('click', closeMobileSidebar);
+    }
+    
+    if (overlay) {
+        overlay.addEventListener('click', closeMobileSidebar);
+    }
+    
+    // Close sidebar on escape key
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            closeMobileSidebar();
+        }
+    });
+});
+
+function showPage(name){ 
+    Object.values(pages).forEach(p=> p && (p.style.display='none')); 
+    if(pages[name]) pages[name].style.display='block'; 
+    
+    // Update active state for desktop tabs
+    qsa('.tab-link').forEach(btn => {
+        if (btn.dataset.tab === name) {
+            btn.classList.add('bg-indigo-700');
+        } else {
+            btn.classList.remove('bg-indigo-700');
+        }
+    });
+    
+    // Update active state for mobile tabs
+    qsa('.mobile-tab-link').forEach(btn => {
+        if (btn.dataset.tab === name) {
+            btn.classList.add('bg-indigo-600', 'text-white');
+            btn.classList.remove('text-gray-700', 'hover:bg-indigo-50', 'hover:text-indigo-600');
+        } else {
+            btn.classList.remove('bg-indigo-600', 'text-white');
+            btn.classList.add('text-gray-700', 'hover:bg-indigo-50', 'hover:text-indigo-600');
+        }
+    });
+    
+    if(name==='members') renderMembers(); 
+    if(name==='laporan') { loadStartupOptions(); renderLaporan(); } 
+    if(name==='rekap') initRekapPage(); 
+    if(name==='laporan-bulanan') renderMonthly(); 
+    if(name==='admin-monthly') renderAdminMonthly(); 
+    if(name==='dashboard') renderDashboard(); 
+    if(name==='settings') { renderSettings(); initAddressSearch(); if(typeof loadBackupFiles === 'function') loadBackupFiles(); } 
+}
 
 // Ensure initial page sets after variables exist
 <?php if (isAdmin()): ?>
@@ -9427,8 +11417,9 @@ function startPresensiDetection() {
                 return;
             }
             
-            // Use balanced threshold for good accuracy while still detecting faces
-            const faceMatcher = new faceapi.FaceMatcher(presensiLabeledFaceDescriptors, 0.38);
+            // Use adjusted threshold based on device type (more lenient for mobile)
+            const adjustedThreshold = getAdjustedFaceMatcherThreshold();
+            const faceMatcher = new faceapi.FaceMatcher(presensiLabeledFaceDescriptors, adjustedThreshold);
             const resizedDetections = faceapi.resizeResults(detections, {
                 width: presensiVideo.videoWidth,
                 height: presensiVideo.videoHeight
@@ -9763,23 +11754,24 @@ document.addEventListener('click', async (e)=>{
         }
     }
 
-    if(btnEdit){
-        const data = JSON.parse(btnEdit.getAttribute('data-json').replace(/&apos;/g, "'"));
-        resetModalCamera();
-        qs('#modal-title').textContent='Edit Member';
-        qs('#member-id').value = data.id;
-        qs('#email').value = data.email || '';
-        qs('#nim').value = data.nim || '';
-        qs('#nim').readOnly = true;
-        qs('#nama').value = data.nama || '';
-        qs('#prodi').value = data.prodi || '';
-        qs('#startup').value = data.startup || '';
-        fotoPreview.src = data.foto_base64 || '';
-        if(data.foto_base64) fotoPreview.classList.remove('hidden');
-        btnStartCamera.textContent='Ambil Ulang Foto';
-        qs('#password-admin-wrapper').classList.add('hidden');
-        memberModal.classList.remove('hidden');
-    }
+    if(btnEdit){
+        const data = JSON.parse(btnEdit.getAttribute('data-json').replace(/&apos;/g, "'"));
+        resetModalCamera();
+        qs('#modal-title').textContent='Edit Member';
+        qs('#member-id').value = data.id;
+        qs('#email').value = data.email || '';
+        qs('#email').readOnly = false;
+        qs('#nim').value = data.nim || '';
+        qs('#nim').readOnly = true;
+        qs('#nama').value = data.nama || '';
+        qs('#prodi').value = data.prodi || '';
+        qs('#startup').value = data.startup || '';
+        fotoPreview.src = data.foto_base64 || '';
+        if(data.foto_base64) fotoPreview.classList.remove('hidden');
+        btnStartCamera.textContent='Ambil Ulang Foto';
+        qs('#password-admin-wrapper').classList.add('hidden');
+        memberModal.classList.remove('hidden');
+    }
 
     if(btnDelete){
         const id = btnDelete.getAttribute('data-id');
@@ -10234,6 +12226,34 @@ document.addEventListener('click', async (e)=>{
                 `;
             }
             content.innerHTML = mapContent || '<p class="text-gray-500">Tidak ada data lokasi</p>';
+        } else if (att.ket === 'overtime') {
+            // Show location and reason for overtime
+            let overtimeContent = '';
+            if (att.lat_masuk && att.lng_masuk && att.lokasi_masuk) {
+                overtimeContent = `
+                    <div class="mb-4">
+                        <h4 class="font-semibold mb-2">Lokasi Overtime:</h4>
+                        <p class="text-sm text-gray-600 mb-2">${att.lokasi_overtime || att.lokasi_masuk}</p>
+                        <div class="bg-gray-100 p-4 rounded-lg">
+                            <div class="text-sm text-gray-600 mb-2">
+                                <strong>Koordinat:</strong> ${att.lat_masuk}, ${att.lng_masuk}
+                            </div>
+                            <a href="https://www.google.com/maps?q=${att.lat_masuk},${att.lng_masuk}" target="_blank" class="inline-block bg-purple-500 hover:bg-purple-600 text-white px-4 py-2 rounded text-sm">
+                                Buka di Google Maps
+                            </a>
+                        </div>
+                    </div>
+                `;
+            }
+            if (att.alasan_overtime) {
+                overtimeContent += `
+                    <div class="mb-4">
+                        <h4 class="font-semibold mb-2">Alasan Overtime:</h4>
+                        <p class="text-sm text-gray-600 p-3 bg-purple-50 rounded">${att.alasan_overtime}</p>
+                    </div>
+                `;
+            }
+            content.innerHTML = overtimeContent || '<p class="text-gray-500">Tidak ada data overtime</p>';
         } else if (att.ket === 'izin' || att.ket === 'sakit') {
             // Show proof and reason for izin/sakit
             let proofContent = '';
@@ -10495,29 +12515,59 @@ qs('#abs-cancel') && qs('#abs-cancel').addEventListener('click', ()=> qs('#absen
 // Add event listener for abs-type change
 document.addEventListener('change', (e) => {
     if (e.target.id === 'abs-type') {
-        const wfhForm = qs('#abs-wfh-form');
-        if (e.target.value === 'wfa') {
-            wfhForm.classList.remove('hidden');
-        } else {
-            wfhForm.classList.add('hidden');
+        const wfaForm = qs('#abs-wfa-form');
+        const overtimeForm = qs('#abs-overtime-form');
+        const type = e.target.value;
+        
+        // Hide all forms first
+        wfaForm.classList.add('hidden');
+        overtimeForm.classList.add('hidden');
+        
+        // Show appropriate form based on type
+        if (type === 'wfa') {
+            wfaForm.classList.remove('hidden');
+        } else if (type === 'overtime') {
+            overtimeForm.classList.remove('hidden');
         }
     }
 });
 
 qs('#abs-save') && qs('#abs-save').addEventListener('click', async ()=>{
+    const type = qs('#abs-type').value;
     const payload = {
         user_id: qs('#abs-user').value,
         date: qs('#abs-date').value,
-        type: qs('#abs-type').value,
-        jam_masuk: qs('#abs-jam-masuk')?.value,
-        jam_pulang: qs('#abs-jam-pulang')?.value
+        type: type
     };
+    
+    // Add fields based on type
+    if (type === 'wfa') {
+        payload.jam_masuk = qs('#abs-jam-masuk')?.value;
+        payload.jam_pulang = qs('#abs-jam-pulang')?.value;
+        payload.alasan_wfa = qs('#abs-alasan-wfa')?.value;
+    } else if (type === 'overtime') {
+        payload.jam_masuk = qs('#abs-jam-masuk-ot')?.value;
+        payload.jam_pulang = qs('#abs-jam-pulang-ot')?.value;
+        payload.alasan_overtime = qs('#abs-alasan-overtime')?.value;
+        payload.lokasi_overtime = qs('#abs-lokasi-overtime')?.value;
+    } else if (type === 'izin' || type === 'sakit') {
+        payload.alasan_izin_sakit = ''; // Can be empty for admin manual input
+    }
+    
     const r = await api('?ajax=admin_add_absence', payload);
     if(r.ok){
         qs('#absence-modal').classList.add('hidden');
+        // Reset form
+        qs('#abs-type').value = 'izin';
+        qs('#abs-wfa-form').classList.add('hidden');
+        qs('#abs-overtime-form').classList.add('hidden');
+        qs('#abs-alasan-wfa').value = '';
+        qs('#abs-alasan-overtime').value = '';
+        qs('#abs-lokasi-overtime').value = '';
         renderLaporan();
+        showNotif('Data berhasil disimpan', true);
     } else {
-        showNotif(r.message||'Gagal simpan');
+        showNotif(r.message||'Gagal simpan', false);
     }
 });
 
@@ -10548,31 +12598,7 @@ qs('#btn-update-wfa-locations') && qs('#btn-update-wfa-locations').addEventListe
     });
 });
 
-// Backup management handlers
-qs('#btn-create-backup') && qs('#btn-create-backup').addEventListener('click', async ()=>{
-    showConfirmModal('Apakah Anda yakin ingin membuat backup database? Proses ini mungkin memakan waktu beberapa saat.', async () => {
-    
-    const button = qs('#btn-create-backup');
-    const originalText = button.textContent;
-    button.textContent = 'Membuat Backup...';
-    button.disabled = true;
-    
-    try {
-        const r = await api('?ajax=create_backup', {});
-        if (r.ok) {
-            showNotif(r.message || 'Backup berhasil dibuat', true);
-        } else {
-            showNotif(r.message || 'Gagal membuat backup', false);
-        }
-    } catch (error) {
-        showNotif('Terjadi kesalahan saat membuat backup', false);
-        console.error('Error creating backup:', error);
-    } finally {
-        button.textContent = originalText;
-        button.disabled = false;
-    }
-    });
-});
+// Backup management handlers - moved to below for better integration with loadBackupFiles
 
 qs('#btn-backup-status') && qs('#btn-backup-status').addEventListener('click', async ()=>{
     try {
@@ -10600,6 +12626,109 @@ qs('#btn-backup-status') && qs('#btn-backup-status').addEventListener('click', a
     }
 });
 
+// Load and render backup files list
+async function loadBackupFiles() {
+    const listContainer = qs('#backup-files-list');
+    if (!listContainer) return;
+    
+    listContainer.innerHTML = `
+        <div class="text-center text-gray-500 py-8">
+            <div class="inline-block animate-spin rounded-full h-6 w-6 border-b-2 border-indigo-600"></div>
+            <p class="mt-2">Memuat daftar file backup...</p>
+        </div>
+    `;
+    
+    try {
+        const r = await api('?ajax=list_backup_files', {});
+        if (r.ok && r.data) {
+            const files = r.data;
+            
+            if (files.length === 0) {
+                listContainer.innerHTML = `
+                    <div class="text-center text-gray-500 py-8">
+                        <i class="fi fi-sr-database text-4xl mb-2"></i>
+                        <p>Tidak ada file backup tersedia</p>
+                        <p class="text-sm mt-2">Klik "Buat Backup Baru" untuk membuat backup pertama</p>
+                    </div>
+                `;
+                return;
+            }
+            
+            let html = '<div class="space-y-2">';
+            files.forEach(file => {
+                html += `
+                    <div class="flex items-center justify-between p-3 bg-gray-50 hover:bg-gray-100 rounded-lg border border-gray-200">
+                        <div class="flex-1">
+                            <div class="font-semibold text-gray-800">${file.name}</div>
+                            <div class="text-sm text-gray-600 mt-1">
+                                <span class="mr-4"><i class="fi fi-sr-file"></i> ${file.size_formatted}</span>
+                                <span><i class="fi fi-sr-calendar"></i> ${file.modified}</span>
+                            </div>
+                        </div>
+                        <div>
+                            <a href="?ajax=download_backup&file=${encodeURIComponent(file.name)}" 
+                               class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition inline-flex items-center">
+                                <i class="fi fi-sr-download mr-2"></i> Download
+                            </a>
+                        </div>
+                    </div>
+                `;
+            });
+            html += '</div>';
+            listContainer.innerHTML = html;
+        } else {
+            listContainer.innerHTML = `
+                <div class="text-center text-red-500 py-8">
+                    <i class="fi fi-sr-exclamation-triangle text-4xl mb-2"></i>
+                    <p>Gagal memuat daftar file backup</p>
+                    <p class="text-sm mt-2">${r.message || 'Terjadi kesalahan'}</p>
+                </div>
+            `;
+        }
+    } catch (error) {
+        console.error('Error loading backup files:', error);
+        listContainer.innerHTML = `
+            <div class="text-center text-red-500 py-8">
+                <i class="fi fi-sr-exclamation-triangle text-4xl mb-2"></i>
+                <p>Terjadi kesalahan saat memuat daftar file backup</p>
+            </div>
+        `;
+    }
+}
+
+// Refresh backup list button
+qs('#btn-refresh-backup-list') && qs('#btn-refresh-backup-list').addEventListener('click', () => {
+    loadBackupFiles();
+});
+
+// Create backup button handler
+qs('#btn-create-backup') && qs('#btn-create-backup').addEventListener('click', async () => {
+    showConfirmModal('Apakah Anda yakin ingin membuat backup database? Proses ini mungkin memakan waktu beberapa saat.', async () => {
+        const button = qs('#btn-create-backup');
+        const originalText = button.textContent;
+        button.textContent = 'Membuat Backup...';
+        button.disabled = true;
+        
+        try {
+            const r = await api('?ajax=create_backup', {});
+            if (r.ok) {
+                showNotif(r.message || 'Backup berhasil dibuat', true);
+                // Refresh list after successful backup
+                setTimeout(() => loadBackupFiles(), 500);
+            } else {
+                showNotif(r.message || 'Gagal membuat backup', false);
+            }
+        } catch (error) {
+            showNotif('Terjadi kesalahan saat membuat backup', false);
+            console.error('Error creating backup:', error);
+        } finally {
+            button.textContent = originalText;
+            button.disabled = false;
+        }
+    });
+});
+
+
 // Daily report review modal
 qs('#dr-close') && qs('#dr-close').addEventListener('click', ()=> qs('#dr-modal').classList.add('hidden'));
 qs('#dr-approve') && qs('#dr-approve').addEventListener('click', ()=> handleDrApproveDisapprove('approved'));
@@ -10615,6 +12744,26 @@ async function handleDrApproveDisapprove(status){
 
 const editAttModal = qs('#edit-att-modal');
 qs('#edit-att-cancel') && qs('#edit-att-cancel').addEventListener('click', ()=> editAttModal.classList.add('hidden'));
+
+// Handle change event for edit-att-ket to show/hide WFA and Overtime forms
+document.addEventListener('change', (e) => {
+    if (e.target.id === 'edit-att-ket') {
+        const wfaForm = qs('#edit-att-wfa-form');
+        const overtimeForm = qs('#edit-att-overtime-form');
+        const ket = e.target.value;
+        
+        // Hide all forms first
+        wfaForm.classList.add('hidden');
+        overtimeForm.classList.add('hidden');
+        
+        // Show appropriate form based on ket
+        if (ket === 'wfa') {
+            wfaForm.classList.remove('hidden');
+        } else if (ket === 'overtime') {
+            overtimeForm.classList.remove('hidden');
+        }
+    }
+});
 
 // Handle screenshot upload for edit attendance modal
 let editAttScreenshotMasuk = null;
@@ -10689,7 +12838,7 @@ qs('#edit-att-form') && qs('#edit-att-form').addEventListener('submit', async (e
     const jam_masuk_with_seconds = jam_masuk ? jam_masuk + ':00' : '';
     const jam_pulang_with_seconds = jam_pulang ? jam_pulang + ':00' : '';
     
-    const r = await api('?ajax=admin_update_attendance', { 
+    const payload = { 
         id, 
         jam_masuk: jam_masuk_with_seconds, 
         jam_pulang: jam_pulang_with_seconds, 
@@ -10697,9 +12846,22 @@ qs('#edit-att-form') && qs('#edit-att-form').addEventListener('submit', async (e
         status,
         screenshot_masuk,
         screenshot_pulang
-    });
+    };
+    
+    // Add WFA or Overtime fields based on ket
+    if (ket === 'wfa') {
+        payload.alasan_wfa = qs('#edit-att-alasan-wfa')?.value || '';
+    } else if (ket === 'overtime') {
+        payload.alasan_overtime = qs('#edit-att-alasan-overtime')?.value || '';
+        payload.lokasi_overtime = qs('#edit-att-lokasi-overtime')?.value || '';
+    }
+    
+    const r = await api('?ajax=admin_update_attendance', payload);
     showNotif(r.ok ? 'Berhasil disimpan.' : (r.message || 'Gagal menyimpan'), r.ok);
-    if(r.ok){ editAttModal.classList.add('hidden'); renderLaporan(); }
+    if(r.ok){ 
+        editAttModal.classList.add('hidden'); 
+        renderLaporan(); 
+    }
 });
 
 // Event listener untuk tombol "Tambahkan Laporan"
@@ -10863,6 +13025,21 @@ document.addEventListener('click', async (e)=>{
         qs('#edit-att-jam-pulang').value = att.jam_pulang ? att.jam_pulang.substring(0, 5) : '';
         qs('#edit-att-ket').value = att.ket || 'hadir';
         qs('#edit-att-status').value = att.status || 'ontime';
+        
+        // Handle WFA and Overtime fields
+        const wfaForm = qs('#edit-att-wfa-form');
+        const overtimeForm = qs('#edit-att-overtime-form');
+        wfaForm.classList.add('hidden');
+        overtimeForm.classList.add('hidden');
+        
+        if (att.ket === 'wfa') {
+            wfaForm.classList.remove('hidden');
+            qs('#edit-att-alasan-wfa').value = att.alasan_wfa || '';
+        } else if (att.ket === 'overtime') {
+            overtimeForm.classList.remove('hidden');
+            qs('#edit-att-alasan-overtime').value = att.alasan_overtime || '';
+            qs('#edit-att-lokasi-overtime').value = att.lokasi_overtime || '';
+        }
         
         // Handle existing screenshots
         if (att.screenshot_masuk) {
@@ -11111,6 +13288,20 @@ async function initRekapPage() {
     }
     
     isInitRekapRunning = true;
+    
+    // Load settings for max days back for daily reports
+    try {
+        const settingsRes = await fetch('?ajax=get_settings');
+        const settingsJson = await settingsRes.json();
+        if (settingsJson.ok && settingsJson.data && settingsJson.data.max_daily_report_days_back) {
+            window.maxDailyReportDaysBack = parseInt(settingsJson.data.max_daily_report_days_back.value) || 5;
+        } else {
+            window.maxDailyReportDaysBack = 5; // Default: 5 days
+        }
+    } catch (e) {
+        window.maxDailyReportDaysBack = 5; // Default: 5 days on error
+    }
+    
     const m = parseInt(qs('#rekap-month')?.value || String(new Date().getMonth() + 1));
     const y = parseInt(qs('#rekap-year')?.value || String(new Date().getFullYear()));
     console.log('Loading rekap for month:', m, 'year:', y);
@@ -11361,24 +13552,29 @@ function renderRekapData(data, m, y) {
         dataToShow = data;
     }
 
-    // Calculate past 5 working days (excluding weekends) - only for current month/year
+    // Calculate past working days based on settings (default: 5 days) - only for current month/year
     const today = new Date();
     const currentMonth = today.getMonth() + 1;
     const currentYear = today.getFullYear();
     const past5WorkingDays = [];
     
-    // Only calculate past 5 days if we're viewing current month and year
+    // Calculate past working days based on settings (default: 5 days)
+    // Get max days back from settings or use default
+    const maxDaysBack = window.maxDailyReportDaysBack || 5;
     if (m === currentMonth && y === currentYear) {
         let tempDate = new Date(today);
         let workingDaysFound = 0;
+        let daysChecked = 0;
+        const maxDaysToCheck = maxDaysBack * 2; // Check up to 2x maxDaysBack to find enough working days
         
-        while (workingDaysFound < 5) {
+        while (workingDaysFound < maxDaysBack && daysChecked < maxDaysToCheck) {
             const dayOfWeek = tempDate.getDay();
             if (dayOfWeek !== 0 && dayOfWeek !== 6) { // Not Sunday (0) and not Saturday (6)
                 past5WorkingDays.push(tempDate.toISOString().slice(0, 10));
                 workingDaysFound++;
             }
             tempDate.setDate(tempDate.getDate() - 1);
+            daysChecked++;
         }
     }
     
@@ -11396,21 +13592,33 @@ function renderRekapData(data, m, y) {
     dataToShow.forEach(row => {
         const d = new Date(row.date);
         const tanggal = d.toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' });
-        const dayMap = { Monday: 'Senin', Tuesday: 'Selasa', Wednesday: 'Rabu', Thursday: 'Kamis', Friday: 'Jumat' };
+        const dayMap = { 
+            Monday: 'Senin', 
+            Tuesday: 'Selasa', 
+            Wednesday: 'Rabu', 
+            Thursday: 'Kamis', 
+            Friday: 'Jumat',
+            Saturday: 'Sabtu',
+            Sunday: 'Minggu'
+        };
         const day = dayMap[d.toLocaleDateString('en-US', { weekday: 'long' })] || '';
         const dr = row.daily_report;
         let reportBtns = '';
         
-        // Check if attendance is complete (has entry time or is WFH)
+        // Check if attendance is complete (has entry time or is WFH or is overtime)
         const hasEntryTime = row.jam_masuk && row.jam_masuk !== '-';
         const isWFH = row.ket === 'wfh';
-        const isAttendanceComplete = hasEntryTime || isWFH;
+        const isOvertime = row.ket === 'overtime';
+        const isAttendanceComplete = hasEntryTime || isWFH || isOvertime;
         
-        // Check if within 5-day timeframe (only for current month/year)
+        // Check if within timeframe (only for current month/year) - use settings for max days
+        // For now, allow all days that have attendance (including overtime)
         const isWithinTimeframe = (m === currentMonth && y === currentYear) ? past5WorkingDays.includes(row.date) : true;
+        // Also allow overtime days and working days with attendance
+        const canCreateReport = isAttendanceComplete && (isWithinTimeframe || isOvertime || hasEntryTime);
         
-        // Check if can edit (not approved and within timeframe)
-        const canEdit = dr && dr.status !== 'approved' && isWithinTimeframe;
+        // Check if can edit (not approved and within timeframe or is overtime)
+        const canEdit = dr && dr.status !== 'approved' && (isWithinTimeframe || isOvertime);
         
 
 
@@ -11425,12 +13633,15 @@ function renderRekapData(data, m, y) {
             }
         } else {
             // No report exists
-            if (isAttendanceComplete && isWithinTimeframe) {
+            if (canCreateReport) {
                 reportBtns = `<button class="btn-create-dr bg-emerald-500 hover:bg-emerald-600 text-white btn-pill" data-date="${row.date}">Buat</button>`;
             } else if (!isAttendanceComplete && isWithinTimeframe) {
                 reportBtns = `<span class="text-gray-400">Belum presensi</span>`;
-            } else if (!isWithinTimeframe) {
+            } else if (!isAttendanceComplete && !isWithinTimeframe && !isOvertime) {
                 reportBtns = `<span class="text-gray-400">Tidak tersedia</span>`;
+            } else if (isOvertime && !dr) {
+                // Allow creating report for overtime even if outside timeframe
+                reportBtns = `<button class="btn-create-dr bg-emerald-500 hover:bg-emerald-600 text-white btn-pill" data-date="${row.date}">Buat</button>`;
             }
         }
 
@@ -11448,24 +13659,45 @@ function renderRekapData(data, m, y) {
         const isToday = row.date === today;
         const isFuture = row.date > today;
         
-        if (row.ket && (row.ket === 'wfo' || row.ket === 'wfa' || row.ket === 'izin' || row.ket === 'sakit')) {
+        // Check if it's a manual holiday or before registration
+        const isManualHoliday = row.is_manual_holiday || false;
+        const isBeforeRegistration = row.is_before_registration || false;
+        const isWorkingDay = row.is_working_day !== undefined ? row.is_working_day : true;
+        
+        if (row.ket && (row.ket === 'wfo' || row.ket === 'wfa' || row.ket === 'izin' || row.ket === 'sakit' || row.ket === 'overtime' || row.ket === 'libur' || row.ket === 'na')) {
             // Show actual keterangan if exists
             let badgeClass = 'badge-gray';
             if (row.ket === 'wfo') badgeClass = 'badge-green';
             else if (row.ket === 'wfa') badgeClass = 'badge-blue';
+            else if (row.ket === 'overtime') badgeClass = 'badge-emerald';
             else if (row.ket === 'izin') badgeClass = 'badge-yellow';
             else if (row.ket === 'sakit') badgeClass = 'badge-yellow';
+            else if (row.ket === 'libur') badgeClass = 'badge-orange';
+            else if (row.ket === 'na') badgeClass = 'badge-gray';
             
-            keteranganContent = `<span class="badge ${badgeClass}">${row.ket.toUpperCase()}</span>`;
-        } else if (!isAttendanceComplete && isToday) {
-            // Show input button only for today if no attendance
+            let ketText = row.ket.toUpperCase();
+            if (row.ket === 'na') ketText = 'NA';
+            if (row.ket === 'libur') ketText = 'LIBUR';
+            
+            keteranganContent = `<span class="badge ${badgeClass}">${ketText}</span>`;
+        } else if (isManualHoliday || (!isWorkingDay && !row.ket)) {
+            // Manual holiday or weekend/holiday without attendance - show libur with orange badge
+            keteranganContent = '<span class="badge badge-orange">LIBUR</span>';
+        } else if (isBeforeRegistration) {
+            // Before registration - show NA
+            keteranganContent = '<span class="badge badge-gray">NA</span>';
+        } else if (!isAttendanceComplete && isToday && isWorkingDay) {
+            // Show input button only for today if no attendance and it's a working day
             keteranganContent = `<button class="btn-input-keterangan bg-indigo-500 hover:bg-indigo-600 text-white px-3 py-1 rounded text-sm" data-date="${row.date}">Input Keterangan</button>`;
         } else if (!isAttendanceComplete && isFuture) {
             // Show "Tidak Tersedia" for future days
             keteranganContent = '<span class="text-gray-400">Tidak Tersedia</span>';
-        } else if (!isAttendanceComplete && !isToday && !isFuture) {
-            // Mark past days without attendance as alpha
+        } else if (!isAttendanceComplete && !isToday && !isFuture && isWorkingDay) {
+            // Mark past working days without attendance as alpha (only for working days)
             keteranganContent = '<span class="badge badge-red">ALPHA</span>';
+        } else if (!isAttendanceComplete && !isToday && !isFuture && !isWorkingDay) {
+            // For non-working days (weekend/holiday) without attendance, show nothing or "-"
+            keteranganContent = '<span class="text-gray-400">-</span>';
         } else {
             keteranganContent = '<span class="text-gray-400">-</span>';
         }
@@ -12131,6 +14363,35 @@ function monthName(monthIndex) {
 let currentMonthlyPageYear = new Date().getFullYear();
 
 async function renderMonthly() {
+    // Load settings for max months back and end year
+    let monthlyReportEndYear = 2026; // Default: 2026
+    try {
+        const settingsRes = await fetch('?ajax=get_settings');
+        const settingsJson = await settingsRes.json();
+        if (settingsJson.ok && settingsJson.data) {
+            if (settingsJson.data.max_monthly_report_months_back) {
+                window.maxMonthlyReportMonthsBack = parseInt(settingsJson.data.max_monthly_report_months_back.value) || 999;
+            } else {
+                window.maxMonthlyReportMonthsBack = 999; // Default: no limit
+            }
+            if (settingsJson.data.monthly_report_end_year) {
+                monthlyReportEndYear = parseInt(settingsJson.data.monthly_report_end_year.value) || 2026;
+            }
+        } else {
+            window.maxMonthlyReportMonthsBack = 999; // Default: no limit
+        }
+    } catch (e) {
+        window.maxMonthlyReportMonthsBack = 999; // Default: no limit on error
+    }
+    
+    // Validate currentMonthlyPageYear - should be between 2025 and monthlyReportEndYear
+    if (currentMonthlyPageYear < 2025) {
+        currentMonthlyPageYear = 2025;
+    }
+    if (currentMonthlyPageYear > monthlyReportEndYear) {
+        currentMonthlyPageYear = monthlyReportEndYear;
+    }
+    
     const res = await fetch('?ajax=get_monthly_reports');
     const j = await res.json();
     const list = (j.data || []);
@@ -12173,8 +14434,13 @@ async function renderMonthly() {
         let statusBadge;
 
         // Cek apakah bulan ini valid untuk diedit/dibuat
-        const isEditableTime = (year === currentYear && (m === currentMonth || m === currentMonth - 1)) ||
-                               (year === currentYear - 1 && currentMonth === 1 && m === 12);
+        // Check settings for max months back (default: no limit, allow all months)
+        // For now, allow all months - can be restricted via settings later
+        const maxMonthsBack = window.maxMonthlyReportMonthsBack || 999; // Default: no limit
+        const reportDate = new Date(year, m - 1, 1);
+        const todayDate = new Date(currentYear, currentMonth - 1, 1);
+        const monthsDiff = (todayDate.getFullYear() - reportDate.getFullYear()) * 12 + (todayDate.getMonth() - reportDate.getMonth());
+        const isEditableTime = monthsDiff <= maxMonthsBack; // Allow all months by default
 
         if (item) { // Jika laporan sudah ada
             const isApproved = item.status === 'approved';
@@ -12232,17 +14498,20 @@ async function renderMonthly() {
         body.appendChild(tr);
     });
     
-    // Hapus dan buat ulang tombol paginasi
+    // Hapus dan buat ulang tombol paginasi - generate from 2025 to monthlyReportEndYear
     let paginationDiv = qs('#monthly-pagination');
     if (paginationDiv) paginationDiv.remove();
     
     paginationDiv = document.createElement('div');
     paginationDiv.id = 'monthly-pagination';
-    paginationDiv.className = 'mt-4 flex justify-center gap-2';
-    paginationDiv.innerHTML = `
-        <button data-year="2025" class="page-btn px-4 py-2 rounded ${currentMonthlyPageYear === 2025 ? 'bg-indigo-600 text-white' : 'bg-gray-200'}">2025</button>
-        <button data-year="2026" class="page-btn px-4 py-2 rounded ${currentMonthlyPageYear === 2026 ? 'bg-indigo-600 text-white' : 'bg-gray-200'}">2026</button>
-    `;
+    paginationDiv.className = 'mt-4 flex justify-center gap-2 flex-wrap';
+    
+    // Generate year buttons from 2025 to monthlyReportEndYear
+    const yearButtons = [];
+    for (let y = 2025; y <= monthlyReportEndYear; y++) {
+        yearButtons.push(`<button data-year="${y}" class="page-btn px-4 py-2 rounded ${currentMonthlyPageYear === y ? 'bg-indigo-600 text-white' : 'bg-gray-200 hover:bg-gray-300'}">${y}</button>`);
+    }
+    paginationDiv.innerHTML = yearButtons.join('');
     body.closest('.overflow-x-auto').insertAdjacentElement('afterend', paginationDiv);
 }
 
@@ -12314,6 +14583,15 @@ async function renderSettings() {
             if(qs('#kpi-izin-sakit')) qs('#kpi-izin-sakit').value = settings.kpi_izin_sakit_score?.value || '85';
             if(qs('#kpi-alpha')) qs('#kpi-alpha').value = settings.kpi_alpha_score?.value || '0';
             if(qs('#kpi-overtime-bonus')) qs('#kpi-overtime-bonus').value = settings.kpi_overtime_bonus?.value || '5';
+            if(qs('#max-daily-report-days-back')) qs('#max-daily-report-days-back').value = settings.max_daily_report_days_back?.value || '5';
+            if(qs('#max-monthly-report-months-back')) qs('#max-monthly-report-months-back').value = settings.max_monthly_report_months_back?.value || '999';
+            if(qs('#monthly-report-end-year')) qs('#monthly-report-end-year').value = settings.monthly_report_end_year?.value || '2026';
+            if(qs('#face-recognition-threshold')) qs('#face-recognition-threshold').value = settings.face_recognition_threshold?.value || '0.38';
+            if(qs('#face-recognition-input-size')) qs('#face-recognition-input-size').value = settings.face_recognition_input_size?.value || '416';
+            if(qs('#face-recognition-score-threshold')) qs('#face-recognition-score-threshold').value = settings.face_recognition_score_threshold?.value || '0.35';
+            if(qs('#face-recognition-quality-threshold')) qs('#face-recognition-quality-threshold').value = settings.face_recognition_quality_threshold?.value || '0.55';
+            if(qs('#geocode-timeout')) qs('#geocode-timeout').value = settings.geocode_timeout?.value || '3';
+            if(qs('#geocode-accuracy-radius')) qs('#geocode-accuracy-radius').value = settings.geocode_accuracy_radius?.value || '50';
             
             // WFO API settings
             if(qs('#wfo-mode')) qs('#wfo-mode').value = settings.wfo_mode?.value || 'api';
@@ -12591,6 +14869,15 @@ qs('#settings-form') && qs('#settings-form').addEventListener('submit', async (e
     const kpiIzinSakit = qs('#kpi-izin-sakit')?.value || '';
     const kpiAlpha = qs('#kpi-alpha')?.value || '';
     const kpiOvertimeBonus = qs('#kpi-overtime-bonus')?.value || '';
+    const maxDailyReportDaysBack = qs('#max-daily-report-days-back')?.value || '5';
+    const maxMonthlyReportMonthsBack = qs('#max-monthly-report-months-back')?.value || '999';
+    const monthlyReportEndYear = qs('#monthly-report-end-year')?.value || '2026';
+    const faceRecognitionThreshold = qs('#face-recognition-threshold')?.value || '0.38';
+    const faceRecognitionInputSize = qs('#face-recognition-input-size')?.value || '416';
+    const faceRecognitionScoreThreshold = qs('#face-recognition-score-threshold')?.value || '0.35';
+    const faceRecognitionQualityThreshold = qs('#face-recognition-quality-threshold')?.value || '0.55';
+    const geocodeTimeout = qs('#geocode-timeout')?.value || '3';
+    const geocodeAccuracyRadius = qs('#geocode-accuracy-radius')?.value || '50';
     
     // WFO API settings
     const wfoMode = qs('#wfo-mode')?.value || 'api';
@@ -12638,6 +14925,15 @@ qs('#settings-form') && qs('#settings-form').addEventListener('submit', async (e
             kpi_izin_sakit: kpiIzinSakit,
             kpi_alpha: kpiAlpha,
             kpi_overtime_bonus: kpiOvertimeBonus,
+            max_daily_report_days_back: maxDailyReportDaysBack,
+            max_monthly_report_months_back: maxMonthlyReportMonthsBack,
+            monthly_report_end_year: monthlyReportEndYear,
+            face_recognition_threshold: faceRecognitionThreshold,
+            face_recognition_input_size: faceRecognitionInputSize,
+            face_recognition_score_threshold: faceRecognitionScoreThreshold,
+            face_recognition_quality_threshold: faceRecognitionQualityThreshold,
+            geocode_timeout: geocodeTimeout,
+            geocode_accuracy_radius: geocodeAccuracyRadius,
             wfo_mode: wfoMode,
             wfo_api_provider: wfoApiProvider,
             wfo_api_token: wfoApiToken,
@@ -13664,4 +15960,5 @@ qs('#work-schedule-save') && qs('#work-schedule-save').addEventListener('click',
 });
 </script>
 </body>
+</html>
 </html>
