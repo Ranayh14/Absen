@@ -538,7 +538,8 @@ function fetchPublicIpInfo(string $ip, string $provider, string $token = ''): ar
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, $url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 5);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 3); // Reduced from 5 to 3 seconds for faster response
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 2); // Connection timeout 2 seconds
     if (!empty($headers)) curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
     $resp = curl_exec($ch);
     $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -3350,46 +3351,26 @@ if (isset($_GET['ajax'])) {
                 }
                 
                 // PRIORITAS 3: GPS Location - Hanya jika IP dan WiFi tidak valid (fallback terakhir)
-                // Radius 200m hanya digunakan sebagai fallback jika IP dan WiFi gagal
-                // CRITICAL FIX: Jika lokasi menunjukkan Telkom University (berdasarkan alamat), langsung WFO
+                // CRITICAL: Location string (lokasi) is NEVER used for validation - it's only for display
+                // Only GPS coordinates (lat/lng) and distance calculation are used for validation
+                // This prevents users from manipulating location string to bypass validation
                 if ($ketVal !== 'wfo' && $lat !== null && $lng !== null) {
-                    // Check if location string contains Telkom University keywords
-                    $lokasiLower = strtolower($lokasi ?? '');
-                    $isTelkomUniversityLocation = false;
-                    
-                    // Check location string for Telkom University keywords
-                    $telkomKeywords = ['telkom university', 'fakultas ilmu terapan', 'telu', 'sukapura', 'dayeuhkolot'];
-                    foreach ($telkomKeywords as $keyword) {
-                        if (strpos($lokasiLower, strtolower($keyword)) !== false) {
-                            $isTelkomUniversityLocation = true;
-                            error_log("Location contains Telkom University keyword: '$keyword'");
-                            break;
-                        }
-                    }
-                    
-                    // If location shows Telkom University, set WFO regardless of distance
-                    // This handles cases where GPS accuracy is low (indoors) but location is clearly Telkom University
-                    if ($isTelkomUniversityLocation) {
-                        $ketVal = 'wfo';
-                        $isInsideTelu = true;
-                        error_log('✓ Location shows Telkom University (based on address) - set WFO (distance: ' . round($distance) . 'm, but location confirmed)');
-                    } else if ($isInsideTelu) {
-                        // GPS inside radius - set WFO (fallback terakhir)
-                        $ketVal = 'wfo';
-                        error_log('✓ GPS inside radius - set WFO berdasarkan GPS (fallback terakhir, distance: ' . round($distance) . 'm, radius: ' . $wfoRadius . 'm)');
-                    } else {
-                        // GPS outside radius - check if distance is reasonable (GPS accuracy might be low)
-                        // If distance is < 1000m and GPS accuracy is low, still consider it WFO
-                        if ($distance <= 1000 && $gpsAccuracy !== null && $gpsAccuracy > 50) {
-                            // GPS accuracy is low (indoors) and distance is reasonable - likely still in Telkom University
+                    // Only use GPS coordinates and distance - location string is ignored for validation
+                    if ($isInsideTelu) {
+                        // GPS inside radius - set WFO (fallback terakhir, but stricter)
+                        // Only accept if distance is within configured radius (no lenient 1000m check)
+                        if ($distance <= $wfoRadius) {
                             $ketVal = 'wfo';
-                            $isInsideTelu = true;
-                            error_log('✓ GPS distance reasonable (' . round($distance) . 'm) with low accuracy (' . round($gpsAccuracy) . 'm) - set WFO (likely indoors at Telkom University)');
+                            error_log('✓ GPS inside radius - set WFO berdasarkan GPS (fallback terakhir, distance: ' . round($distance) . 'm, radius: ' . $wfoRadius . 'm)');
                         } else {
-                            // GPS outside radius - tetap WFA
+                            // GPS outside radius - tetap WFA (stricter validation)
                             $ketVal = 'wfa';
                             error_log('✗ GPS outside radius - require WFA (distance: ' . round($distance) . 'm, radius: ' . $wfoRadius . 'm)');
                         }
+                    } else {
+                        // GPS outside radius - tetap WFA
+                        $ketVal = 'wfa';
+                        error_log('✗ GPS outside radius - require WFA (distance: ' . round($distance) . 'm, radius: ' . $wfoRadius . 'm)');
                     }
                 } else if ($ketVal !== 'wfo') {
                     // Tidak ada GPS data dan IP/WiFi tidak valid
@@ -8688,7 +8669,7 @@ function showWFAModal(message) {
 }
 
 // Show location confirmation modal
-function showLocationConfirmation(lokasi, lat, lng) {
+function showLocationConfirmation(lokasi, lat, lng, onRecheck = null) {
     return new Promise((resolve) => {
         // Create location confirmation modal if it doesn't exist
         let locationModal = document.getElementById('locationConfirmationModal');
@@ -8704,63 +8685,122 @@ function showLocationConfirmation(lokasi, lat, lng) {
                     <div class="mb-4 p-3 bg-gray-50 rounded-lg">
                         <p class="text-sm font-medium text-gray-700 mb-1">Lokasi Saat Ini:</p>
                         <p class="text-sm text-gray-900" id="location-confirmation-text">${lokasi}</p>
-                        <p class="text-xs text-gray-500 mt-2">Koordinat: ${lat.toFixed(6)}, ${lng.toFixed(6)}</p>
+                        <p class="text-xs text-gray-500 mt-2" id="location-confirmation-coords">Koordinat: ${lat.toFixed(6)}, ${lng.toFixed(6)}</p>
+                    </div>
+                    <div id="location-checking-indicator" class="hidden mb-2 text-sm text-blue-600">
+                        <i class="fi fi-sr-spinner animate-spin mr-1"></i> Memeriksa lokasi ulang...
                     </div>
                     <div class="flex space-x-3">
                         <button id="locationConfirmYes" class="flex-1 bg-green-600 text-white py-2 px-4 rounded-lg hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500">
                             Ya, Benar
                         </button>
-                        <button id="locationConfirmNo" class="flex-1 bg-red-600 text-white py-2 px-4 rounded-lg hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500">
-                            Tidak, Batal
+                        <button id="locationConfirmNo" class="flex-1 bg-blue-600 text-white py-2 px-4 rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                            Periksa Ulang
+                        </button>
+                        <button id="locationConfirmCancel" class="flex-1 bg-gray-600 text-white py-2 px-4 rounded-lg hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-gray-500">
+                            Batal
                         </button>
                     </div>
                 </div>
             `;
             document.body.appendChild(locationModal);
-            
-            // Add event listeners
-            document.getElementById('locationConfirmYes').addEventListener('click', () => {
-                locationModal.style.display = 'none';
-                locationModal.classList.add('hidden');
-                resolve(true);
-            });
-            
-            document.getElementById('locationConfirmNo').addEventListener('click', () => {
-                locationModal.style.display = 'none';
-                locationModal.classList.add('hidden');
-                resolve(false);
-            });
-        } else {
-            // Update location text
-            const locationText = document.getElementById('location-confirmation-text');
-            if (locationText) {
-                locationText.textContent = lokasi;
-            }
-            locationModal.style.display = 'flex';
-            locationModal.classList.remove('hidden');
-            
-            // Return promise that resolves when user clicks
-            const yesBtn = document.getElementById('locationConfirmYes');
-            const noBtn = document.getElementById('locationConfirmNo');
-            
-            // Remove old listeners and add new ones
-            const newYesBtn = yesBtn.cloneNode(true);
-            const newNoBtn = noBtn.cloneNode(true);
-            yesBtn.parentNode.replaceChild(newYesBtn, yesBtn);
-            noBtn.parentNode.replaceChild(newNoBtn, noBtn);
-            
-            newYesBtn.addEventListener('click', () => {
-                locationModal.style.display = 'none';
-                locationModal.classList.add('hidden');
-                resolve(true);
-            });
-            
-            newNoBtn.addEventListener('click', () => {
-                locationModal.style.display = 'none';
-                locationModal.classList.add('hidden');
-                resolve(false);
-            });
         }
+        
+        // Update location text
+        const locationText = document.getElementById('location-confirmation-text');
+        const coordText = document.getElementById('location-confirmation-coords');
+        const checkingIndicator = document.getElementById('location-checking-indicator');
+        if (locationText) {
+            locationText.textContent = lokasi;
+        }
+        if (coordText) {
+            coordText.textContent = `Koordinat: ${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+        }
+        if (checkingIndicator) {
+            checkingIndicator.classList.add('hidden');
+        }
+        locationModal.style.display = 'flex';
+        locationModal.classList.remove('hidden');
+        
+        // Return promise that resolves when user clicks
+        const yesBtn = document.getElementById('locationConfirmYes');
+        const noBtn = document.getElementById('locationConfirmNo');
+        const cancelBtn = document.getElementById('locationConfirmCancel');
+        
+        // Remove old listeners and add new ones
+        const newYesBtn = yesBtn.cloneNode(true);
+        const newNoBtn = noBtn.cloneNode(true);
+        const newCancelBtn = cancelBtn.cloneNode(true);
+        yesBtn.parentNode.replaceChild(newYesBtn, yesBtn);
+        noBtn.parentNode.replaceChild(newNoBtn, noBtn);
+        cancelBtn.parentNode.replaceChild(newCancelBtn, cancelBtn);
+        
+        // Store current values that can be updated
+        let currentValues = { lokasi, lat, lng };
+        
+        newYesBtn.addEventListener('click', () => {
+            locationModal.style.display = 'none';
+            locationModal.classList.add('hidden');
+            // Return updated values
+            resolve({ confirmed: true, ...currentValues });
+        });
+        
+        newCancelBtn.addEventListener('click', () => {
+            locationModal.style.display = 'none';
+            locationModal.classList.add('hidden');
+            resolve({ confirmed: false });
+        });
+        
+        newNoBtn.addEventListener('click', async () => {
+            // If recheck callback is provided, call it to re-check location
+            if (onRecheck && typeof onRecheck === 'function') {
+                if (checkingIndicator) {
+                    checkingIndicator.classList.remove('hidden');
+                }
+                newNoBtn.disabled = true;
+                newYesBtn.disabled = true;
+                newCancelBtn.disabled = true;
+                
+                try {
+                    // Call recheck function - it should return new {lokasi, lat, lng}
+                    const newLocation = await onRecheck();
+                    if (newLocation && newLocation.lokasi && newLocation.lat && newLocation.lng) {
+                        // Update modal with new location
+                        if (locationText) {
+                            locationText.textContent = newLocation.lokasi;
+                        }
+                        if (coordText) {
+                            coordText.textContent = `Koordinat: ${newLocation.lat.toFixed(6)}, ${newLocation.lng.toFixed(6)}`;
+                        }
+                        // Update current values
+                        currentValues = { lokasi: newLocation.lokasi, lat: newLocation.lat, lng: newLocation.lng };
+                    } else {
+                        // Recheck failed - show error
+                        if (locationText) {
+                            locationText.textContent = 'Gagal mendapatkan lokasi. Silakan coba lagi atau klik Batal.';
+                        }
+                    }
+                } catch (error) {
+                    console.error('Error rechecking location:', error);
+                    if (locationText) {
+                        locationText.textContent = 'Error: ' + (error.message || 'Gagal memeriksa lokasi');
+                    }
+                } finally {
+                    if (checkingIndicator) {
+                        checkingIndicator.classList.add('hidden');
+                    }
+                    newNoBtn.disabled = false;
+                    newYesBtn.disabled = false;
+                    newCancelBtn.disabled = false;
+                }
+                // Don't resolve - keep modal open for user to confirm new location
+            } else {
+                // No recheck function - just cancel
+                locationModal.style.display = 'none';
+                locationModal.classList.add('hidden');
+                resolve({ confirmed: false });
+            }
+        });
     });
 }
 
@@ -8826,77 +8866,102 @@ function submitAttendanceWithWFA(attendanceData, wfaReason) {
         });
 }
 
-// Enhanced location detection with reverse geocoding
+// Enhanced location detection with reverse geocoding - ALWAYS shows actual device location
 async function getStreetNameFromCoordinates(lat, lng) {
-    // Read configured WFO center from embedded settings
-    const wfoLat = parseFloat(document.body.getAttribute('data-wfo-lat')||'-6.9738');
-    const wfoLng = parseFloat(document.body.getAttribute('data-wfo-lng')||'107.6300');
-    const wfoName = document.body.getAttribute('data-wfo-address')||'Pusat WFO';
-    const distance = calculateDistance(lat, lng, wfoLat, wfoLng);
-    
-    if (distance < 1.0) { // Within 1 km of WFO center
-        return wfoName;
-    } else if (distance < 5.0) { // Within 5 km
-        return `${wfoName} (${distance.toFixed(1)}km dari pusat WFO)`;
-    } else {
-        // Try reverse geocoding for better location names
-        try {
-            const response = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&addressdetails=1&accept-language=id&zoom=18`);
-            const data = await response.json();
-            
-            if (data && data.address) {
-                const address = data.address;
-                const parts = [];
-                
-                // 1. Building name or house name (most specific)
-                if (address.building) parts.push(address.building);
-                else if (address.house_name) parts.push(address.house_name);
-                
-                // 2. Road/Street with house number if available
-                const roadParts = [];
-                if (address.house_number) roadParts.push(address.house_number);
-                if (address.road) roadParts.push(address.road);
-                else if (address.pedestrian) roadParts.push(address.pedestrian);
-                else if (address.footway) roadParts.push(address.footway);
-                if (roadParts.length > 0) {
-                    parts.push('Jl. ' + roadParts.join(' '));
-                }
-                
-                // 3. Suburb/Neighbourhood
-                if (address.suburb) parts.push(address.suburb);
-                else if (address.neighbourhood) parts.push(address.neighbourhood);
-                
-                // 4. City/Town/Village
-                if (address.city) parts.push(address.city);
-                else if (address.town) parts.push(address.town);
-                else if (address.village) parts.push(address.village);
-                
-                // 5. State/Province
-                if (address.state) parts.push(address.state);
-                
-                // 6. Postal code
-                if (address.postcode) parts.push(address.postcode);
-                
-                if (parts.length > 0) {
-                    return parts.join(', ');
-                }
-                
-                // Fallback to display_name with postal code
-                if (data.display_name) {
-                    let cleanName = data.display_name.replace(/, Indonesia$/, '');
-                    if (address.postcode) {
-                        cleanName += ', ' + address.postcode;
-                    }
-                    return cleanName;
-                }
-            }
-        } catch (error) {
-            console.warn('Reverse geocoding failed:', error);
+    // ALWAYS use reverse geocoding to get actual location - never assume WFO location
+    // This ensures the modal shows the real device location, not a preset location
+    try {
+        // Use reasonable timeout for better address retrieval
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 3000); // 3 second timeout (increased from 2s)
+        
+        const response = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&addressdetails=1&accept-language=id&zoom=18`, {
+            signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        
+        if (!response || !response.ok) {
+            throw new Error('Reverse geocoding response not OK');
         }
         
-        // Final fallback: coordinates with distance info
-        return `Lokasi: ${lat.toFixed(6)}, ${lng.toFixed(6)} (${distance.toFixed(1)}km dari kantor)`;
+        const data = await response.json();
+        
+        if (data && data.address) {
+            const address = data.address;
+            const parts = [];
+            
+            // 1. Building name or house name (most specific) - prioritize this for places like malls, universities
+            if (address.building) {
+                parts.push(address.building);
+            } else if (address.house_name) {
+                parts.push(address.house_name);
+            }
+            
+            // Check for known places in display_name (like Trans Studio Mall, Telkom University, etc.)
+            if (data.display_name) {
+                const displayName = data.display_name.toLowerCase();
+                // Check for common place names
+                if (displayName.includes('trans studio') || displayName.includes('transstudio')) {
+                    parts.push('Trans Studio Mall Bandung');
+                } else if (displayName.includes('telkom university') || displayName.includes('telkom university')) {
+                    parts.push('Telkom University');
+                } else if (displayName.includes('fakultas ilmu terapan')) {
+                    parts.push('Fakultas Ilmu Terapan Telkom University');
+                }
+            }
+            
+            // 2. Road/Street with house number if available
+            const roadParts = [];
+            if (address.house_number) roadParts.push(address.house_number);
+            if (address.road) roadParts.push(address.road);
+            else if (address.pedestrian) roadParts.push(address.pedestrian);
+            else if (address.footway) roadParts.push(address.footway);
+            if (roadParts.length > 0) {
+                parts.push('Jl. ' + roadParts.join(' '));
+            }
+            
+            // 3. Suburb/Neighbourhood
+            if (address.suburb) parts.push(address.suburb);
+            else if (address.neighbourhood) parts.push(address.neighbourhood);
+            
+            // 4. City/Town/Village
+            if (address.city) parts.push(address.city);
+            else if (address.town) parts.push(address.town);
+            else if (address.village) parts.push(address.village);
+            
+            // 5. State/Province
+            if (address.state) parts.push(address.state);
+            
+            // 6. Postal code
+            if (address.postcode) parts.push(address.postcode);
+            
+            if (parts.length > 0) {
+                return parts.join(', ');
+            }
+            
+            // Fallback to display_name with postal code
+            if (data.display_name) {
+                let cleanName = data.display_name.replace(/, Indonesia$/, '');
+                // Remove redundant "Bandung" if already in parts
+                if (address.postcode) {
+                    cleanName += ', ' + address.postcode;
+                }
+                return cleanName;
+            }
+        }
+        
+        // If address parsing failed but display_name exists, use it
+        if (data && data.display_name) {
+            let cleanName = data.display_name.replace(/, Indonesia$/, '');
+            return cleanName;
+        }
+    } catch (error) {
+        // Silently fail - will use coordinates fallback
+        console.warn('Reverse geocoding failed:', error);
     }
+    
+    // Final fallback: coordinates only (no distance info to avoid confusion)
+    return `Koordinat: ${lat.toFixed(6)}, ${lng.toFixed(6)}`;
 }
 
 // Helper function to calculate distance between two coordinates
@@ -9693,10 +9758,99 @@ function startVideoInterval(){
             
             if (resized.length > 0) {
                 if (labeledFaceDescriptors && labeledFaceDescriptors.length > 0) {
-                    // Advanced: Use adjusted threshold based on device type (more lenient for mobile)
+                    // Enhanced: Get best match AND second best match for confidence gap validation
                     const adjustedThreshold = getAdjustedFaceMatcherThreshold();
                     const faceMatcher = new faceapi.FaceMatcher(labeledFaceDescriptors, adjustedThreshold);
-                    const results = resized.map(d => faceMatcher.findBestMatch(d.descriptor));
+                    
+                    // Get results with both best and second best matches
+                    const results = resized.map(d => {
+                        // Validate descriptor exists and is valid
+                        if (!d.descriptor || !d.descriptor.length || d.descriptor.length === 0) {
+                            return {
+                                label: 'unknown',
+                                distance: Infinity,
+                                secondBest: null,
+                                confidenceGap: Infinity
+                            };
+                        }
+                        
+                        const bestMatch = faceMatcher.findBestMatch(d.descriptor);
+                        
+                        // Validate bestMatch structure
+                        if (!bestMatch || typeof bestMatch !== 'object') {
+                            return {
+                                label: 'unknown',
+                                distance: Infinity,
+                                secondBest: null,
+                                confidenceGap: Infinity
+                            };
+                        }
+                        
+                        // Ensure bestMatch has required properties
+                        const validBestMatch = {
+                            label: bestMatch.label || 'unknown',
+                            distance: (typeof bestMatch.distance === 'number' && isFinite(bestMatch.distance)) ? bestMatch.distance : Infinity
+                        };
+                        
+                        // Calculate second best match for confidence gap validation
+                        let secondBestMatch = null;
+                        let secondBestDistance = Infinity;
+                        
+                        // Find second best match (different person)
+                        // labeledFaceDescriptors contains LabeledFaceDescriptors objects with:
+                        // - label: string
+                        // - descriptors: array of Float32Array (can have multiple descriptors per person)
+                        for (const labeledDescriptor of labeledFaceDescriptors) {
+                            if (labeledDescriptor && 
+                                labeledDescriptor.label && 
+                                labeledDescriptor.label !== validBestMatch.label && 
+                                labeledDescriptor.descriptors && 
+                                Array.isArray(labeledDescriptor.descriptors) && 
+                                labeledDescriptor.descriptors.length > 0) {
+                                
+                                // Calculate distance to all descriptors for this person and take the best (smallest) one
+                                for (const descriptor of labeledDescriptor.descriptors) {
+                                    if (descriptor && 
+                                        (descriptor instanceof Float32Array || Array.isArray(descriptor)) && 
+                                        descriptor.length > 0 && 
+                                        descriptor.length === d.descriptor.length) {
+                                        try {
+                                            const distance = faceapi.euclideanDistance(d.descriptor, descriptor);
+                                            if (!isNaN(distance) && isFinite(distance) && distance < secondBestDistance) {
+                                                secondBestDistance = distance;
+                                                secondBestMatch = {
+                                                    label: labeledDescriptor.label,
+                                                    distance: distance
+                                                };
+                                            }
+                                        } catch (err) {
+                                            // Skip if descriptor is invalid or calculation fails
+                                            console.warn('Error calculating distance for', labeledDescriptor.label, err);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Calculate confidence gap safely
+                        let confidenceGap = Infinity;
+                        if (secondBestMatch && 
+                            typeof secondBestMatch.distance === 'number' && 
+                            isFinite(secondBestMatch.distance) &&
+                            typeof validBestMatch.distance === 'number' && 
+                            isFinite(validBestMatch.distance)) {
+                            confidenceGap = secondBestMatch.distance - validBestMatch.distance;
+                        }
+                        
+                        // Return validated result
+                        return {
+                            label: validBestMatch.label,
+                            distance: validBestMatch.distance,
+                            secondBest: secondBestMatch,
+                            confidenceGap: confidenceGap
+                        };
+                    });
+                    
                     // Reuse existing context for better performance
                     const ctx2 = ctx; // Use same context instead of creating new one
                     // Optimize canvas clearing for low-end devices
@@ -9722,8 +9876,13 @@ function startVideoInterval(){
                         ctx2.strokeRect(mirroredX, box.y, box.width, box.height);
                         
                         // Label hasil (tidak terbalik)
+                        // Safely get label from result
+                        const resultLabel = (result && result.label) ? result.label : 'unknown';
+                        const resultDistance = (result && typeof result.distance === 'number' && isFinite(result.distance)) 
+                            ? result.distance.toFixed(2) 
+                            : '?';
                         const shouldAccept = shouldAcceptDetection(result, face);
-                        const label = `${result.toString()} ${shouldAccept ? '✓' : '?'}`;
+                        const label = `${resultLabel} (${resultDistance}) ${shouldAccept ? '✓' : '?'}`;
                         ctx2.font = '14px Inter, sans-serif';
                         ctx2.fillStyle = 'rgba(37, 99, 235, 0.9)';
                         const padding = 4;
@@ -10036,84 +10195,190 @@ let isProcessingQueue = false;
 let lastSuccessfulDetection = null;
 
 function shouldAcceptDetection(result, face) {
-    if (!result || result.label === 'unknown') return false;
+    // Comprehensive validation of result object
+    if (!result || typeof result !== 'object') {
+        console.warn('Invalid result: result is not an object', result);
+        return false;
+    }
+    
+    if (!result.label || result.label === 'unknown') {
+        return false;
+    }
+    
+    // Safe toFixed helper to prevent errors
+    const safeToFixed = (value, decimals = 3) => {
+        if (typeof value !== 'number' || isNaN(value) || !isFinite(value)) return 'N/A';
+        return value.toFixed(decimals);
+    };
+    
+    // Validate result.distance exists and is a valid number
+    if (typeof result.distance !== 'number' || isNaN(result.distance) || !isFinite(result.distance)) {
+        console.warn('Invalid result.distance:', result.distance, 'for label:', result.label);
+        return false;
+    }
+    
     // Skip if this label recently processed
     const lastTs = processedLabels.get(result.label) || 0;
     if (Date.now() - lastTs < processedCooldownMs) return false;
     
     const isMobile = isMobileDevice();
     
-    // ENHANCED: Use adjusted threshold based on device type (more lenient for mobile)
-    const adjustedThreshold = getAdjustedRecognitionThreshold();
-    if (result.distance > adjustedThreshold) {
-        console.log(`🚫 Distance ${result.distance.toFixed(3)} exceeds threshold ${adjustedThreshold.toFixed(3)} (device: ${isMobile ? 'mobile' : 'desktop'})`);
+    // ENHANCED: Adaptive threshold based on confidence gap and face quality
+    const baseThreshold = getAdjustedRecognitionThreshold();
+    const quality = assessFaceQuality(face);
+    
+    // Validate quality is a valid number
+    if (typeof quality !== 'number' || isNaN(quality) || !isFinite(quality)) {
+        console.warn('Invalid quality:', quality);
+        return false;
+    }
+    
+    // Calculate adaptive threshold based on confidence gap
+    // If confidence gap is large (best match is much better than second best), we can be more lenient
+    // If confidence gap is small (best and second best are close), we need to be stricter
+    const confidenceGap = (typeof result.confidenceGap === 'number' && isFinite(result.confidenceGap)) ? result.confidenceGap : 0;
+    let adaptiveThreshold = baseThreshold;
+    
+    if (confidenceGap > 0.15) {
+        // Large gap: best match is clearly better - can be more lenient (up to 0.05 more lenient)
+        adaptiveThreshold = Math.min(baseThreshold + 0.05, 0.60);
+    } else if (confidenceGap > 0.08) {
+        // Medium gap: slightly more lenient
+        adaptiveThreshold = Math.min(baseThreshold + 0.02, 0.55);
+    } else if (confidenceGap > 0.03) {
+        // Small gap: use base threshold
+        adaptiveThreshold = baseThreshold;
+    } else {
+        // Very small gap (< 0.03): be stricter to prevent false positive
+        adaptiveThreshold = Math.max(baseThreshold - 0.05, 0.30);
+    }
+    
+    // Adjust threshold based on face quality
+    // Higher quality = can be slightly more lenient, lower quality = need to be stricter
+    if (quality > 0.7) {
+        adaptiveThreshold = Math.min(adaptiveThreshold + 0.02, 0.60);
+    } else if (quality < 0.4) {
+        adaptiveThreshold = Math.max(adaptiveThreshold - 0.03, 0.30);
+    }
+    
+    // CRITICAL: Confidence gap validation to prevent false positive
+    // If second best match is too close to best match, reject to prevent misidentification
+    if (result.secondBest && confidenceGap < 0.05) {
+        // Confidence gap too small - best and second best are very close
+        // This is a red flag for potential false positive
+        const secondBestDistance = safeToFixed(result.secondBest?.distance);
+        const secondBestLabel = result.secondBest?.label || 'unknown';
+        console.log(`🚫 Confidence gap too small (${safeToFixed(confidenceGap)} < 0.05) - best: ${result.label} (${safeToFixed(result.distance)}), second: ${secondBestLabel} (${secondBestDistance})`);
+        return false;
+    }
+    
+    // Check distance against adaptive threshold
+    if (result.distance > adaptiveThreshold) {
+        console.log(`🚫 Distance ${safeToFixed(result.distance)} exceeds adaptive threshold ${safeToFixed(adaptiveThreshold)} (base: ${safeToFixed(baseThreshold)}, gap: ${safeToFixed(confidenceGap)}, quality: ${safeToFixed(quality)}, device: ${isMobile ? 'mobile' : 'desktop'})`);
         return false;
     }
     
     // SPECIAL CASE: For excellent distance (< 0.35), be very lenient with other checks
     // This is because excellent distance means very high confidence in face match
-    const isExcellentDistance = isMobile && result.distance < 0.35;
-    const isVeryGoodDistance = isMobile && result.distance < 0.45;
+    const isExcellentDistance = result.distance < 0.35;
+    const isVeryGoodDistance = result.distance < 0.45;
     
-    // Enhanced quality check with facial feature analysis (using adjusted threshold for mobile)
-    const quality = assessFaceQuality(face);
+    // Enhanced quality check with facial feature analysis
+    // Quality already calculated above, reuse it
     const adjustedQualityThreshold = getAdjustedQualityThreshold();
     
     // For mobile, use distance-based quality thresholds to maintain accuracy
+    // Also consider confidence gap - larger gap means we can be more lenient
     let effectiveQualityThreshold = adjustedQualityThreshold;
     if (isMobile) {
-        if (isExcellentDistance) {
-            // Excellent distance = very high confidence, allow very low quality
-            effectiveQualityThreshold = 0.10; // Very low threshold for excellent distance
+        if (isExcellentDistance && confidenceGap > 0.10) {
+            // Excellent distance + large gap = very high confidence, allow very low quality
+            effectiveQualityThreshold = 0.10;
+        } else if (isExcellentDistance) {
+            // Excellent distance but smaller gap - still allow low quality
+            effectiveQualityThreshold = 0.15;
+        } else if (isVeryGoodDistance && confidenceGap > 0.08) {
+            // Very good distance + medium gap = high confidence, allow low quality
+            effectiveQualityThreshold = 0.20;
         } else if (isVeryGoodDistance) {
-            // Very good distance = high confidence, allow low quality
-            effectiveQualityThreshold = 0.15; // Low threshold for very good distance
+            // Very good distance but smaller gap
+            effectiveQualityThreshold = 0.25;
+        } else if (result.distance < 0.50 && confidenceGap > 0.08) {
+            // Good distance + medium gap = moderate confidence, allow moderate quality
+            effectiveQualityThreshold = 0.30;
         } else if (result.distance < 0.50) {
-            // Good distance = moderate confidence, allow moderate quality
-            effectiveQualityThreshold = 0.25; // Moderate threshold
+            effectiveQualityThreshold = 0.35;
+        }
+    } else {
+        // Desktop: stricter but still consider confidence gap
+        if (isExcellentDistance && confidenceGap > 0.10) {
+            effectiveQualityThreshold = 0.20;
+        } else if (isExcellentDistance) {
+            effectiveQualityThreshold = 0.30;
+        } else if (isVeryGoodDistance && confidenceGap > 0.08) {
+            effectiveQualityThreshold = 0.35;
         }
     }
     
     if (quality < effectiveQualityThreshold) {
-        // For excellent distance, allow much lower quality threshold
-        if (isExcellentDistance && quality > 0.08) {
-            console.log(`⚠️ Quality ${quality.toFixed(3)} below standard threshold ${adjustedQualityThreshold.toFixed(3)}, but allowing due to excellent distance < 0.35 (mobile, effective threshold: ${effectiveQualityThreshold.toFixed(3)})`);
-        } else if (isVeryGoodDistance && quality > 0.12) {
-            console.log(`⚠️ Quality ${quality.toFixed(3)} below standard threshold ${adjustedQualityThreshold.toFixed(3)}, but allowing due to very good distance < 0.45 (mobile, effective threshold: ${effectiveQualityThreshold.toFixed(3)})`);
-        } else if (isMobile && result.distance < 0.50 && quality > 0.20) {
-            console.log(`⚠️ Quality ${quality.toFixed(3)} below standard threshold ${adjustedQualityThreshold.toFixed(3)}, but allowing due to good distance < 0.50 (mobile, effective threshold: ${effectiveQualityThreshold.toFixed(3)})`);
+        // For excellent distance with large gap, allow much lower quality threshold
+        if (isExcellentDistance && confidenceGap > 0.10 && quality > 0.08) {
+            console.log(`⚠️ Quality ${safeToFixed(quality)} below standard threshold ${safeToFixed(adjustedQualityThreshold)}, but allowing due to excellent distance < 0.35 and large gap ${safeToFixed(confidenceGap)} (effective threshold: ${safeToFixed(effectiveQualityThreshold)})`);
+        } else if (isExcellentDistance && quality > 0.12) {
+            console.log(`⚠️ Quality ${safeToFixed(quality)} below standard threshold ${safeToFixed(adjustedQualityThreshold)}, but allowing due to excellent distance < 0.35 (effective threshold: ${safeToFixed(effectiveQualityThreshold)})`);
+        } else if (isVeryGoodDistance && confidenceGap > 0.08 && quality > 0.15) {
+            console.log(`⚠️ Quality ${safeToFixed(quality)} below standard threshold ${safeToFixed(adjustedQualityThreshold)}, but allowing due to very good distance < 0.45 and medium gap ${safeToFixed(confidenceGap)} (effective threshold: ${safeToFixed(effectiveQualityThreshold)})`);
+        } else if (isMobile && result.distance < 0.50 && confidenceGap > 0.08 && quality > 0.25) {
+            console.log(`⚠️ Quality ${safeToFixed(quality)} below standard threshold ${safeToFixed(adjustedQualityThreshold)}, but allowing due to good distance < 0.50 and medium gap (mobile, effective threshold: ${safeToFixed(effectiveQualityThreshold)})`);
         } else {
-            console.log(`🚫 Quality ${quality.toFixed(3)} below threshold ${effectiveQualityThreshold.toFixed(3)} (device: ${isMobile ? 'mobile' : 'desktop'}, distance: ${result.distance.toFixed(3)})`);
+            console.log(`🚫 Quality ${safeToFixed(quality)} below threshold ${safeToFixed(effectiveQualityThreshold)} (device: ${isMobile ? 'mobile' : 'desktop'}, distance: ${safeToFixed(result.distance)}, gap: ${safeToFixed(confidenceGap)})`);
             return false;
         }
     }
     
-    // ENHANCED: Facial feature consistency check (using adjusted threshold for mobile)
+    // ENHANCED: Facial feature consistency check with confidence gap consideration
     // More lenient for mobile - skip if landmarks not available
     if (face.landmarks) {
         const landmarkScore = assessEnhancedLandmarkQuality(face.landmarks);
         const adjustedLandmarkThreshold = getAdjustedLandmarkThreshold();
         
-        // For mobile, adjust landmark threshold based on distance
+        // Adjust landmark threshold based on distance AND confidence gap
         let effectiveLandmarkThreshold = adjustedLandmarkThreshold;
         if (isMobile) {
-            if (isExcellentDistance) {
-                effectiveLandmarkThreshold = 0.30; // Very low for excellent distance
+            if (isExcellentDistance && confidenceGap > 0.10) {
+                effectiveLandmarkThreshold = 0.25; // Very low for excellent distance + large gap
+            } else if (isExcellentDistance) {
+                effectiveLandmarkThreshold = 0.30; // Low for excellent distance
+            } else if (isVeryGoodDistance && confidenceGap > 0.08) {
+                effectiveLandmarkThreshold = 0.35; // Low for very good distance + medium gap
             } else if (isVeryGoodDistance) {
-                effectiveLandmarkThreshold = 0.35; // Low for very good distance
+                effectiveLandmarkThreshold = 0.40; // Moderate for very good distance
+            } else if (result.distance < 0.50 && confidenceGap > 0.08) {
+                effectiveLandmarkThreshold = 0.40; // Moderate for good distance + medium gap
+            }
+        } else {
+            // Desktop: stricter but still consider confidence gap
+            if (isExcellentDistance && confidenceGap > 0.10) {
+                effectiveLandmarkThreshold = 0.35;
+            } else if (isExcellentDistance) {
+                effectiveLandmarkThreshold = 0.40;
+            } else if (isVeryGoodDistance && confidenceGap > 0.08) {
+                effectiveLandmarkThreshold = 0.45;
             }
         }
         
         if (landmarkScore < effectiveLandmarkThreshold) {
-            // For excellent distance, allow much lower landmark score
-            if (isExcellentDistance && landmarkScore > 0.25) {
-                console.log(`⚠️ Landmark score ${landmarkScore.toFixed(3)} below standard threshold ${adjustedLandmarkThreshold.toFixed(3)}, but allowing due to excellent distance < 0.35 (mobile, effective threshold: ${effectiveLandmarkThreshold.toFixed(3)})`);
-            } else if (isVeryGoodDistance && landmarkScore > 0.30) {
-                console.log(`⚠️ Landmark score ${landmarkScore.toFixed(3)} below standard threshold ${adjustedLandmarkThreshold.toFixed(3)}, but allowing due to very good distance < 0.45 (mobile, effective threshold: ${effectiveLandmarkThreshold.toFixed(3)})`);
-            } else if (isMobile && result.distance < 0.50 && quality > 0.25) {
-                console.log(`⚠️ Landmark score ${landmarkScore.toFixed(3)} below standard threshold ${adjustedLandmarkThreshold.toFixed(3)}, but allowing due to good distance/quality (mobile)`);
+            // For excellent distance with large gap, allow much lower landmark score
+            if (isExcellentDistance && confidenceGap > 0.10 && landmarkScore > 0.20) {
+                console.log(`⚠️ Landmark score ${safeToFixed(landmarkScore)} below standard threshold ${safeToFixed(adjustedLandmarkThreshold)}, but allowing due to excellent distance < 0.35 and large gap ${safeToFixed(confidenceGap)} (effective threshold: ${safeToFixed(effectiveLandmarkThreshold)})`);
+            } else if (isExcellentDistance && landmarkScore > 0.25) {
+                console.log(`⚠️ Landmark score ${safeToFixed(landmarkScore)} below standard threshold ${safeToFixed(adjustedLandmarkThreshold)}, but allowing due to excellent distance < 0.35 (effective threshold: ${safeToFixed(effectiveLandmarkThreshold)})`);
+            } else if (isVeryGoodDistance && confidenceGap > 0.08 && landmarkScore > 0.30) {
+                console.log(`⚠️ Landmark score ${safeToFixed(landmarkScore)} below standard threshold ${safeToFixed(adjustedLandmarkThreshold)}, but allowing due to very good distance < 0.45 and medium gap ${safeToFixed(confidenceGap)} (effective threshold: ${safeToFixed(effectiveLandmarkThreshold)})`);
+            } else if (isMobile && result.distance < 0.50 && confidenceGap > 0.08 && quality > 0.25 && landmarkScore > 0.35) {
+                console.log(`⚠️ Landmark score ${safeToFixed(landmarkScore)} below standard threshold ${safeToFixed(adjustedLandmarkThreshold)}, but allowing due to good distance/quality/gap (mobile)`);
             } else {
-                console.log(`🚫 Landmark score ${landmarkScore.toFixed(3)} below threshold ${effectiveLandmarkThreshold.toFixed(3)} (device: ${isMobile ? 'mobile' : 'desktop'}, distance: ${result.distance.toFixed(3)})`);
+                console.log(`🚫 Landmark score ${safeToFixed(landmarkScore)} below threshold ${safeToFixed(effectiveLandmarkThreshold)} (device: ${isMobile ? 'mobile' : 'desktop'}, distance: ${safeToFixed(result.distance)}, gap: ${safeToFixed(confidenceGap)})`);
                 return false;
             }
         }
@@ -10132,7 +10397,7 @@ function shouldAcceptDetection(result, face) {
             } else if (isMobile && result.distance < 0.50 && quality > 0.30) {
                 console.log(`⚠️ Gender validation failed for ${result.label}, but allowing due to good distance/quality (mobile)`);
             } else {
-                console.log(`🚫 Gender validation failed for ${result.label} (distance: ${result.distance.toFixed(3)}, quality: ${quality.toFixed(3)})`);
+                console.log(`🚫 Gender validation failed for ${result.label} (distance: ${safeToFixed(result.distance)}, quality: ${safeToFixed(quality)})`);
                 return false;
             }
         }
@@ -10144,10 +10409,13 @@ function shouldAcceptDetection(result, face) {
         console.log(`✅ Excellent distance < 0.35 detected, using lenient multi-attempt validation for mobile`);
         // Still do basic validation but much more lenient
         const validationScore = performMultiAttemptValidation(result, face, isMobile);
-        // For excellent distance, only reject if validation score is extremely low
-        if (validationScore < 0.20) {
-            console.log(`🚫 Multi-attempt validation score ${validationScore.toFixed(3)} extremely low (< 0.20), rejecting despite excellent distance`);
-            return false;
+        // Validate validationScore is a number
+        if (typeof validationScore === 'number' && isFinite(validationScore)) {
+            // For excellent distance, only reject if validation score is extremely low
+            if (validationScore < 0.20) {
+                console.log(`🚫 Multi-attempt validation score ${safeToFixed(validationScore)} extremely low (< 0.20), rejecting despite excellent distance`);
+                return false;
+            }
         }
     } else if (detectionConfig.multiAttemptValidation && detectionConfig.strictMode) {
         // For mobile, skip strict mode if distance and quality are good enough
@@ -10155,18 +10423,21 @@ function shouldAcceptDetection(result, face) {
         
         if (shouldSkipStrictMode || detectionConfig.strictMode) {
             const validationScore = performMultiAttemptValidation(result, face, isMobile);
-            // Much more lenient minimum score for mobile devices
-            const minValidationScore = isMobile ? 0.30 : 0.5; // Lowered from 0.35 to 0.30 for mobile
-            if (validationScore < minValidationScore) {
-                // For mobile, allow if distance is very good even if validation score is slightly lower
-                if (isMobile && result.distance < 0.40 && quality > 0.25) {
-                    console.log(`⚠️ Multi-attempt validation score ${validationScore.toFixed(3)} below threshold ${minValidationScore}, but allowing due to excellent distance/quality (mobile)`);
-                } else if (isMobile && result.distance < 0.45 && quality > 0.20 && validationScore >= 0.25) {
-                    // Additional fallback for mobile - allow if score is close to threshold
-                    console.log(`⚠️ Multi-attempt validation score ${validationScore.toFixed(3)} below threshold ${minValidationScore}, but allowing due to good distance/quality (mobile, lenient mode)`);
-                } else {
-                    console.log(`🚫 Multi-attempt validation failed for ${result.label} (score: ${validationScore.toFixed(3)}, min: ${minValidationScore}, device: ${isMobile ? 'mobile' : 'desktop'})`);
-                    return false;
+            // Validate validationScore is a number
+            if (typeof validationScore === 'number' && isFinite(validationScore)) {
+                // Much more lenient minimum score for mobile devices
+                const minValidationScore = isMobile ? 0.30 : 0.5; // Lowered from 0.35 to 0.30 for mobile
+                if (validationScore < minValidationScore) {
+                    // For mobile, allow if distance is very good even if validation score is slightly lower
+                    if (isMobile && result.distance < 0.40 && quality > 0.25) {
+                        console.log(`⚠️ Multi-attempt validation score ${safeToFixed(validationScore)} below threshold ${minValidationScore}, but allowing due to excellent distance/quality (mobile)`);
+                    } else if (isMobile && result.distance < 0.45 && quality > 0.20 && validationScore >= 0.25) {
+                        // Additional fallback for mobile - allow if score is close to threshold
+                        console.log(`⚠️ Multi-attempt validation score ${safeToFixed(validationScore)} below threshold ${minValidationScore}, but allowing due to good distance/quality (mobile, lenient mode)`);
+                    } else {
+                        console.log(`🚫 Multi-attempt validation failed for ${result.label} (score: ${safeToFixed(validationScore)}, min: ${minValidationScore}, device: ${isMobile ? 'mobile' : 'desktop'})`);
+                        return false;
+                    }
                 }
             }
         }
@@ -10175,8 +10446,23 @@ function shouldAcceptDetection(result, face) {
     // Check if this person is already being processed
     if (isProcessingRecognition) return false;
     
-    // ENHANCED: Log successful detection for debugging
-    console.log(`✅ Valid detection: ${result.label} (distance: ${result.distance.toFixed(3)}, quality: ${quality.toFixed(3)}, threshold: ${adjustedThreshold.toFixed(3)}, device: ${isMobile ? 'mobile' : 'desktop'}, excellent: ${isExcellentDistance ? 'YES' : 'NO'})`);
+    // ENHANCED: Additional confidence gap validation for edge cases
+    // Even if gap > 0.05, if gap is small and distance is borderline, be cautious
+    if (result.secondBest && confidenceGap < 0.10 && result.distance > (adaptiveThreshold * 0.85)) {
+        // Gap is small-medium and distance is close to threshold
+        // Require higher quality or better distance for acceptance
+        if (quality < 0.5 && result.distance > (adaptiveThreshold * 0.90)) {
+            console.log(`🚫 Borderline detection rejected: distance ${safeToFixed(result.distance)} close to threshold ${safeToFixed(adaptiveThreshold)} with small gap ${safeToFixed(confidenceGap)} and low quality ${safeToFixed(quality)}`);
+            return false;
+        }
+    }
+    
+    // ENHANCED: Log successful detection with confidence gap info
+    const secondBestInfo = result.secondBest 
+        ? `${result.secondBest.label || 'unknown'} ${safeToFixed(result.secondBest.distance)}`
+        : 'N/A';
+    const gapInfo = result.secondBest ? `gap: ${safeToFixed(confidenceGap)} (2nd: ${secondBestInfo})` : 'gap: N/A';
+    console.log(`✅ Valid detection: ${result.label} (distance: ${safeToFixed(result.distance)}, ${gapInfo}, quality: ${safeToFixed(quality)}, adaptive threshold: ${safeToFixed(adaptiveThreshold)}, base: ${safeToFixed(baseThreshold)}, device: ${isMobile ? 'mobile' : 'desktop'}, excellent: ${isExcellentDistance ? 'YES' : 'NO'})`);
     console.log(`🎯 Processing attendance for: ${result.label}`);
     
     // INSTANT RECOGNITION: Process immediately on first valid detection
@@ -10478,9 +10764,9 @@ async function handleRecognition(nim, topExpression){
                     resolve(null);
                 }, 
                 { 
-                    enableHighAccuracy: true, 
-                    timeout: 5000, // Reduced to 5 seconds for faster response
-                    maximumAge: 60000 // Allow 1 minute cache for speed
+                    enableHighAccuracy: false, // Set to false for faster response on old devices
+                    timeout: 4000, // Reduced to 4 seconds for faster response
+                    maximumAge: 30000 // Allow 30 second cache for speed (reduced from 60s)
                 }
             );
         })
@@ -10651,24 +10937,43 @@ async function handleRecognition(nim, topExpression){
             window.__publicIp = publicIp;
         }
         
-        // OPTIMIZED: Get location string with shorter timeout for better performance
-        // Use coordinates as fallback if location string takes too long
+        // Get location string with reasonable timeout to ensure we get full address
+        // User needs to see full address, not just coordinates
         try {
             lokasi = await Promise.race([
                 locationPromise,
                 new Promise(resolve => setTimeout(() => {
-                    // Fallback to coordinates if timeout (reduced timeout for faster response)
-                    resolve(`Lokasi: ${lat.toFixed(6)}, ${lng.toFixed(6)}`);
-                }, 500)) // Reduced from 1000ms to 500ms for faster response
+                    // Fallback to coordinates only if timeout (increased timeout for better address retrieval)
+                    resolve(`Koordinat: ${lat.toFixed(6)}, ${lng.toFixed(6)}`);
+                }, 3000)) // Increased to 3 seconds to allow reverse geocoding to complete
             ]);
+            
+            // If we got coordinates as fallback, try one more time with longer timeout
+            if (lokasi && lokasi.startsWith('Koordinat:')) {
+                console.log('First attempt returned coordinates, retrying with longer timeout...');
+                try {
+                    const retryLokasi = await Promise.race([
+                        getStreetNameFromCoordinates(lat, lng),
+                        new Promise(resolve => setTimeout(() => {
+                            resolve(`Koordinat: ${lat.toFixed(6)}, ${lng.toFixed(6)}`);
+                        }, 4000)) // Even longer timeout for retry
+                    ]);
+                    if (retryLokasi && !retryLokasi.startsWith('Koordinat:')) {
+                        lokasi = retryLokasi; // Use the address if we got it
+                    }
+                } catch (retryError) {
+                    console.warn('Retry reverse geocoding failed:', retryError);
+                }
+            }
         } catch (e) {
             // Fallback to coordinates on error
-            lokasi = `Lokasi: ${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+            console.warn('Error getting location string:', e);
+            lokasi = `Koordinat: ${lat.toFixed(6)}, ${lng.toFixed(6)}`;
         }
         
         // Ensure lokasi is never empty
         if (!lokasi || lokasi.trim() === '') {
-            lokasi = `Lokasi: ${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+            lokasi = `Koordinat: ${lat.toFixed(6)}, ${lng.toFixed(6)}`;
         }
         
         // Store attendance data for potential WFA retry
@@ -10684,11 +10989,155 @@ async function handleRecognition(nim, topExpression){
         };
         window.pendingAttendanceData = attendanceData;
         
-        // Show location confirmation modal before submitting
-        const confirmed = await showLocationConfirmation(lokasi, lat, lng);
-        if (!confirmed) {
+        // Recheck location function - called when user clicks "Tidak" on location confirmation
+        const recheckLocation = async () => {
+            return new Promise((resolve) => {
+                // Re-fetch GPS location
+                if (!navigator.geolocation) {
+                    resolve(null);
+                    return;
+                }
+                
+                navigator.geolocation.getCurrentPosition(
+                    async (pos) => {
+                        const newLat = pos.coords.latitude;
+                        const newLng = pos.coords.longitude;
+                        
+                        // Validate coordinates
+                        if (isNaN(newLat) || isNaN(newLng) || newLat === 0 || newLng === 0) {
+                            resolve(null);
+                            return;
+                        }
+                        
+                        // Get new location string with enhanced reverse geocoding
+                        // Since user clicked "Periksa Ulang", they're willing to wait for accurate address
+                        let newLokasi = '';
+                        let retryCount = 0;
+                        const maxRetries = 3;
+                        
+                        // Try to get address with retries and longer timeout
+                        while (retryCount < maxRetries && (!newLokasi || newLokasi.startsWith('Koordinat:'))) {
+                            try {
+                                // Use longer timeout for recheck (user is willing to wait)
+                                const controller = new AbortController();
+                                const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout for recheck
+                                
+                                const response = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${newLat}&lon=${newLng}&addressdetails=1&accept-language=id&zoom=18`, {
+                                    signal: controller.signal
+                                });
+                                clearTimeout(timeoutId);
+                                
+                                if (response && response.ok) {
+                                    const data = await response.json();
+                                    
+                                    if (data && data.address) {
+                                        const address = data.address;
+                                        const parts = [];
+                                        
+                                        // 1. Building name or house name (most specific)
+                                        if (address.building) parts.push(address.building);
+                                        else if (address.house_name) parts.push(address.house_name);
+                                        
+                                        // 2. Road/Street with house number if available
+                                        const roadParts = [];
+                                        if (address.house_number) roadParts.push(address.house_number);
+                                        if (address.road) roadParts.push(address.road);
+                                        else if (address.pedestrian) roadParts.push(address.pedestrian);
+                                        else if (address.footway) roadParts.push(address.footway);
+                                        if (roadParts.length > 0) {
+                                            parts.push('Jl. ' + roadParts.join(' '));
+                                        }
+                                        
+                                        // 3. Suburb/Neighbourhood
+                                        if (address.suburb) parts.push(address.suburb);
+                                        else if (address.neighbourhood) parts.push(address.neighbourhood);
+                                        
+                                        // 4. City/Town/Village
+                                        if (address.city) parts.push(address.city);
+                                        else if (address.town) parts.push(address.town);
+                                        else if (address.village) parts.push(address.village);
+                                        
+                                        // 5. State/Province
+                                        if (address.state) parts.push(address.state);
+                                        
+                                        // 6. Postal code
+                                        if (address.postcode) parts.push(address.postcode);
+                                        
+                                        if (parts.length > 0) {
+                                            newLokasi = parts.join(', ');
+                                            break; // Success, exit retry loop
+                                        }
+                                        
+                                        // Fallback to display_name
+                                        if (data.display_name) {
+                                            let cleanName = data.display_name.replace(/, Indonesia$/, '');
+                                            if (address.postcode) {
+                                                cleanName += ', ' + address.postcode;
+                                            }
+                                            newLokasi = cleanName;
+                                            break; // Success, exit retry loop
+                                        }
+                                    }
+                                    
+                                    // If address parsing failed but display_name exists, use it
+                                    if (data && data.display_name && !newLokasi) {
+                                        newLokasi = data.display_name.replace(/, Indonesia$/, '');
+                                        break; // Success, exit retry loop
+                                    }
+                                }
+                            } catch (e) {
+                                console.warn(`Reverse geocoding attempt ${retryCount + 1} failed:`, e);
+                                retryCount++;
+                                if (retryCount < maxRetries) {
+                                    // Wait a bit before retry
+                                    await new Promise(resolve => setTimeout(resolve, 1000));
+                                }
+                            }
+                        }
+                        
+                        // If still no address after retries, use coordinates as last resort
+                        if (!newLokasi || newLokasi.startsWith('Koordinat:')) {
+                            newLokasi = `Koordinat: ${newLat.toFixed(6)}, ${newLng.toFixed(6)}`;
+                        }
+                        
+                        // Update attendance data with new location
+                        attendanceData.lat = newLat;
+                        attendanceData.lng = newLng;
+                        attendanceData.lokasi = newLokasi;
+                        window.pendingAttendanceData = attendanceData;
+                        
+                        resolve({ lokasi: newLokasi, lat: newLat, lng: newLng });
+                    },
+                    (err) => {
+                        console.warn('Geolocation recheck error:', err);
+                        resolve(null);
+                    },
+                    {
+                        enableHighAccuracy: true, // Use high accuracy for recheck
+                        timeout: 6000, // Longer timeout for recheck
+                        maximumAge: 0 // Force fresh location
+                    }
+                );
+            });
+        };
+        
+        // Show location confirmation modal before submitting - with recheck capability
+        const locationResult = await showLocationConfirmation(lokasi, lat, lng, recheckLocation);
+        if (!locationResult || !locationResult.confirmed) {
+            // User cancelled
             isProcessingRecognition = false;
-            return; // User cancelled
+            return;
+        }
+        
+        // Update with confirmed location (may have been rechecked)
+        if (locationResult.lokasi && locationResult.lat && locationResult.lng) {
+            lat = locationResult.lat;
+            lng = locationResult.lng;
+            lokasi = locationResult.lokasi;
+            attendanceData.lat = lat;
+            attendanceData.lng = lng;
+            attendanceData.lokasi = lokasi;
+            window.pendingAttendanceData = attendanceData;
         }
         
         // FAST: Submit after confirmation - location is guaranteed to be set
