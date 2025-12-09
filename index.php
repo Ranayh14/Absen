@@ -177,7 +177,8 @@ function ensureSchema(PDO $pdo): void {
         'lokasi_overtime' => "ALTER TABLE attendance ADD COLUMN lokasi_overtime VARCHAR(255) NULL AFTER alasan_overtime",
         'alasan_izin_sakit' => "ALTER TABLE attendance ADD COLUMN alasan_izin_sakit TEXT NULL AFTER lokasi_overtime",
         'bukti_izin_sakit' => "ALTER TABLE attendance ADD COLUMN bukti_izin_sakit LONGTEXT NULL AFTER alasan_izin_sakit",
-        'daily_report_id' => "ALTER TABLE attendance ADD COLUMN daily_report_id INT NULL AFTER ket"
+        'daily_report_id' => "ALTER TABLE attendance ADD COLUMN daily_report_id INT NULL AFTER ket",
+        'alasan_pulang_awal' => "ALTER TABLE attendance ADD COLUMN alasan_pulang_awal TEXT NULL AFTER bukti_izin_sakit"
     ];
     
             // Add FaceNet embedding columns to users table
@@ -1734,10 +1735,29 @@ function calculateKPIForEmployee(PDO $pdo, $userId, $periodStart = null, $period
         ]);
         $overtimeRecords = $stmt->fetchAll();
         
+        // Get daily reports for the period
+        $dailyReportsStmt = $pdo->prepare("
+            SELECT report_date 
+            FROM daily_reports 
+            WHERE user_id = :user_id 
+            AND report_date BETWEEN :period_start AND :period_end
+        ");
+        $dailyReportsStmt->execute([
+            'user_id' => $userId,
+            'period_start' => $periodStart,
+            'period_end' => $periodEnd
+        ]);
+        $dailyReportsRecords = $dailyReportsStmt->fetchAll();
+        
         // Create maps for quick lookup
         $attendanceMap = [];
         foreach ($attendanceRecords as $record) {
             $attendanceMap[$record['attendance_date']] = $record;
+        }
+        
+        $dailyReportsMap = [];
+        foreach ($dailyReportsRecords as $record) {
+            $dailyReportsMap[$record['report_date']] = true;
         }
         
         $izinDates = [];
@@ -1770,6 +1790,8 @@ function calculateKPIForEmployee(PDO $pdo, $userId, $periodStart = null, $period
         $overtimeCount = 0;
         $actualWorkingDays = 0; // Count actual working days for this employee (only past dates)
         $totalWorkingDaysInPeriod = 0; // Count all working days in period for this employee
+        $missingDailyReportsCount = 0; // Count days with attendance but no daily report
+        $daysWithoutReport = []; // Store dates that need daily report penalty
         
         // Process each working day
         foreach ($workingDays as $date) {
@@ -1799,6 +1821,16 @@ function calculateKPIForEmployee(PDO $pdo, $userId, $periodStart = null, $period
                     $izinSakitCount++;
                     error_log("KPI Debug - User $userId: Found izin/sakit on $dateStr, count now: $izinSakitCount");
                 } else if ($attendanceRecord) {
+                    // Check if daily report exists for this date
+                    $hasDailyReport = isset($dailyReportsMap[$dateStr]);
+                    
+                    // If attendance exists but no daily report, mark for penalty
+                    if (!$hasDailyReport && ($attendanceRecord['ket'] === 'wfo' || $attendanceRecord['ket'] === 'wfa')) {
+                        $missingDailyReportsCount++;
+                        $daysWithoutReport[] = $dateStr;
+                        error_log("KPI Debug - User $userId: Missing daily report on $dateStr");
+                    }
+                    
                     // Check attendance status (only WFO, WFA, Overtime)
                     if ($attendanceRecord['status'] === 'ontime') {
                         $ontimeCount++;
@@ -1912,6 +1944,32 @@ function calculateKPIForEmployee(PDO $pdo, $userId, $periodStart = null, $period
         $overtimeScoreTotal = $overtimeCount * $overtimeBonus;
         $kpiScore += $overtimeScoreTotal;
         error_log("KPI Debug - User $userId: Overtime score: $overtimeScoreTotal (count: $overtimeCount, per occurrence: $overtimeBonus)");
+        
+        // Apply daily report penalty: reduce 50% per day without report
+        // This penalty is applied per day, not from total score
+        $dailyReportPenalty = 0;
+        if (isset($daysWithoutReport) && is_array($daysWithoutReport)) {
+            foreach ($daysWithoutReport as $dateWithoutReport) {
+                // Find the score for that day
+                $dayScore = 0;
+                if (isset($attendanceMap[$dateWithoutReport])) {
+                    $dayRecord = $attendanceMap[$dateWithoutReport];
+                    if ($dayRecord['status'] === 'ontime') {
+                        $dayScore = 100;
+                    } else {
+                        // Late: 100 - minutes late
+                        $lateMinutes = (int)$dayRecord['late_minutes'];
+                        $dayScore = max(0, 100 - $lateMinutes);
+                    }
+                }
+                // Reduce 50% of that day's score
+                $penaltyForDay = $dayScore * 0.5;
+                $dailyReportPenalty += $penaltyForDay;
+                error_log("KPI Debug - User $userId: Daily report penalty for $dateWithoutReport: $penaltyForDay (day score: $dayScore)");
+            }
+        }
+        $kpiScore -= $dailyReportPenalty;
+        error_log("KPI Debug - User $userId: Total daily report penalty: $dailyReportPenalty, score after penalty: $kpiScore");
 
         // Calculate average based on days with actual data
         error_log("KPI Debug - User $userId: Total score before division: $kpiScore, Divided by: $actualDaysForKPI");
@@ -1939,6 +1997,7 @@ function calculateKPIForEmployee(PDO $pdo, $userId, $periodStart = null, $period
             'izin_sakit_count' => $izinSakitCount,
             'alpha_count' => $alphaCount,
             'overtime_count' => $overtimeCount,
+            'missing_daily_reports_count' => $missingDailyReportsCount,
             'total_late_minutes' => $totalLateMinutes,
             'kpi_score' => round($kpiScore, 2),
             'status' => $status,
@@ -2277,7 +2336,7 @@ if (isset($_GET['ajax'])) {
     }
 
     // Must be authenticated for all endpoints except auth-related and public landing scan
-    if (!in_array($action, ['login', 'register', 'get_members', 'save_attendance', 'get_today_attendance', 'forgot_password', 'verify_otp', 'reset_password', 'get_ga_qr'], true)) {
+    if (!in_array($action, ['login', 'register', 'get_members', 'save_attendance', 'get_today_attendance', 'forgot_password', 'verify_otp', 'reset_password', 'get_ga_qr', 'get_public_daily_report_stats'], true)) {
         if (!isset($_SESSION['user'])) jsonResponse(['error' => 'Unauthorized'], 401);
     }
     // Admin manual holidays CRUD
@@ -3417,12 +3476,7 @@ if (isset($_GET['ajax'])) {
         } else {
             // Check if within check-out time window using settings
             $minCheckoutHour = (int)getSetting($pdo, 'min_checkout_hour', '17');
-            if ($currentHour < $minCheckoutHour) {
-                $firstName = getFirstName($u['nama']);
-                $statusText = "Hei {$firstName}, Jangan kabur! ini masih jam kerja";
-                jsonResponse(['ok' => false, 'message' => $statusText, 'statusClass' => 'bg-red-100 text-red-700']);
-            }
-    
+            
             // Check if checked in today and not yet checked out
             $todayCheck = $pdo->prepare("SELECT * FROM attendance WHERE user_id=:uid AND DATE(jam_masuk_iso)=:today AND jam_pulang_iso IS NULL ORDER BY jam_masuk_iso DESC LIMIT 1");
             $todayCheck->execute([':uid' => $u['id'], ':today' => $today]);
@@ -3432,6 +3486,17 @@ if (isset($_GET['ajax'])) {
                 $statusText = "Anda belum melakukan presensi masuk hari ini atau sudah pulang.";
                 jsonResponse(['ok' => false, 'message' => $statusText, 'statusClass' => 'bg-yellow-100 text-yellow-700']);
             } else {
+                // Check if pulang sebelum jam yang diizinkan
+                if ($currentHour < $minCheckoutHour) {
+                    // Minta alasan pulang awal
+                    $alasanPulangAwal = $_POST['alasan_pulang_awal'] ?? $_POST['early_leave_reason'] ?? null;
+                    if (!$alasanPulangAwal) {
+                        $firstName = getFirstName($u['nama']);
+                        $statusText = "Anda pulang sebelum jam {$minCheckoutHour}:00. Harap isi alasan pulang awal.";
+                        jsonResponse(['ok' => false, 'need_early_leave_reason' => true, 'message' => $statusText, 'statusClass' => 'bg-orange-100 text-orange-700']);
+                    }
+                }
+                
                 $lat = isset($_POST['lat']) ? (float)$_POST['lat'] : null;
                 $lng = isset($_POST['lng']) ? (float)$_POST['lng'] : null;
                 $lokasi = $_POST['lokasi'] ?? null;
@@ -3462,8 +3527,11 @@ if (isset($_GET['ajax'])) {
                     }
                 }
                 
-                $upd = $pdo->prepare("UPDATE attendance SET jam_pulang=:jam, jam_pulang_iso=:iso, ekspresi_pulang=:exp, screenshot_pulang=:screenshot, lokasi_pulang=:lokasi, lat_pulang=:lat, lng_pulang=:lng WHERE id=:id");
-                $upd->execute([':jam' => $jamSekarang, ':iso' => $iso, ':exp' => $ekspresi, ':screenshot' => $screenshot, ':lokasi' => $lokasi, ':lat' => $lat, ':lng' => $lng, ':id' => $todayRow['id']]);
+                // Get alasan pulang awal if provided
+                $alasanPulangAwal = $_POST['alasan_pulang_awal'] ?? $_POST['early_leave_reason'] ?? null;
+                
+                $upd = $pdo->prepare("UPDATE attendance SET jam_pulang=:jam, jam_pulang_iso=:iso, ekspresi_pulang=:exp, screenshot_pulang=:screenshot, lokasi_pulang=:lokasi, lat_pulang=:lat, lng_pulang=:lng, alasan_pulang_awal=:alasan WHERE id=:id");
+                $upd->execute([':jam' => $jamSekarang, ':iso' => $iso, ':exp' => $ekspresi, ':screenshot' => $screenshot, ':lokasi' => $lokasi, ':lat' => $lat, ':lng' => $lng, ':alasan' => $alasanPulangAwal, ':id' => $todayRow['id']]);
                 
                 // Trigger backup setelah presensi pulang
                 triggerDatabaseBackup();
@@ -5077,16 +5145,9 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         if (!isAdmin()) jsonResponse(['error'=>'Forbidden'],403);
         
         $today = date('Y-m-d');
-        // Use earliest employee registration date as period start
-        $periodStart = getEarliestEmployeeRegistrationDate($pdo);
-        $periodEnd = getSetting($pdo, 'attendance_period_end', '');
-        if ($periodStart && $periodEnd) {
-            $monthStart = $periodStart;
-            $monthEnd = $periodEnd;
-        } else {
-            $monthStart = date('Y-m-01');
-            $monthEnd = date('Y-m-t');
-        }
+        // For monthly performance, always use current month only (not entire period)
+        $monthStart = date('Y-m-01');
+        $monthEnd = date('Y-m-t');
         
         // Get today's late employees
         $todayLateStmt = $pdo->prepare("
@@ -5100,23 +5161,29 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         $todayLateStmt->execute([':today' => $today]);
         $todayLate = $todayLateStmt->fetchAll();
         
-        // Get monthly attendance statistics
+        // Get monthly attendance statistics for current month only
+        // Only count actual attendance records (ontime/terlambat) within current month
+        // Count distinct dates to match KPI calculation logic (one count per day)
+        // Also calculate average time for sorting when counts are equal
         $monthlyStatsStmt = $pdo->prepare("
             SELECT 
                 u.id,
                 u.nama,
                 u.foto_base64,
-                COUNT(CASE WHEN a.status = 'terlambat' THEN 1 END) as late_count,
-                COUNT(CASE WHEN a.status = 'ontime' THEN 1 END) as ontime_count,
-                COUNT(CASE WHEN a.ket = 'wfo' OR a.ket = 'wfa' THEN 1 END) as present_count,
-                COUNT(*) as total_days
+                COUNT(DISTINCT CASE WHEN a.status = 'terlambat' THEN DATE(a.jam_masuk_iso) END) as late_count,
+                COUNT(DISTINCT CASE WHEN a.status = 'ontime' THEN DATE(a.jam_masuk_iso) END) as ontime_count,
+                COUNT(DISTINCT CASE WHEN a.id IS NOT NULL AND (a.ket = 'wfo' OR a.ket = 'wfa') THEN DATE(a.jam_masuk_iso) END) as present_count,
+                COUNT(DISTINCT DATE(a.jam_masuk_iso)) as total_days,
+                SEC_TO_TIME(AVG(CASE WHEN a.status = 'ontime' THEN TIME_TO_SEC(TIME(a.jam_masuk_iso)) END)) as avg_ontime_time,
+                SEC_TO_TIME(AVG(CASE WHEN a.status = 'terlambat' THEN TIME_TO_SEC(TIME(a.jam_masuk_iso)) END)) as avg_late_time
             FROM users u
             LEFT JOIN attendance a ON u.id = a.user_id 
                 AND DATE(a.jam_masuk_iso) BETWEEN :month_start AND :month_end
+                AND (a.status = 'ontime' OR a.status = 'terlambat')
             WHERE u.role = 'pegawai'
             GROUP BY u.id, u.nama, u.foto_base64
             HAVING total_days > 0
-            ORDER BY late_count DESC, ontime_count ASC
+            ORDER BY late_count DESC, ontime_count DESC
         ");
         $monthlyStatsStmt->execute([':month_start' => $monthStart, ':month_end' => $monthEnd]);
         $monthlyStats = $monthlyStatsStmt->fetchAll();
@@ -5331,12 +5398,58 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
             $currentDate->add(new DateInterval('P1M'));
         }
         
+        // Get daily report statistics - count missing reports with employee details
+        // Count employees who have attendance but no daily report for dates up to today
+        $currentDateForReports = date('Y-m-d');
+        
+        // Get summary statistics
+        $dailyReportSummaryStmt = $pdo->prepare("
+            SELECT 
+                COUNT(DISTINCT a.user_id) as employees_without_reports,
+                COUNT(*) as total_missing_reports
+            FROM attendance a
+            LEFT JOIN daily_reports dr ON dr.user_id = a.user_id 
+                AND dr.report_date = DATE(a.jam_masuk_iso)
+            WHERE DATE(a.jam_masuk_iso) <= :current_date
+                AND (a.ket = 'wfo' OR a.ket = 'wfa')
+                AND dr.id IS NULL
+        ");
+        $dailyReportSummaryStmt->execute([':current_date' => $currentDateForReports]);
+        $dailyReportStats = $dailyReportSummaryStmt->fetch();
+        
+        // Get detailed list of employees with missing reports, sorted by count
+        $dailyReportDetailsStmt = $pdo->prepare("
+            SELECT 
+                u.id,
+                u.nama,
+                u.foto_base64,
+                COUNT(*) as missing_count
+            FROM attendance a
+            JOIN users u ON u.id = a.user_id
+            LEFT JOIN daily_reports dr ON dr.user_id = a.user_id 
+                AND dr.report_date = DATE(a.jam_masuk_iso)
+            WHERE DATE(a.jam_masuk_iso) <= :current_date
+                AND (a.ket = 'wfo' OR a.ket = 'wfa')
+                AND dr.id IS NULL
+                AND u.role = 'pegawai'
+            GROUP BY u.id, u.nama, u.foto_base64
+            ORDER BY missing_count DESC
+            LIMIT 10
+        ");
+        $dailyReportDetailsStmt->execute([':current_date' => $currentDateForReports]);
+        $dailyReportDetails = $dailyReportDetailsStmt->fetchAll();
+        
         jsonResponse([
             'ok' => true,
             'data' => [
                 'today_late' => $todayLate,
                 'monthly_stats' => $monthlyStats,
                 'attendance_trend' => $trendData,
+                'daily_report_stats' => [
+                    'employees_without_reports' => (int)$dailyReportStats['employees_without_reports'],
+                    'total_missing_reports' => (int)$dailyReportStats['total_missing_reports'],
+                    'employee_details' => $dailyReportDetails
+                ],
                 'summary' => [
                     'total_employees' => $totalEmployees,
                     'present_today' => $presentToday,
@@ -5348,6 +5461,42 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
     }
 
     // Admin: get KPI data (moved to main get_kpi_data endpoint above)
+
+    // Public endpoint for daily report statistics (no login required)
+    if ($action === 'get_public_daily_report_stats') {
+        $currentDateForReports = date('Y-m-d');
+        
+        // Get all employees with their missing report counts (including those with 0 missing)
+        $dailyReportDetailsStmt = $pdo->prepare("
+            SELECT 
+                u.id,
+                u.nama,
+                u.foto_base64,
+                COALESCE((
+                    SELECT COUNT(DISTINCT DATE(a2.jam_masuk_iso))
+                    FROM attendance a2
+                    LEFT JOIN daily_reports dr2 ON dr2.user_id = a2.user_id 
+                        AND dr2.report_date = DATE(a2.jam_masuk_iso)
+                    WHERE a2.user_id = u.id
+                        AND DATE(a2.jam_masuk_iso) >= DATE(u.created_at)
+                        AND DATE(a2.jam_masuk_iso) <= :current_date
+                        AND (a2.ket = 'wfo' OR a2.ket = 'wfa')
+                        AND dr2.id IS NULL
+                ), 0) as missing_count
+            FROM users u
+            WHERE u.role = 'pegawai'
+            ORDER BY missing_count DESC, u.nama ASC
+        ");
+        $dailyReportDetailsStmt->execute([':current_date' => $currentDateForReports]);
+        $dailyReportDetails = $dailyReportDetailsStmt->fetchAll();
+        
+        jsonResponse([
+            'ok' => true,
+            'data' => [
+                'employee_details' => $dailyReportDetails
+            ]
+        ]);
+    }
 
     // --- Pegawai Daily Reports API ---
     if ($action === 'get_user_info') {
@@ -5476,6 +5625,43 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         jsonResponse(['ok'=>true,'data'=>$out]);
     }
 
+    // Get missing daily reports for current user - all dates during period
+    if ($action === 'get_missing_daily_reports') {
+        if (!isset($_SESSION['user'])) jsonResponse(['error'=>'Unauthorized'],401);
+        $uid = (int)$_SESSION['user']['id'];
+        
+        // Get employee registration date to determine period start
+        $employeeRegDate = getEmployeeRegistrationDate($pdo, $uid);
+        $employeeRegDateOnly = $employeeRegDate ? date('Y-m-d', strtotime($employeeRegDate)) : null;
+        
+        // Use registration date as start, current date as end (all period)
+        $startDate = $employeeRegDateOnly ? $employeeRegDateOnly : date('Y-m-01'); // Fallback to start of month
+        $endDate = date('Y-m-d');
+        
+        // Get attendance records that don't have daily reports for all period
+        $stmt = $pdo->prepare("
+            SELECT DISTINCT DATE(a.jam_masuk_iso) as date
+            FROM attendance a
+            LEFT JOIN daily_reports dr ON dr.user_id = a.user_id 
+                AND dr.report_date = DATE(a.jam_masuk_iso)
+            WHERE a.user_id = :uid
+                AND DATE(a.jam_masuk_iso) BETWEEN :start_date AND :end_date
+                AND DATE(a.jam_masuk_iso) <= :current_date
+                AND (a.ket = 'wfo' OR a.ket = 'wfa')
+                AND dr.id IS NULL
+            ORDER BY DATE(a.jam_masuk_iso) DESC
+        ");
+        $stmt->execute([
+            ':uid' => $uid, 
+            ':start_date' => $startDate, 
+            ':end_date' => $endDate,
+            ':current_date' => $endDate
+        ]);
+        $missingDates = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        
+        jsonResponse(['ok' => true, 'data' => $missingDates]);
+    }
+
     if ($action === 'save_daily_report' && $_SERVER['REQUEST_METHOD']==='POST') {
         if (!isset($_SESSION['user'])) jsonResponse(['error'=>'Unauthorized'],401);
         $uid = (int)$_SESSION['user']['id'];
@@ -5596,6 +5782,9 @@ if ($page === 'logout') {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>Aplikasi Presensi Wajah</title>
     <script src="assets/js/tailwind.js"></script>
 
@@ -5952,10 +6141,49 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                     </div>
                 </div>
                 
-                <!-- Right Panel - Illustration -->
-                <div class="full-height-image lg:col-span-1 image-panel-container hidden lg:flex items-center justify-center">
-                    <div class="image-container w-full h-full">
-                        <img src="assets/photo/craiyon_110731_image.png" alt="Facial Recognition Illustration" class="w-full h-full object-contain">
+                <!-- Right Panel - Daily Report Statistics -->
+                <div id="landing-daily-report-stats" class="lg:col-span-1">
+                    <div class="bg-gradient-to-r from-orange-50 via-amber-50 to-orange-50 border-2 border-orange-300 rounded-xl p-6 shadow-lg h-full">
+                        <div class="flex items-center justify-between mb-6">
+                            <h3 class="text-xl font-bold text-orange-900 flex items-center">
+                                <svg class="w-7 h-7 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                                </svg>
+                                Pegawai Yang Belum Isi Laporan Harian
+                            </h3>
+                            <div class="flex items-center gap-2 text-sm text-orange-700">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                </svg>
+                                <span>Update Real-time</span>
+                            </div>
+                        </div>
+                        
+                        <!-- Employee List -->
+                        <div id="landing-daily-report-employees-list" class="mt-4">
+                            <div class="bg-white rounded-xl p-4 border-2 border-orange-200 shadow-sm">
+                                <div class="flex items-center justify-between mb-3">
+                                    <h4 class="text-sm font-bold text-gray-800 flex items-center">
+                                        <svg class="w-4 h-4 mr-2 text-orange-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"></path>
+                                        </svg>
+                                        Daftar Pegawai
+                                    </h4>
+                                </div>
+                                <div class="space-y-2 max-h-96 overflow-y-auto pr-2" id="landing-employees-list-container">
+                                    <div class="text-center py-8 text-gray-400">
+                                        <div class="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-orange-600"></div>
+                                        <p class="mt-2 text-sm">Memuat data...</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="mt-4 pt-4 border-t border-orange-200">
+                            <p class="text-xs text-orange-700 text-center">
+                                <span class="font-semibold">ℹ️</span> Data dihitung untuk seluruh periode kerja pegawai
+                            </p>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -6273,6 +6501,24 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                     </div> -->
                     <div id="kpi-summary" class="mt-4 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
                         <!-- KPI Summary will be populated here -->
+                    </div>
+                </div>
+                
+                <!-- Shortcut Laporan Harian Belum Diisi -->
+                <div id="missing-daily-reports-shortcut" class="mb-6 hidden">
+                    <div class="bg-gradient-to-r from-orange-50 to-amber-50 border border-orange-200 rounded-lg p-4 shadow-sm">
+                        <div class="flex items-center justify-between mb-3">
+                            <h3 class="text-md font-semibold text-orange-800 flex items-center">
+                                <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                </svg>
+                                Laporan Harian Belum Diisi
+                            </h3>
+                            <span id="missing-reports-count" class="bg-orange-500 text-white text-xs font-bold px-2 py-1 rounded-full">0</span>
+                        </div>
+                        <div id="missing-reports-list" class="flex flex-wrap gap-2">
+                            <!-- List of dates with missing reports will be populated here -->
+                        </div>
                     </div>
                 </div>
                 
@@ -6865,6 +7111,55 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                     </div>
                 </div>
                 
+                <!-- Daily Report Statistics -->
+                <div class="mb-8">
+                    <div class="bg-gradient-to-r from-orange-50 to-amber-50 border border-orange-200 rounded-lg p-6 shadow-md">
+                        <h3 class="text-lg font-semibold mb-4 text-orange-800 flex items-center">
+                            <svg class="w-6 h-6 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                            </svg>
+                            Statistik Laporan Harian
+                        </h3>
+                        <div class="grid md:grid-cols-2 gap-4 mb-4">
+                            <div class="bg-white rounded-lg p-4 border border-orange-200">
+                                <div class="flex items-center justify-between">
+                                    <div>
+                                        <p class="text-sm text-gray-600 mb-1">Pegawai Belum Isi Laporan</p>
+                                        <p class="text-3xl font-bold text-orange-600" id="employeesWithoutReports">0</p>
+                                        <p class="text-xs text-gray-500 mt-1">orang</p>
+                                    </div>
+                                    <div class="bg-orange-100 rounded-full p-4">
+                                        <svg class="w-8 h-8 text-orange-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"></path>
+                                        </svg>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="bg-white rounded-lg p-4 border border-orange-200">
+                                <div class="flex items-center justify-between">
+                                    <div>
+                                        <p class="text-sm text-gray-600 mb-1">Total Laporan Belum Diisi</p>
+                                        <p class="text-3xl font-bold text-amber-600" id="totalMissingReports">0</p>
+                                        <p class="text-xs text-gray-500 mt-1">laporan</p>
+                                    </div>
+                                    <div class="bg-amber-100 rounded-full p-4">
+                                        <svg class="w-8 h-8 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                                        </svg>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- Employee List -->
+                        <div id="daily-report-employees-list" class="mt-4">
+                            <!-- Employee list will be populated here -->
+                        </div>
+                        <p class="text-xs text-orange-700 mt-4 text-center">
+                            <span class="font-semibold">Catatan:</span> Data dihitung untuk seluruh periode kerja pegawai
+                        </p>
+                    </div>
+                </div>
+                
                 <!-- Today's Late Employees -->
                 <div class="mb-8">
                     <h3 class="text-lg font-semibold mb-4 text-gray-700">Pegawai Terlambat Hari Ini</h3>
@@ -6912,6 +7207,7 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                                         <th class="px-4 py-3 text-center font-medium text-gray-700">Izin/Sakit</th>
                                         <th class="px-4 py-3 text-center font-medium text-gray-700">Alpha</th>
                                         <th class="px-4 py-3 text-center font-medium text-gray-700">Overtime</th>
+                                        <th class="px-4 py-3 text-center font-medium text-gray-700">Laporan Belum Diisi</th>
                                         <th class="px-4 py-3 text-center font-medium text-gray-700">KPI Score</th>
                                         <th class="px-4 py-3 text-center font-medium text-gray-700">Status</th>
                                     </tr>
@@ -7164,6 +7460,19 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
             <div class="flex justify-end gap-2">
                 <button id="wfa-reason-cancel" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded">Batal</button>
                 <button id="wfa-reason-submit" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded">Kirim</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Early Leave Reason Modal -->
+    <div id="early-leave-reason-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden">
+        <div class="bg-white p-6 rounded-lg shadow-2xl w-full max-w-md">
+            <h3 class="text-xl font-bold mb-3">Alasan Pulang Awal</h3>
+            <p class="text-sm text-gray-600 mb-3">Anda pulang sebelum jam yang ditentukan. Silakan isi alasan pulang awal untuk melanjutkan presensi pulang.</p>
+            <textarea id="early-leave-reason-input" class="w-full p-3 border rounded mb-4" rows="4" placeholder="Tulis alasan pulang awal Anda..."></textarea>
+            <div class="flex justify-end gap-2">
+                <button id="early-leave-reason-cancel" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded">Batal</button>
+                <button id="early-leave-reason-submit" class="bg-orange-600 hover:bg-orange-700 text-white px-4 py-2 rounded">Kirim</button>
             </div>
         </div>
     </div>
@@ -8861,6 +9170,146 @@ function submitAttendanceWithWFA(attendanceData, wfaReason) {
         })
         .catch(error => {
             console.error('Error submitting attendance with WFA:', error);
+            statusMessage('Terjadi kesalahan saat menyimpan presensi.', 'bg-red-100 text-red-700');
+            isProcessingRecognition = false;
+        });
+}
+
+function showEarlyLeaveModal(message) {
+    // Try to find existing modal from HTML first
+    let earlyLeaveModal = document.getElementById('early-leave-reason-modal');
+    
+    if (!earlyLeaveModal) {
+        // Create modal dynamically if not found in HTML
+        earlyLeaveModal = document.createElement('div');
+        earlyLeaveModal.id = 'early-leave-reason-modal';
+        earlyLeaveModal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 hidden';
+        earlyLeaveModal.innerHTML = `
+            <div class="bg-white rounded-lg p-6 max-w-md w-full mx-4 shadow-2xl">
+                <h3 class="text-lg font-semibold mb-4">Alasan Pulang Awal</h3>
+                <p class="text-gray-600 mb-4">${message || 'Anda pulang sebelum jam yang ditentukan. Silakan isi alasan pulang awal untuk melanjutkan presensi pulang.'}</p>
+                <div class="mb-4">
+                    <label class="block text-sm font-medium text-gray-700 mb-2">Alasan Pulang Awal:</label>
+                    <textarea id="earlyLeaveReason" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-orange-500" rows="4" placeholder="Masukkan alasan pulang awal..."></textarea>
+                </div>
+                <div class="flex space-x-3">
+                    <button id="earlyLeaveSubmit" class="flex-1 bg-orange-600 text-white py-2 px-4 rounded-lg hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-orange-500">
+                        Kirim
+                    </button>
+                    <button id="earlyLeaveCancel" class="flex-1 bg-gray-300 text-gray-700 py-2 px-4 rounded-lg hover:bg-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-500">
+                        Batal
+                    </button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(earlyLeaveModal);
+        
+        // Add event listeners for dynamically created modal
+        document.getElementById('earlyLeaveSubmit').addEventListener('click', () => {
+            const reason = document.getElementById('earlyLeaveReason').value.trim();
+            if (reason) {
+                earlyLeaveModal.classList.add('hidden');
+                // Store early leave reason for next attendance submission
+                window.pendingEarlyLeaveReason = reason;
+                // Retry attendance submission
+                if (window.pendingAttendanceData) {
+                    submitAttendanceWithEarlyLeave(window.pendingAttendanceData, reason);
+                }
+            } else {
+                showNotif('Harap isi alasan pulang awal terlebih dahulu.', false);
+            }
+        });
+        
+        document.getElementById('earlyLeaveCancel').addEventListener('click', () => {
+            earlyLeaveModal.classList.add('hidden');
+            isProcessingRecognition = false;
+            // Clear pending data
+            window.pendingEarlyLeaveReason = null;
+            window.pendingAttendanceData = null;
+        });
+    } else {
+        // Modal exists in HTML, use it and set up event listeners
+        const reasonInput = document.getElementById('early-leave-reason-input');
+        const submitBtn = document.getElementById('early-leave-reason-submit');
+        const cancelBtn = document.getElementById('early-leave-reason-cancel');
+        
+        // Clear previous input
+        if (reasonInput) {
+            reasonInput.value = '';
+        }
+        
+        // Update message if there's a message element (for dynamic modal)
+        const messageEl = earlyLeaveModal.querySelector('p.text-gray-600');
+        if (messageEl && message) {
+            messageEl.textContent = message;
+        }
+        
+        if (submitBtn && cancelBtn) {
+            // Remove old event listeners by cloning
+            const newSubmitBtn = submitBtn.cloneNode(true);
+            const newCancelBtn = cancelBtn.cloneNode(true);
+            submitBtn.parentNode.replaceChild(newSubmitBtn, submitBtn);
+            cancelBtn.parentNode.replaceChild(newCancelBtn, cancelBtn);
+            
+            // Add event listeners
+            newSubmitBtn.addEventListener('click', () => {
+                const reason = reasonInput ? reasonInput.value.trim() : '';
+                if (reason) {
+                    earlyLeaveModal.classList.add('hidden');
+                    // Store early leave reason for next attendance submission
+                    window.pendingEarlyLeaveReason = reason;
+                    // Retry attendance submission
+                    if (window.pendingAttendanceData) {
+                        submitAttendanceWithEarlyLeave(window.pendingAttendanceData, reason);
+                    }
+                } else {
+                    showNotif('Harap isi alasan pulang awal terlebih dahulu.', false);
+                }
+            });
+            
+            newCancelBtn.addEventListener('click', () => {
+                earlyLeaveModal.classList.add('hidden');
+                isProcessingRecognition = false;
+                // Clear pending data
+                window.pendingEarlyLeaveReason = null;
+                window.pendingAttendanceData = null;
+            });
+        }
+    }
+    
+    // Show modal
+    earlyLeaveModal.classList.remove('hidden');
+    const reasonInput = document.getElementById('earlyLeaveReason') || document.getElementById('early-leave-reason-input');
+    if (reasonInput) {
+        setTimeout(() => reasonInput.focus(), 100);
+    }
+}
+
+function submitAttendanceWithEarlyLeave(attendanceData, earlyLeaveReason) {
+    // Add early leave reason to attendance data
+    const dataWithEarlyLeave = {
+        ...attendanceData,
+        alasan_pulang_awal: earlyLeaveReason,
+        early_leave_reason: earlyLeaveReason
+    };
+    
+    // Submit attendance with early leave reason
+    api('?ajax=save_attendance', dataWithEarlyLeave, { suppressModal: true })
+        .then(response => {
+            if (response.ok) {
+                statusMessage('Presensi pulang berhasil dengan alasan pulang awal!', 'bg-orange-100 text-orange-700');
+                // Clear pending data
+                window.pendingEarlyLeaveReason = null;
+                window.pendingAttendanceData = null;
+                isProcessingRecognition = false;
+            } else {
+                const errorMsg = response.message || 'Presensi gagal. Silakan coba lagi.';
+                statusMessage('Gagal menyimpan presensi: ' + errorMsg, 'bg-red-100 text-red-700');
+                isProcessingRecognition = false;
+            }
+        })
+        .catch(error => {
+            console.error('Error submitting attendance with early leave:', error);
             statusMessage('Terjadi kesalahan saat menyimpan presensi.', 'bg-red-100 text-red-700');
             isProcessingRecognition = false;
         });
@@ -11154,6 +11603,12 @@ async function handleRecognition(nim, topExpression){
             isProcessingRecognition = false;
             return; // Exit early, WFA modal will handle retry
         }
+        if(!r.ok && r.need_early_leave_reason){
+            // Show Early Leave modal
+            showEarlyLeaveModal(r.message || 'Anda pulang sebelum jam yang ditentukan. Harap isi alasan pulang awal.');
+            isProcessingRecognition = false;
+            return; // Exit early, Early Leave modal will handle retry
+        }
         // ULTRA-FAST: Skip logging for maximum speed
         
         // Auto stop detection after attendance submission (success or failed)
@@ -11298,9 +11753,179 @@ function stopDetection() {
     console.log('Face detection stopped manually');
 }
 
-// Initialize face recognition when page loads
+// Load daily report statistics for landing page
+async function loadLandingDailyReportStats() {
+    try {
+        console.log('Fetching dashboard data for landing page...');
+        const landingStatsDiv = document.getElementById('landing-daily-report-stats');
+        
+        // Check if section exists first
+        if (!landingStatsDiv) {
+            console.warn('Landing stats section not found in DOM - section may not be rendered');
+            return;
+        }
+        
+        // Show section immediately
+        landingStatsDiv.style.display = 'block';
+        
+        const response = await fetch('?ajax=get_public_daily_report_stats');
+        const result = await response.json();
+        
+        console.log('Public daily report stats response:', result);
+        
+        if (result.ok && result.data) {
+            const stats = result.data;
+            console.log('Daily report stats:', stats);
+            
+            // Show section if it exists
+            if (landingStatsDiv) {
+                landingStatsDiv.style.display = 'block';
+                console.log('Landing stats section found and shown');
+            } else {
+                console.error('Landing stats section not found in DOM');
+            }
+            
+            const employeeListContainer = document.getElementById('landing-employees-list-container');
+            if (!employeeListContainer) {
+                console.error('Employee list container not found');
+                return;
+            }
+            if (stats.employee_details) {
+                const employees = stats.employee_details;
+                if (employees.length > 0) {
+                    employeeListContainer.innerHTML = employees.map((emp, index) => {
+                        const badgeClass = emp.missing_count > 0 
+                            ? 'bg-gradient-to-r from-orange-500 to-amber-500' 
+                            : 'bg-gradient-to-r from-green-500 to-green-600';
+                        const badgeText = emp.missing_count > 0 
+                            ? `${emp.missing_count} laporan` 
+                            : 'Lengkap';
+                        return `
+                        <div class="flex items-center justify-between p-2 bg-gradient-to-r from-orange-50 to-amber-50 hover:from-orange-100 hover:to-amber-100 rounded-lg transition-all duration-200 border border-orange-200 hover:border-orange-300 hover:shadow-sm">
+                            <div class="flex items-center gap-2 flex-1 min-w-0">
+                                <div class="relative flex-shrink-0">
+                                    <img src="${emp.foto_base64 || 'generate-avatar.php?background=f97316&color=fff&name=' + encodeURIComponent(emp.nama) + '&size=40'}" 
+                                         alt="${emp.nama}" 
+                                         class="w-10 h-10 rounded-full border-2 border-orange-400 shadow-sm" style="object-fit: cover;">
+                                    <div class="absolute -top-1 -right-1 bg-gradient-to-br from-orange-500 to-orange-600 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center font-bold shadow-md" style="font-size: 0.65rem;">
+                                        ${index + 1}
+                                    </div>
+                                </div>
+                                <div class="flex-1 min-w-0">
+                                    <p class="text-xs font-semibold text-gray-900 truncate">${emp.nama}</p>
+                                </div>
+                            </div>
+                            <div class="ml-2 flex-shrink-0">
+                                <span class="${badgeClass} text-white text-xs font-bold px-2 py-1 rounded-full shadow-sm">
+                                    ${badgeText}
+                                </span>
+                            </div>
+                        </div>
+                    `;
+                    }).join('');
+                } else {
+                    employeeListContainer.innerHTML = `
+                        <div class="text-center py-8 text-gray-400">
+                            <p class="text-sm">Tidak ada data pegawai</p>
+                        </div>
+                    `;
+                }
+            }
+        } else {
+            console.warn('Daily report stats data not available');
+            const employeeListContainer = document.getElementById('landing-employees-list-container');
+            if (employeeListContainer) {
+                employeeListContainer.innerHTML = `
+                    <div class="text-center py-8 text-gray-400">
+                        <p class="text-sm">Tidak ada data yang tersedia</p>
+                    </div>
+                `;
+            }
+        }
+    } catch (error) {
+        console.error('Error loading landing daily report stats:', error);
+        const employeeListContainer = document.getElementById('landing-employees-list-container');
+        if (employeeListContainer) {
+            employeeListContainer.innerHTML = `
+                <div class="text-center py-8 text-gray-400">
+                    <p class="text-sm">Gagal memuat data. Silakan refresh halaman.</p>
+                </div>
+            `;
+        }
+    }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     console.log('🚀 Initializing face recognition system...');
+    
+    // Load daily report statistics for landing page if admin
+    // Check if we're on landing page
+    const pagePresensi = document.getElementById('page-presensi');
+    const isLandingPage = window.location.href.includes('page=landing') || (pagePresensi && pagePresensi.offsetParent !== null);
+    const landingStatsDiv = document.getElementById('landing-daily-report-stats');
+    
+    console.log('DOMContentLoaded - Landing page check:', {
+        isLandingPage: isLandingPage,
+        hasPagePresensi: !!pagePresensi,
+        hasStatsDiv: !!landingStatsDiv,
+        url: window.location.href,
+        statsDivDisplay: landingStatsDiv ? window.getComputedStyle(landingStatsDiv).display : 'N/A'
+    });
+    
+    // Always try to load if section exists and we're on landing page
+    if (isLandingPage) {
+        console.log('Landing page detected');
+        if (landingStatsDiv) {
+            console.log('Stats section found, loading data...');
+            // Show section immediately (in case it was hidden) and keep it visible
+            landingStatsDiv.style.display = 'block';
+            landingStatsDiv.style.visibility = 'visible';
+            landingStatsDiv.style.opacity = '1';
+            
+            // Use MutationObserver to ensure section stays visible
+            const observer = new MutationObserver((mutations) => {
+                mutations.forEach((mutation) => {
+                    if (mutation.type === 'attributes' && mutation.attributeName === 'style') {
+                        const currentDisplay = window.getComputedStyle(landingStatsDiv).display;
+                        if (currentDisplay === 'none') {
+                            console.log('Section was hidden, restoring visibility...');
+                            landingStatsDiv.style.display = 'block';
+                            landingStatsDiv.style.visibility = 'visible';
+                            landingStatsDiv.style.opacity = '1';
+                        }
+                    }
+                });
+            });
+            observer.observe(landingStatsDiv, { attributes: true, attributeFilter: ['style'] });
+            
+            // Load immediately
+            loadLandingDailyReportStats();
+            // Auto-refresh every 30 seconds (only if admin, will stop if 401)
+            const refreshInterval = setInterval(() => {
+                loadLandingDailyReportStats().catch(() => {
+                    // Stop refreshing if consistently failing
+                    clearInterval(refreshInterval);
+                });
+            }, 30000);
+        } else {
+            console.warn('Stats section not found in DOM - checking if it exists...');
+            // Try to find it again after a short delay (in case DOM not fully loaded)
+            setTimeout(() => {
+                const retryDiv = document.getElementById('landing-daily-report-stats');
+                if (retryDiv) {
+                    console.log('Stats section found on retry, loading data...');
+                    retryDiv.style.display = 'block';
+                    loadLandingDailyReportStats();
+                    setInterval(loadLandingDailyReportStats, 30000);
+                } else {
+                    console.error('Stats section still not found after retry');
+                }
+            }, 500);
+        }
+    } else {
+        console.log('Not on landing page');
+    }
+    
     initializeSpeechSynthesis();
     initializeFaceRecognition();
     // OPTIMIZED: Lazy load models - only load when user clicks scan button (not on page load)
@@ -11520,6 +12145,31 @@ function closeMobileSidebar() {
     // Restore body scroll
     document.body.style.overflow = '';
 }
+
+// Auto clear cache when website is opened
+(function() {
+    'use strict';
+    // Clear all caches
+    if ('caches' in window) {
+        caches.keys().then(function(names) {
+            for (let name of names) {
+                caches.delete(name);
+            }
+        });
+    }
+    // Clear service worker cache if exists
+    if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then(function(registrations) {
+            for(let registration of registrations) {
+                registration.unregister();
+            }
+        });
+    }
+    // Force reload if page is cached
+    if (window.performance && window.performance.navigation.type === window.performance.navigation.TYPE_BACK_FORWARD) {
+        window.location.reload();
+    }
+})();
 
 // Mobile menu toggle
 document.addEventListener('DOMContentLoaded', () => {
@@ -12822,7 +13472,7 @@ async function renderLaporan(){
         const statusText = att.status === 'terlambat' ? 'Terlambat' : 'On Time';
 
         let dailyReportStatus = 'Belum ada laporan';
-        let dailyReportClass = 'badge-gray';
+        let dailyReportClass = 'badge-orange'; // Changed from badge-gray to badge-orange for "Belum ada laporan"
         if(att.daily_report_status) {
             dailyReportStatus = att.daily_report_status === 'approved' ? 'Sudah di-approve' : (att.daily_report_status === 'disapproved' ? 'Tidak di-approve' : 'Belum di-approve');
             dailyReportClass = att.daily_report_status === 'approved' ? 'badge-green' : (att.daily_report_status === 'disapproved' ? 'badge-red' : 'badge-blue');
@@ -13756,6 +14406,9 @@ async function initRekapPage() {
     console.log('Loading rekap for month:', m, 'year:', y);
     const r = await api('?ajax=get_rekap', { month: m, year: y });
     console.log('Rekap data:', r);
+    
+    // Load missing daily reports
+    await loadMissingDailyReports();
 
     const weekSel = qs('#rekap-week');
     if (weekSel) {
@@ -14094,7 +14747,6 @@ function renderRekapData(data, m, y) {
             }
         }
 
-        const statusLabel = dr ? (dr.status === 'approved' ? `<span class="badge badge-green">Di-approve</span>` : (dr.status === 'disapproved' ? `<span class="badge badge-red">Tidak di-approve</span>` : `<span class="badge badge-gray">Belum di-approve</span>`)) : '<span class="badge badge-gray">Belum ada laporan</span>';
         // Format time for display (only HH:MM)
         const formatTimeDisplay = (timeStr) => {
             if (!timeStr || timeStr === '-') return '-';
@@ -14112,6 +14764,30 @@ function renderRekapData(data, m, y) {
         const isManualHoliday = row.is_manual_holiday || false;
         const isBeforeRegistration = row.is_before_registration || false;
         const isWorkingDay = row.is_working_day !== undefined ? row.is_working_day : true;
+        
+        // Check if date is weekend (Saturday = 6, Sunday = 0)
+        const dayOfWeek = d.getDay();
+        const isWeekend = dayOfWeek === 0 || dayOfWeek === 6; // Sunday or Saturday
+        
+        // Check if date is a holiday (manual holiday or not a working day or weekend)
+        const isHoliday = isManualHoliday || !isWorkingDay || isWeekend;
+        
+        // Determine status label
+        let statusLabel = '';
+        if (isFuture || isHoliday) {
+            // For future dates or holidays, show "Not Available" with gray badge
+            statusLabel = '<span class="badge badge-gray">Not Available</span>';
+        } else if (dr) {
+            // If report exists, show status based on approval
+            statusLabel = dr.status === 'approved' 
+                ? `<span class="badge badge-green">Di-approve</span>` 
+                : (dr.status === 'disapproved' 
+                    ? `<span class="badge badge-red">Tidak di-approve</span>` 
+                    : `<span class="badge badge-blue">Belum di-approve</span>`);
+        } else {
+            // No report exists and it's not a holiday/future date
+            statusLabel = '<span class="badge badge-orange">Belum ada laporan</span>';
+        }
         
         if (row.ket && (row.ket === 'wfo' || row.ket === 'wfa' || row.ket === 'izin' || row.ket === 'sakit' || row.ket === 'overtime' || row.ket === 'libur' || row.ket === 'na')) {
             // Show actual keterangan if exists
@@ -14344,6 +15020,67 @@ function renderKPISummary(kpiData) {
             <div class="text-sm text-gray-600">Status</div>
         </div>
     `;
+}
+
+// Load missing daily reports for shortcut
+async function loadMissingDailyReports() {
+    try {
+        const response = await fetch('?ajax=get_missing_daily_reports');
+        const result = await response.json();
+        
+        if (!result.ok || !result.data) {
+            qs('#missing-daily-reports-shortcut')?.classList.add('hidden');
+            return;
+        }
+        
+        const missingDates = result.data;
+        const shortcutDiv = qs('#missing-daily-reports-shortcut');
+        const countSpan = qs('#missing-reports-count');
+        const listDiv = qs('#missing-reports-list');
+        
+        if (!shortcutDiv || !countSpan || !listDiv) return;
+        
+        if (missingDates.length === 0) {
+            shortcutDiv.classList.add('hidden');
+            return;
+        }
+        
+        shortcutDiv.classList.remove('hidden');
+        countSpan.textContent = missingDates.length;
+        
+        // Format dates and create buttons
+        listDiv.innerHTML = missingDates.map(date => {
+            const dateObj = new Date(date + 'T00:00:00');
+            const dayName = dateObj.toLocaleDateString('id-ID', { weekday: 'short' });
+            const day = dateObj.getDate();
+            const month = dateObj.toLocaleDateString('id-ID', { month: 'short' });
+            const formattedDate = `${dayName}, ${day} ${month}`;
+            
+            return `
+                <button 
+                    class="missing-report-btn bg-orange-500 hover:bg-orange-600 text-white text-sm font-medium px-3 py-2 rounded-lg transition-colors duration-200 flex items-center gap-2"
+                    data-date="${date}"
+                    title="Klik untuk mengisi laporan harian tanggal ${formattedDate}">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                    </svg>
+                    ${formattedDate}
+                </button>
+            `;
+        }).join('');
+        
+        // Add event listeners to buttons
+        listDiv.querySelectorAll('.missing-report-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const date = btn.getAttribute('data-date');
+                await openDailyReportEditModal(date);
+            });
+        });
+        
+    } catch (error) {
+        console.error('Error loading missing daily reports:', error);
+        qs('#missing-daily-reports-shortcut')?.classList.add('hidden');
+    }
 }
 
 // Initialize rekap page controls
@@ -14937,7 +15674,7 @@ async function renderMonthly() {
             } else {
                 actionBtn = `<span class="text-gray-400">Not Available</span>`;
             }
-            statusBadge = `<span class="badge badge-gray">Belum ada laporan</span>`;
+            statusBadge = `<span class="badge badge-orange">Belum ada laporan</span>`;
         }
 
         tr.innerHTML = `
@@ -15523,6 +16260,55 @@ async function renderDashboard() {
         qs('#lateToday').textContent = data.summary.late_today;
         qs('#absentToday').textContent = data.summary.absent_today;
         
+        // Update daily report statistics
+        if (data.daily_report_stats) {
+            qs('#employeesWithoutReports').textContent = data.daily_report_stats.employees_without_reports || 0;
+            qs('#totalMissingReports').textContent = data.daily_report_stats.total_missing_reports || 0;
+            
+            // Render employee list
+            const employeeListDiv = qs('#daily-report-employees-list');
+            if (employeeListDiv && data.daily_report_stats.employee_details) {
+                const employees = data.daily_report_stats.employee_details;
+                if (employees.length > 0) {
+                    employeeListDiv.innerHTML = `
+                        <div class="bg-white rounded-lg p-4 border border-orange-200">
+                            <h4 class="text-sm font-semibold text-gray-700 mb-3">Daftar Pegawai dengan Laporan Belum Diisi (Top 10)</h4>
+                            <div class="space-y-2 max-h-64 overflow-y-auto">
+                                ${employees.map((emp, index) => `
+                                    <div class="flex items-center justify-between p-2 hover:bg-orange-50 rounded-lg transition-colors">
+                                        <div class="flex items-center gap-3 flex-1">
+                                            <div class="relative">
+                                                <img src="${emp.foto_base64 || 'generate-avatar.php?background=f97316&color=fff&name=' + encodeURIComponent(emp.nama) + '&size=40'}" 
+                                                     alt="${emp.nama}" 
+                                                     class="w-10 h-10 rounded-full border-2 border-orange-300" style="object-fit: contain;">
+                                                <div class="absolute -top-1 -right-1 bg-orange-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center font-bold">
+                                                    ${index + 1}
+                                                </div>
+                                            </div>
+                                            <div class="flex-1 min-w-0">
+                                                <p class="text-sm font-medium text-gray-800 truncate">${emp.nama}</p>
+                                            </div>
+                                        </div>
+                                        <div class="ml-4">
+                                            <span class="bg-orange-100 text-orange-800 text-sm font-bold px-3 py-1 rounded-full">
+                                                ${emp.missing_count} laporan
+                                            </span>
+                                        </div>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+                    `;
+                } else {
+                    employeeListDiv.innerHTML = `
+                        <div class="bg-white rounded-lg p-4 border border-orange-200 text-center text-gray-500">
+                            <p class="text-sm">Semua pegawai sudah mengisi laporan harian</p>
+                        </div>
+                    `;
+                }
+            }
+        }
+        
         // Render charts
         renderTodayLateChart(data.today_late);
         renderMonthlyPerformanceCharts(data.monthly_stats);
@@ -15595,6 +16381,13 @@ function renderTodayLateChart(todayLateData) {
 }
 
 function renderMonthlyPerformanceCharts(monthlyStats) {
+    // Helper function to convert time string to seconds for comparison
+    const timeToSeconds = (timeStr) => {
+        if (!timeStr) return 0;
+        const parts = timeStr.split(':');
+        return parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseInt(parts[2] || 0);
+    };
+    
     // Most Frequently Late Chart - Bar Chart
     const mostLateCtx = qs('#mostLateChart');
     if (mostLateCtx) {
@@ -15602,7 +16395,20 @@ function renderMonthlyPerformanceCharts(monthlyStats) {
             dashboardCharts.mostLate.destroy();
         }
         
-        const topLate = monthlyStats.slice(0, 5).filter(item => item.late_count > 0);
+        // Sort by late_count DESC, then by avg_late_time DESC (most late time first)
+        const sortedLate = monthlyStats
+            .filter(item => item.late_count > 0)
+            .sort((a, b) => {
+                if (b.late_count !== a.late_count) {
+                    return b.late_count - a.late_count;
+                }
+                // If counts are equal, sort by average late time (later time = more late)
+                const timeA = timeToSeconds(a.avg_late_time);
+                const timeB = timeToSeconds(b.avg_late_time);
+                return timeB - timeA; // Later time (higher seconds) comes first
+            });
+        
+        const topLate = sortedLate.slice(0, 5);
         
         if (topLate.length === 0) {
             mostLateCtx.style.display = 'none';
@@ -15657,9 +16463,18 @@ function renderMonthlyPerformanceCharts(monthlyStats) {
             dashboardCharts.mostAttentive.destroy();
         }
         
+        // Sort by ontime_count DESC, then by avg_ontime_time ASC (earlier time = better)
         const topAttentive = monthlyStats
             .filter(item => item.ontime_count > 0)
-            .sort((a, b) => b.ontime_count - a.ontime_count)
+            .sort((a, b) => {
+                if (b.ontime_count !== a.ontime_count) {
+                    return b.ontime_count - a.ontime_count;
+                }
+                // If counts are equal, sort by average ontime (earlier time = better)
+                const timeA = timeToSeconds(a.avg_ontime_time) || 86400; // Default to 23:59:59 if null
+                const timeB = timeToSeconds(b.avg_ontime_time) || 86400;
+                return timeA - timeB; // Earlier time (lower seconds) comes first
+            })
             .slice(0, 5);
         
         if (topAttentive.length === 0) {
@@ -15941,6 +16756,11 @@ function renderKPITable(kpiData) {
                 <td class="px-4 py-3 text-center text-yellow-600 font-semibold">${employee.izin_sakit_count}</td>
                 <td class="px-4 py-3 text-center text-gray-600 font-semibold">${employee.alpha_count}</td>
                 <td class="px-4 py-3 text-center text-emerald-600 font-semibold">${employee.overtime_count || 0}</td>
+                <td class="px-4 py-3 text-center">
+                    <span class="px-2 py-1 rounded-full text-sm font-semibold ${employee.missing_daily_reports_count > 0 ? 'bg-orange-100 text-orange-800' : 'bg-gray-100 text-gray-800'}">
+                        ${employee.missing_daily_reports_count || 0}
+                    </span>
+                </td>
                 <td class="px-4 py-3 text-center">
                     <span class="px-2 py-1 rounded-full text-sm font-semibold ${statusClass}">
                         ${employee.kpi_score}%
@@ -16409,5 +17229,4 @@ qs('#work-schedule-save') && qs('#work-schedule-save').addEventListener('click',
 });
 </script>
 </body>
-</html>
 </html>
