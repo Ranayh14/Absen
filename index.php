@@ -8051,11 +8051,12 @@ async function api(url, data, opts){
             const errorText = await res.text();
             console.error('API Error Response:', errorText);
             
-            // Try to parse error response as JSON to check for WFA requirement
+            // Try to parse error response as JSON to check for special requirements
             try {
                 const errorJson = JSON.parse(errorText);
-                if (errorJson.need_reason) {
+                if (errorJson.need_reason || errorJson.need_overtime_reason || errorJson.need_early_leave_reason) {
                     // Return the error response directly instead of throwing
+                    // This allows the calling function to handle modals for WFA/Overtime/Early Leave
                     return errorJson;
                 }
             } catch (parseError) {
@@ -8907,6 +8908,11 @@ function showOvertimeModal(message) {
         // Modal exists, just show it
         overtimeModal.style.display = 'flex';
         overtimeModal.classList.remove('hidden');
+        // Update message if modal exists
+        const messageEl = overtimeModal.querySelector('p.text-gray-600');
+        if (messageEl && message) {
+            messageEl.textContent = message;
+        }
     }
     
     // Show modal and populate location from pending data if available
@@ -8914,6 +8920,10 @@ function showOvertimeModal(message) {
     const reasonInput = document.getElementById('overtimeReason');
     if (locationInput && window.pendingAttendanceData && window.pendingAttendanceData.lokasi) {
         locationInput.value = window.pendingAttendanceData.lokasi;
+    }
+    // Clear reason input when showing modal
+    if (reasonInput) {
+        reasonInput.value = '';
     }
     if (locationInput) {
         setTimeout(() => locationInput.focus(), 100);
