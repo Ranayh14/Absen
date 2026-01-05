@@ -413,104 +413,347 @@ function geocodeAddress(string $address): ?array {
 }
 
 /**
- * Reverse geocode coordinates to address using OpenStreetMap Nominatim.
- * Returns readable address string or null on failure.
+ * Reverse geocode coordinates to address using MULTIPLE providers for maximum accuracy.
+ * ENHANCED VERSION with RT/RW extraction and detailed Indonesian address parsing.
+ * Returns complete address with street name, number, RT/RW, kelurahan, postal code.
  */
 function reverseGeocodeAddress(float $lat, float $lng): ?string {
-    // OPTIMIZED: Use shorter timeout and lower zoom for faster response
-    // Use zoom level 16 for faster response (still good detail)
-    $url = 'https://nominatim.openstreetmap.org/reverse?format=json&lat=' . $lat . '&lon=' . $lng . '&addressdetails=1&accept-language=id&zoom=16';
+    // TIER 1: Try Google Maps API (MOST ACCURATE - PRIMARY)
+    $googleAddress = reverseGeocodeGoogle($lat, $lng);
+    if ($googleAddress && !isGenericAddress($googleAddress)) {
+        error_log("Geocoding SUCCESS: Google Maps - $googleAddress");
+        return $googleAddress;
+    }
+    
+    // TIER 2: Try with zoom 18 (maximum detail)
+    $detailedAddress = reverseGeocodeNominatim($lat, $lng, 18);
+    if ($detailedAddress && !isGenericAddress($detailedAddress)) {
+        error_log("Geocoding SUCCESS: OSM Zoom 18 - $detailedAddress");
+        return $detailedAddress;
+    }
+    
+    // TIER 3: Try with zoom 17 (slightly broader, might have more data)
+    $mediumAddress = reverseGeocodeNominatim($lat, $lng, 17);
+    if ($mediumAddress && !isGenericAddress($mediumAddress)) {
+        error_log("Geocoding SUCCESS: OSM Zoom 17 - $mediumAddress");
+        return $mediumAddress;
+    }
+    
+    // TIER 4: Fallback to coordinates
+    error_log("All geocoding methods failed for lat=$lat, lng=$lng, using coordinates fallback");
+    return "Koordinat: " . round($lat, 6) . ", " . round($lng, 6);
+}
+
+/**
+ * Google Maps Geocoding API - PRIMARY PROVIDER (Most Accurate for Indonesian Addresses)
+ */
+function reverseGeocodeGoogle(float $lat, float $lng): ?string {
+    $apiKey = 'AIzaSyCTdOHXg5hSu_2fneyBP9mItCLyG5VQ-x0';
+    $url = "https://maps.googleapis.com/maps/api/geocode/json?latlng={$lat},{$lng}&key={$apiKey}&language=id&result_type=street_address|route|sublocality|premise";
+    
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, $url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 1); // Reduced from 2 to 1 second for faster response
-    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 1); // Connection timeout 1 second
+    curl_setopt($ch, CURLOPT_TIMEOUT, 5);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 3);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    
+    $resp = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlError = curl_error($ch);
+    curl_close($ch);
+    
+    if ($httpCode !== 200 || !$resp) {
+        error_log("Google Geocoding API request failed: HTTP $httpCode, Error: $curlError");
+        return null;
+    }
+    
+    $data = json_decode($resp, true);
+    
+    if (!isset($data['status']) || $data['status'] !== 'OK') {
+        $errorMsg = $data['error_message'] ?? $data['status'] ?? 'UNKNOWN';
+        error_log("Google Geocoding API error: $errorMsg");
+        return null;
+    }
+    
+    if (empty($data['results'])) {
+        error_log("Google Geocoding API: No results");
+        return null;
+    }
+    
+    // Get first result (most accurate)
+    $result = $data['results'][0];
+    $addressComponents = $result['address_components'] ?? [];
+    $formattedAddress = $result['formatted_address'] ?? '';
+    
+    // Parse for Indonesian address format
+    $houseNumber = '';
+    $street = '';
+    $rt = '';
+    $rw = '';
+    $kelurahan = '';
+    $kecamatan = '';
+    $city = '';
+    $province = '';
+    $postalCode = '';
+    
+    foreach ($addressComponents as $component) {
+        $types = $component['types'];
+        $longName = $component['long_name'];
+        
+        if (in_array('street_number', $types)) {
+            $houseNumber = $longName;
+        } elseif (in_array('route', $types)) {
+            $street = $longName;
+        } elseif (in_array('premise', $types) || in_array('establishment', $types)) {
+            // Building name
+            if (empty($houseNumber)) {
+                $houseNumber = $longName;
+            }
+        } elseif (in_array('sublocality_level_4', $types) || in_array('neighborhood', $types)) {
+            // Check for RT/RW
+            if (preg_match('/RT[\s.]*0*([0-9]{1,3})[\s\/]*RW[\s.]*0*([0-9]{1,3})/i', $longName, $matches)) {
+                $rt = str_pad($matches[1], 3, '0', STR_PAD_LEFT);
+                $rw = str_pad($matches[2], 3, '0', STR_PAD_LEFT);
+            } elseif (empty($kelurahan)) {
+                $kelurahan = $longName;
+            }
+        } elseif (in_array('sublocality_level_3', $types) || in_array('administrative_area_level_4', $types)) {
+            $kelurahan = $longName;
+        } elseif (in_array('sublocality_level_2', $types) || in_array('administrative_area_level_3', $types)) {
+            $kecamatan = $longName;
+        } elseif (in_array('administrative_area_level_2', $types) || in_array('locality', $types)) {
+            $city = $longName;
+        } elseif (in_array('administrative_area_level_1', $types)) {
+            $province = $longName;
+        } elseif (in_array('postal_code', $types)) {
+            $postalCode = $longName;
+        }
+    }
+    
+    // Build Indonesian address
+    $parts = [];
+    
+    // Street with number
+    if ($houseNumber && $street) {
+        $parts[] = "No. $houseNumber, Jl. $street";
+    } elseif ($street) {
+        $parts[] = "Jl. $street";
+    } elseif ($houseNumber) {
+        $parts[] = $houseNumber;
+    }
+    
+    // RT/RW
+    if ($rt && $rw) {
+        $parts[] = "RT $rt/RW $rw";
+    }
+    
+    // Kelurahan
+    if ($kelurahan) {
+        $parts[] = $kelurahan;
+    }
+    
+    // Kecamatan
+    if ($kecamatan) {
+        $parts[] = $kecamatan;
+    }
+    
+    // City
+    if ($city) {
+        $parts[] = $city;
+    }
+    
+    // Province  
+    if ($province) {
+        $parts[] = $province;
+    }
+    
+    // Postal code
+    if ($postalCode) {
+        $parts[] = $postalCode;
+    }
+    
+    // Return detailed address if we have enough components
+    if (!empty($parts) && count($parts) >= 3) {
+        return implode(', ', $parts);
+    }
+    
+    // Fallback to Google's formatted address
+    if ($formattedAddress) {
+        $cleanAddress = preg_replace('/,\s*Indonesia\s*$/', '', $formattedAddress);
+        return $cleanAddress;
+    }
+    
+    return null;
+}
+
+/**
+ * Helper: Check if address is too generic (just city + postal)
+ */
+function isGenericAddress(string $address): bool {
+    // If address only has 1-2 components (just city and postal code), it's too generic
+    $parts = explode(', ', $address);
+    return count($parts) <= 2;
+}
+
+/**
+ * Core reverse geocoding using Nominatim with specified zoom
+ */
+function reverseGeocodeNominatim(float $lat, float $lng, int $zoom): ?string {
+    $url = 'https://nominatim.openstreetmap.org/reverse?format=json&lat=' . $lat . '&lon=' . $lng . '&addressdetails=1&accept-language=id&zoom=' . $zoom . '&extratags=1&namedetails=1';
+    
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 5); // INCREASED from 1 to 5 seconds for better accuracy
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 3); // Connection timeout 3 seconds
     curl_setopt($ch, CURLOPT_HTTPHEADER, [
         'User-Agent: AbsenApp/1.0 (XAMPP PHP)'
     ]);
+    
     $resp = curl_exec($ch);
     $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
     
-    if ($code !== 200 || !$resp) return null;
+    if ($code !== 200 || !$resp) {
+        // Fallback to coordinates if geocoding fails
+        error_log("Reverse geocoding failed for lat=$lat, lng=$lng");
+        return "Koordinat: " . round($lat, 6) . ", " . round($lng, 6);
+    }
     
     $data = json_decode($resp, true);
-    if (!is_array($data) || !isset($data['address'])) return null;
+    if (!is_array($data) || !isset($data['address'])) {
+        return "Koordinat: " . round($lat, 6) . ", " . round($lng, 6);
+    }
     
     $address = $data['address'];
     $displayName = $data['display_name'] ?? '';
     
-    // Build detailed address from components with proper order
+    // ENHANCED: Extract RT/RW from various address components
+    $rt = '';
+    $rw = '';
+    
+    // Pattern untuk mencari RT/RW dalam format: "RT 001/RW 002", "RT.01 RW.02", "RT 1 RW 2", etc
+    $rtRwPattern = '/RT[\s.]*0*([0-9]{1,3})[\s\/]*RW[\s.]*0*([0-9]{1,3})/i';
+    
+    // Check dalam berbagai field yang mungkin mengandung RT/RW
+    $searchFields = ['suburb', 'neighbourhood', 'hamlet', 'quarter', 'city_district', 'residential'];
+    foreach ($searchFields as $field) {
+        if (isset($address[$field]) && $address[$field]) {
+            if (preg_match($rtRwPattern, $address[$field], $matches)) {
+                $rt = str_pad($matches[1], 3, '0', STR_PAD_LEFT); // Format: 001, 002, etc
+                $rw = str_pad($matches[2], 3, '0', STR_PAD_LEFT);
+                break;
+            }
+        }
+    }
+    
+    // Build DETAILED address from components with proper Indonesian order
     $parts = [];
     
-    // 1. Building name or house name (most specific)
+    // 1. Building name atau house name (paling spesifik)
     if (isset($address['building']) && $address['building']) {
         $parts[] = $address['building'];
     } elseif (isset($address['house_name']) && $address['house_name']) {
         $parts[] = $address['house_name'];
+    } elseif (isset($address['amenity']) && $address['amenity']) {
+        $parts[] = $address['amenity'];
     }
     
-    // 2. Road/Street with house number if available
+    // 2. Road/Street dengan house number jika ada
     $roadParts = [];
     if (isset($address['house_number']) && $address['house_number']) {
-        $roadParts[] = $address['house_number'];
+        $roadParts[] = 'No. ' . $address['house_number'];
     }
     if (isset($address['road']) && $address['road']) {
-        $roadParts[] = $address['road'];
+        $roadParts[] = 'Jl. ' . $address['road'];
     } elseif (isset($address['pedestrian']) && $address['pedestrian']) {
-        $roadParts[] = $address['pedestrian'];
+        $roadParts[] = 'Jl. ' . $address['pedestrian'];
     } elseif (isset($address['footway']) && $address['footway']) {
-        $roadParts[] = $address['footway'];
+        $roadParts[] = 'Jl. ' . $address['footway'];
+    } elseif (isset($address['path']) && $address['path']) {
+        $roadParts[] = $address['path'];
     }
     if (!empty($roadParts)) {
-        $parts[] = 'Jl. ' . implode(' ', $roadParts);
+        $parts[] = implode(' ', $roadParts);
     }
     
-    // 3. Suburb/Neighbourhood
+    // 3. RT/RW jika ditemukan
+    if ($rt && $rw) {
+        $parts[] = "RT $rt/RW $rw";
+    }
+    
+    // 4. Kelurahan/Desa (suburb/neighbourhood)
     if (isset($address['suburb']) && $address['suburb']) {
-        $parts[] = $address['suburb'];
+        // Skip jika suburb sama dengan RT/RW pattern (sudah diambil di atas)
+        if (!preg_match($rtRwPattern, $address['suburb'])) {
+            $parts[] = $address['suburb'];
+        }
     } elseif (isset($address['neighbourhood']) && $address['neighbourhood']) {
-        $parts[] = $address['neighbourhood'];
-    }
-    
-    // 4. City/Town/Village
-    if (isset($address['city']) && $address['city']) {
-        $parts[] = $address['city'];
-    } elseif (isset($address['town']) && $address['town']) {
-        $parts[] = $address['town'];
+        if (!preg_match($rtRwPattern, $address['neighbourhood'])) {
+            $parts[] = $address['neighbourhood'];
+        }
+    } elseif (isset($address['hamlet']) && $address['hamlet']) {
+        $parts[] = $address['hamlet'];
     } elseif (isset($address['village']) && $address['village']) {
         $parts[] = $address['village'];
     }
     
-    // 5. State/Province
+    // 5. Kecamatan (city_district)
+    if (isset($address['city_district']) && $address['city_district']) {
+        $parts[] = $address['city_district'];
+    } elseif (isset($address['municipality']) && $address['municipality']) {
+        $parts[] = $address['municipality'];
+    }
+    
+    // 6. Kota/Kabupaten
+    if (isset($address['city']) && $address['city']) {
+        $parts[] = $address['city'];
+    } elseif (isset($address['town']) && $address['town']) {
+        $parts[] = $address['town'];
+    } elseif (isset($address['county']) && $address['county']) {
+        $parts[] = $address['county'];
+    }
+    
+    // 7. Provinsi
     if (isset($address['state']) && $address['state']) {
         $parts[] = $address['state'];
     }
     
-    // 6. Postal code
+    // 8. Postal code (PENTING untuk alamat lengkap)
     if (isset($address['postcode']) && $address['postcode']) {
         $parts[] = $address['postcode'];
     }
     
     // If we have good parts, join them
     if (!empty($parts)) {
-        return implode(', ', $parts);
+        $detailedAddress = implode(', ', $parts);
+        
+        // Log untuk debugging
+        error_log("Reverse geocoding success: $detailedAddress (RT: $rt, RW: $rw)");
+        
+        return $detailedAddress;
     }
     
-    // Fallback to display_name if available
+    // Fallback to display_name if no parts extracted
     if ($displayName) {
-        // Clean up the display name and try to extract postal code
+        // Clean up the display name
         $cleanName = preg_replace('/,\s*Indonesia$/', '', $displayName);
         
         // Try to append postal code if available
         if (isset($address['postcode']) && $address['postcode']) {
-            $cleanName .= ', ' . $address['postcode'];
+            if (strpos($cleanName, $address['postcode']) === false) {
+                $cleanName .= ', ' . $address['postcode'];
+            }
         }
         
+        error_log("Reverse geocoding fallback to display_name: $cleanName");
         return $cleanName;
     }
     
-    return null;
+    // Final fallback to coordinates
+    error_log("Reverse geocoding no address found, using coordinates");
+    return "Koordinat: " . round($lat, 6) . ", " . round($lng, 6);
 }
 
 /** Check if IP within CIDR */
@@ -1802,6 +2045,7 @@ function calculateKPIForEmployee(PDO $pdo, $userId, $periodStart = null, $period
         
         $ontimeCount = 0;
         $lateCount = 0;
+        $wfaCount = 0; // NEW: Count WFA attendance
         $totalLateMinutes = 0; // Keep for backward compatibility/reporting
         $lateRecords = []; // Store late records with minutes for per-occurrence calculation
         $izinSakitCount = 0;
@@ -1853,9 +2097,17 @@ function calculateKPIForEmployee(PDO $pdo, $userId, $periodStart = null, $period
                     // Check attendance status (only WFO, WFA, Overtime)
                     if ($attendanceRecord['status'] === 'ontime') {
                         $ontimeCount++;
+                        // NEW: Count WFA separately
+                        if ($attendanceRecord['ket'] === 'wfa') {
+                            $wfaCount++;
+                        }
                         error_log("KPI Debug - User $userId: Found ontime on $dateStr");
                     } else {
                         $lateCount++;
+                        // NEW: Count WFA even if late
+                        if ($attendanceRecord['ket'] === 'wfa') {
+                            $wfaCount++;
+                        }
                         $lateMinutes = (int)$attendanceRecord['late_minutes'];
                         $totalLateMinutes += $lateMinutes;
                         // Store late record with minutes for per-occurrence calculation
@@ -2012,6 +2264,7 @@ function calculateKPIForEmployee(PDO $pdo, $userId, $periodStart = null, $period
             'total_working_days' => $totalWorkingDaysInPeriod, // Total working days in period
             'actual_working_days' => $actualWorkingDays, // Days that have passed for KPI calculation
             'ontime_count' => $ontimeCount,
+            'wfa_count' => $wfaCount, // NEW: Add WFA count
             'late_count' => $lateCount,
             'izin_sakit_count' => $izinSakitCount,
             'alpha_count' => $alphaCount,
@@ -6841,7 +7094,10 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                             <span class="mb-1">Tanggal Selesai</span>
                             <input type="date" id="filter-tanggal-selesai" class="p-2 border rounded-lg">
                         </label>
-                        <div class="flex items-end"><button id="btn-show-all" class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded-lg transition">Reset</button></div>
+                        <div class="flex items-end gap-2">
+                            <button id="btn-show-all" class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded-lg transition">Reset</button>
+                            <button id="btn-toggle-today" class="bg-indigo-500 hover:bg-indigo-600 text-white font-bold py-2 px-4 rounded-lg transition whitespace-nowrap">📅 Hari Ini</button>
+                        </div>
                     </div>
                     <div class="grid md:grid-cols-4 gap-4 mb-4">
                         <label class="text-sm text-gray-600 flex flex-col">
@@ -6855,9 +7111,34 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                                 <option value="nama-desc">Nama (Z-A)</option>
                             </select>
                         </label>
-                        <div></div>
-                        <div></div>
-                        <div></div>
+                        <label class="text-sm text-gray-600 flex flex-col">
+                            <span class="mb-1">Filter Status</span>
+                            <select id="filter-status" class="p-2 border rounded-lg">
+                                <option value="">Semua Status</option>
+                                <option value="ontime">Ontime</option>
+                                <option value="terlambat">Terlambat</option>
+                            </select>
+                        </label>
+                        <label class="text-sm text-gray-600 flex flex-col">
+                            <span class="mb-1">Filter Ket</span>
+                            <select id="filter-ket" class="p-2 border rounded-lg">
+                                <option value="">Semua Ket</option>
+                                <option value="wfo">WFO</option>
+                                <option value="wfa">WFA</option>
+                                <option value="overtime">Overtime</option>
+                                <option value="izin">Izin</option>
+                                <option value="sakit">Sakit</option>
+                            </select>
+                        </label>
+                        <label class="text-sm text-gray-600 flex flex-col">
+                            <span class="mb-1">Filter Laporan</span>
+                            <select id="filter-laporan" class="p-2 border rounded-lg">
+                                <option value="">Semua Laporan</option>
+                                <option value="belum-ada">Belum Ada Laporan</option>
+                                <option value="pending">Belum Di-approve</option>
+                                <option value="approved">Sudah Di-approve</option>
+                            </select>
+                        </label>
                     </div>
                     <div class="mb-4 flex gap-2 flex-wrap">
                         <button id="btn-open-absence" class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-lg">Input Keterangan Manual</button>
@@ -7365,6 +7646,7 @@ if (!isset($_SESSION['user']) && (!in_array($page, ['register','login','landing'
                                         <th class="px-4 py-3 text-left font-medium text-gray-700">Nama Pegawai</th>
                                         <th class="px-4 py-3 text-center font-medium text-gray-700">Total Hari Kerja</th>
                                         <th class="px-4 py-3 text-center font-medium text-gray-700">Ontime</th>
+                                        <th class="px-4 py-3 text-center font-medium text-gray-700">WFA</th>
                                         <th class="px-4 py-3 text-center font-medium text-gray-700">Terlambat</th>
                                         <th class="px-4 py-3 text-center font-medium text-gray-700">Izin/Sakit</th>
                                         <th class="px-4 py-3 text-center font-medium text-gray-700">Alpha</th>
@@ -13606,13 +13888,55 @@ async function renderLaporan(){
     const tglSelesai = qs('#filter-tanggal-selesai')?.value || '';
     const sortBy = qs('#sort-presensi')?.value || 'tanggal-desc';
     
+    // NEW: Get new filter values
+    const statusFilter = qs('#filter-status')?.value || '';
+    const ketFilter = qs('#filter-ket')?.value || '';
+    const laporanFilter = qs('#filter-laporan')?.value || '';
+    
+    // NEW: Check if showing today only (using 5 AM reset)
+    const btnToggleToday = qs('#btn-toggle-today');
+    const showTodayOnly = btnToggleToday && btnToggleToday.textContent.includes('Hari Ini');
+    
+    // Calculate "today" with 5 AM reset (not midnight)
+    const now = new Date();
+    const currentHour = now.getHours();
+    let todayDate;
+    if (currentHour < 5) {
+        // Before 5 AM = still yesterday
+        const yesterday = new Date(now);
+        yesterday.setDate(yesterday.getDate() - 1);
+        todayDate = yesterday.toISOString().slice(0, 10);
+    } else {
+        todayDate = now.toISOString().slice(0, 10);
+    }
+    
     const filtered = list.filter(a=>{
         const nameMatch = (a.nama||'').toLowerCase().includes(term);
         const nimMatch = (a.nim||'').toLowerCase().includes(term);
         const startupMatch = !startupFilter || (a.startup||'') === startupFilter;
         const recordDate = a.jam_masuk_iso ? a.jam_masuk_iso.slice(0,10) : '';
         const dateMatch = (!tglMulai || recordDate>=tglMulai) && (!tglSelesai || recordDate<=tglSelesai);
-        return (nameMatch||nimMatch) && startupMatch && dateMatch;
+        
+        // NEW: Today filter (5 AM reset)
+        const todayMatch = !showTodayOnly || recordDate === todayDate;
+        
+        // NEW: Status filter
+        const statusMatch = !statusFilter || (a.status||'').toLowerCase() === statusFilter.toLowerCase();
+        
+        // NEW: Ket filter
+        const ketMatch = !ketFilter || (a.ket||'').toLowerCase() === ketFilter.toLowerCase();
+        
+        // NEW: Laporan filter
+        let laporanMatch = true;
+        if (laporanFilter === 'belum-ada') {
+            laporanMatch = !a.daily_report_status || a.daily_report_status === '';
+        } else if (laporanFilter === 'pending') {
+            laporanMatch = a.daily_report_status === 'pending' || a.daily_report_status === 'disapproved';
+        } else if (laporanFilter === 'approved') {
+            laporanMatch = a.daily_report_status === 'approved';
+        }
+        
+        return (nameMatch||nimMatch) && startupMatch && dateMatch && todayMatch && statusMatch && ketMatch && laporanMatch;
     });
     
     // Sorting
@@ -13715,7 +14039,23 @@ async function renderLaporan(){
     });
 }
 
-[qs('#search-laporan'), qs('#filter-startup'), qs('#filter-tanggal-mulai'), qs('#filter-tanggal-selesai'), qs('#sort-presensi')].forEach(el=>{ if(el) el.addEventListener('input', renderLaporan); });
+[qs('#search-laporan'), qs('#filter-startup'), qs('#filter-tanggal-mulai'), qs('#filter-tanggal-selesai'), qs('#sort-presensi'), qs('#filter-status'), qs('#filter-ket'), qs('#filter-laporan')].forEach(el=>{ if(el) el.addEventListener('input', renderLaporan); });
+
+// NEW: Toggle today/all button
+qs('#btn-toggle-today') && qs('#btn-toggle-today').addEventListener('click', function() {
+    const btn = this;
+    if (btn.textContent.includes('Hari Ini')) {
+        btn.textContent = '📊 Lihat Semua';
+        btn.classList.remove('bg-indigo-500', 'hover:bg-indigo-600');
+        btn.classList.add('bg-purple-500', 'hover:bg-purple-600');
+    } else {
+        btn.textContent = '📅 Hari Ini';
+        btn.classList.remove('bg-purple-500', 'hover:bg-purple-600');
+        btn.classList.add('bg-indigo-500', 'hover:bg-indigo-600');
+    }
+    renderLaporan();
+});
+
 
 qs('#btn-show-all') && qs('#btn-show-all').addEventListener('click', ()=>{
     if(qs('#search-laporan')) qs('#search-laporan').value = '';
@@ -16924,6 +17264,7 @@ function renderKPITable(kpiData) {
                 <td class="px-4 py-3 text-gray-900 font-medium">${employee.nama}</td>
                 <td class="px-4 py-3 text-center text-gray-700">${employee.total_working_days}</td>
                 <td class="px-4 py-3 text-center text-green-600 font-semibold">${employee.ontime_count}</td>
+                <td class="px-4 py-3 text-center text-blue-600 font-semibold">${employee.wfa_count || 0}</td>
                 <td class="px-4 py-3 text-center text-red-600 font-semibold">${employee.late_count}</td>
                 <td class="px-4 py-3 text-center text-yellow-600 font-semibold">${employee.izin_sakit_count}</td>
                 <td class="px-4 py-3 text-center text-gray-600 font-semibold">${employee.alpha_count}</td>
