@@ -1,11 +1,16 @@
 ﻿<?php
 session_start();
 
+// Production-optimized PHP settings
 ini_set('log_errors', '1');
 ini_set('error_log', __DIR__ . DIRECTORY_SEPARATOR . 'php-error.log');
+ini_set('log_errors_max_len', '1024'); // Limit error log entry size
 error_reporting(E_ALL);
-// Optional: keep errors off the screen in prod
-ini_set('display_errors', '0');
+ini_set('display_errors', '0'); // Never show errors in production
+
+// Increase limits for large datasets (production hosting)
+@ini_set('memory_limit', '256M'); // Increase from default 128M
+@ini_set('max_execution_time', '60'); // Prevent infinite hangs
 
 error_log('bootstrap: index.php started');
 
@@ -772,6 +777,20 @@ function getFirstName($fullName) {
     if (empty($fullName)) return '';
     $nameParts = explode(' ', trim($fullName));
     return $nameParts[0];
+}
+
+// Helper function to convert memory limit string to bytes
+function return_bytes($val) {
+    $val = trim($val);
+    if (empty($val)) return 0;
+    $last = strtolower($val[strlen($val)-1]);
+    $val = (int)$val;
+    switch($last) {
+        case 'g': $val *= 1024;
+        case 'm': $val *= 1024;
+        case 'k': $val *= 1024;
+    }
+    return $val;
 }
 
 // Google Authenticator Helper Functions
@@ -2709,6 +2728,8 @@ if (isset($_GET['ajax'])) {
 
     if ($action === 'save_member' && $_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!isAdmin()) jsonResponse(['error' => 'Forbidden'], 403);
+        
+        try {
         $id = $_POST['id'] ?? '';
         $email = trim($_POST['email'] ?? '');
         $nim = trim($_POST['nim'] ?? '');
@@ -2769,8 +2790,8 @@ if (isset($_GET['ajax'])) {
             $sql = "UPDATE users SET " . implode(', ', $setParts) . " WHERE id=:id";
             $pdo->prepare($sql)->execute($params);
             
-            // Trigger backup setelah update user
-            triggerDatabaseBackup();
+            // OPTIMIZED: Backup trigger removed from frequent operations
+            // triggerDatabaseBackup(); // Backup happens on schedule instead
             
             jsonResponse(['ok' => true]);
         } else {
@@ -2804,6 +2825,13 @@ if (isset($_GET['ajax'])) {
             
             jsonResponse(['ok' => true]);
         }
+        } catch (PDOException $e) {
+            error_log("Database error in save_member: " . $e->getMessage());
+            jsonResponse(['error' => 'Gagal menyimpan data member'], 500);
+        } catch (Exception $e) {
+            error_log("Error in save_member: " . $e->getMessage());
+            jsonResponse(['error' => 'Terjadi kesalahan'], 500);
+        }
     }
 
     if ($action === 'delete_member' && $_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -2818,115 +2846,191 @@ if (isset($_GET['ajax'])) {
     }
 
     if ($action === 'get_attendance') {
-        // Admin: all; Pegawai: only their records
-        if (isAdmin()) {
-            // Get regular attendance records
-            $stmt = $pdo->query("SELECT a.*, u.nim, u.nama, u.startup,
-                (SELECT dr.status FROM daily_reports dr WHERE dr.user_id=a.user_id AND dr.report_date=DATE(a.jam_masuk_iso) LIMIT 1) AS daily_report_status
-                FROM attendance a JOIN users u ON u.id=a.user_id ORDER BY a.jam_masuk_iso DESC");
-            $attendanceData = $stmt->fetchAll();
+        try {
+            // Check memory usage before heavy operation
+            $memoryUsage = memory_get_usage(true);
+            $memoryLimit = ini_get('memory_limit');
+            $memoryLimitBytes = return_bytes($memoryLimit);
             
-            // Get izin/sakit records from attendance_notes
-            $notesStmt = $pdo->query("SELECT an.*, u.nim, u.nama, u.startup,
-                (SELECT dr.status FROM daily_reports dr WHERE dr.user_id=an.user_id AND dr.report_date=an.date LIMIT 1) AS daily_report_status
-                FROM attendance_notes an JOIN users u ON u.id=an.user_id ORDER BY an.date DESC");
-            $notesData = $notesStmt->fetchAll();
-            
-            // Convert notes data to attendance format
-            foreach ($notesData as $note) {
-                $attendanceData[] = [
-                    'id' => 'note_' . $note['id'],
-                    'user_id' => $note['user_id'],
-                    'nim' => $note['nim'],
-                    'nama' => $note['nama'],
-                    'startup' => $note['startup'],
-                    'jam_masuk' => '08:00', // Default time for izin/sakit
-                    'jam_masuk_iso' => $note['date'] . ' 08:00:00',
-                    'ekspresi_masuk' => null,
-                    'screenshot_masuk' => null,
-                    'lokasi_masuk' => null,
-                    'lat_masuk' => null,
-                    'lng_masuk' => null,
-                    'jam_pulang' => '17:00', // Default time for izin/sakit
-                    'jam_pulang_iso' => $note['date'] . ' 17:00:00',
-                    'ekspresi_pulang' => null,
-                    'screenshot_pulang' => null,
-                    'lokasi_pulang' => null,
-                    'lat_pulang' => null,
-                    'lng_pulang' => null,
-                    'status' => 'ontime',
-                    'ket' => $note['type'],
-                    'alasan_wfa' => null,
-                    'alasan_izin_sakit' => $note['keterangan'],
-                    'bukti_izin_sakit' => $note['bukti'],
-                    'daily_report_id' => null,
-                    'created_at' => $note['created_at'],
-                    'daily_report_status' => $note['daily_report_status'],
-                    'is_note' => true // Flag to identify this is from attendance_notes
-                ];
+            if ($memoryUsage > $memoryLimitBytes * 0.8) {
+                error_log("Memory usage high before get_attendance: " . round($memoryUsage / 1024 / 1024, 2) . "MB");
+                jsonResponse(['error' => 'Sistem sedang sibuk, coba lagi dalam beberapa saat'], 503);
             }
             
-            // Sort by date descending
-            usort($attendanceData, function($a, $b) {
-                return strtotime($b['jam_masuk_iso']) - strtotime($a['jam_masuk_iso']);
-            });
+            // Get pagination parameters
+            $limit = min((int)($_GET['limit'] ?? 500), 1000); // Max 1000 records at once
+            $offset = max((int)($_GET['offset'] ?? 0), 0);
             
-        } else {
-            $uid = (int)$_SESSION['user']['id'];
-            // Get regular attendance records
-            $stmt = $pdo->prepare("SELECT a.*, u.nim, u.nama, u.startup,
-                (SELECT dr.status FROM daily_reports dr WHERE dr.user_id=a.user_id AND dr.report_date=DATE(a.jam_masuk_iso) LIMIT 1) AS daily_report_status
-                FROM attendance a JOIN users u ON u.id=a.user_id WHERE a.user_id=:uid ORDER BY a.jam_masuk_iso DESC");
-            $stmt->execute([':uid' => $uid]);
-            $attendanceData = $stmt->fetchAll();
+            // Get date filters if provided
+            $startDate = $_GET['start_date'] ?? null;
+            $endDate = $_GET['end_date'] ?? null;
             
-            // Get izin/sakit records from attendance_notes for this user
-            $notesStmt = $pdo->prepare("SELECT an.*, u.nim, u.nama, u.startup,
-                (SELECT dr.status FROM daily_reports dr WHERE dr.user_id=an.user_id AND dr.report_date=an.date LIMIT 1) AS daily_report_status
-                FROM attendance_notes an JOIN users u ON u.id=an.user_id WHERE an.user_id=:uid ORDER BY an.date DESC");
-            $notesStmt->execute([':uid' => $uid]);
-            $notesData = $notesStmt->fetchAll();
-            
-            // Convert notes data to attendance format
-            foreach ($notesData as $note) {
-                $attendanceData[] = [
-                    'id' => 'note_' . $note['id'],
-                    'user_id' => $note['user_id'],
-                    'nim' => $note['nim'],
-                    'nama' => $note['nama'],
-                    'startup' => $note['startup'],
-                    'jam_masuk' => '08:00', // Default time for izin/sakit
-                    'jam_masuk_iso' => $note['date'] . ' 08:00:00',
-                    'ekspresi_masuk' => null,
-                    'screenshot_masuk' => null,
-                    'lokasi_masuk' => null,
-                    'lat_masuk' => null,
-                    'lng_masuk' => null,
-                    'jam_pulang' => '17:00', // Default time for izin/sakit
-                    'jam_pulang_iso' => $note['date'] . ' 17:00:00',
-                    'ekspresi_pulang' => null,
-                    'screenshot_pulang' => null,
-                    'lokasi_pulang' => null,
-                    'lat_pulang' => null,
-                    'lng_pulang' => null,
-                    'status' => 'ontime',
-                    'ket' => $note['type'],
-                    'alasan_wfa' => null,
-                    'alasan_izin_sakit' => $note['keterangan'],
-                    'bukti_izin_sakit' => $note['bukti'],
-                    'daily_report_id' => null,
-                    'created_at' => $note['created_at'],
-                    'daily_report_status' => $note['daily_report_status'],
-                    'is_note' => true // Flag to identify this is from attendance_notes
-                ];
+            // Admin: all; Pegawai: only their records
+            if (isAdmin()) {
+                // Build WHERE clause for date filtering
+                $whereClause = "1=1";
+                $params = [];
+                
+                if ($startDate && $endDate) {
+                    $whereClause .= " AND DATE(a.jam_masuk_iso) BETWEEN :start_date AND :end_date";
+                    $params[':start_date'] = $startDate;
+                    $params[':end_date'] = $endDate;
+                }
+                
+                // Get regular attendance records with pagination
+                $sql = "SELECT a.*, u.nim, u.nama, u.startup,
+                    (SELECT dr.status FROM daily_reports dr WHERE dr.user_id=a.user_id AND dr.report_date=DATE(a.jam_masuk_iso) LIMIT 1) AS daily_report_status
+                    FROM attendance a 
+                    JOIN users u ON u.id=a.user_id 
+                    WHERE $whereClause
+                    ORDER BY a.jam_masuk_iso DESC 
+                    LIMIT :limit OFFSET :offset";
+                
+                $stmt = $pdo->prepare($sql);
+                foreach ($params as $key => $value) {
+                    $stmt->bindValue($key, $value);
+                }
+                $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+                $stmt->bindValue(':offset', $offset, PDO::PARAM_INT);
+                $stmt->execute();
+                $attendanceData = $stmt->fetchAll();
+                
+                // Get izin/sakit records from attendance_notes with pagination
+                $notesWhereClause = "1=1";
+                $notesParams = [];
+                
+                if ($startDate && $endDate) {
+                    $notesWhereClause .= " AND an.date BETWEEN :start_date AND :end_date";
+                    $notesParams[':start_date'] = $startDate;
+                    $notesParams[':end_date'] = $endDate;
+                }
+                
+                $notesSql = "SELECT an.*, u.nim, u.nama, u.startup,
+                    (SELECT dr.status FROM daily_reports dr WHERE dr.user_id=an.user_id AND dr.report_date=an.date LIMIT 1) AS daily_report_status
+                    FROM attendance_notes an 
+                    JOIN users u ON u.id=an.user_id 
+                    WHERE $notesWhereClause
+                    ORDER BY an.date DESC 
+                    LIMIT :limit OFFSET :offset";
+                
+                $notesStmt = $pdo->prepare($notesSql);
+                foreach ($notesParams as $key => $value) {
+                    $notesStmt->bindValue($key, $value);
+                }
+                $notesStmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+                $notesStmt->bindValue(':offset', $offset, PDO::PARAM_INT);
+                $notesStmt->execute();
+                $notesData = $notesStmt->fetchAll();
+                
+            } else {
+                $uid = (int)$_SESSION['user']['id'];
+                
+                // Build WHERE clause for date filtering
+                $whereClause = "a.user_id=:uid";
+                $params = [':uid' => $uid];
+                
+                if ($startDate && $endDate) {
+                    $whereClause .= " AND DATE(a.jam_masuk_iso) BETWEEN :start_date AND :end_date";
+                    $params[':start_date'] = $startDate;
+                    $params[':end_date'] = $endDate;
+                }
+                
+                // Get regular attendance records with pagination
+                $sql = "SELECT a.*, u.nim, u.nama, u.startup,
+                    (SELECT dr.status FROM daily_reports dr WHERE dr.user_id=a.user_id AND dr.report_date=DATE(a.jam_masuk_iso) LIMIT 1) AS daily_report_status
+                    FROM attendance a 
+                    JOIN users u ON u.id=a.user_id 
+                    WHERE $whereClause
+                    ORDER BY a.jam_masuk_iso DESC 
+                    LIMIT :limit OFFSET :offset";
+                
+                $stmt = $pdo->prepare($sql);
+                foreach ($params as $key => $value) {
+                    $stmt->bindValue($key, $value);
+                }
+                $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+                $stmt->bindValue(':offset', $offset, PDO::PARAM_INT);
+                $stmt->execute();
+                $attendanceData = $stmt->fetchAll();
+                
+                // Get izin/sakit records from attendance_notes for this user with pagination
+                $notesWhereClause = "an.user_id=:uid";
+                $notesParams = [':uid' => $uid];
+                
+                if ($startDate && $endDate) {
+                    $notesWhereClause .= " AND an.date BETWEEN :start_date AND :end_date";
+                    $notesParams[':start_date'] = $startDate;
+                    $notesParams[':end_date'] = $endDate;
+                }
+                
+                $notesSql = "SELECT an.*, u.nim, u.nama, u.startup,
+                    (SELECT dr.status FROM daily_reports dr WHERE dr.user_id=an.user_id AND dr.report_date=an.date LIMIT 1) AS daily_report_status
+                    FROM attendance_notes an 
+                    JOIN users u ON u.id=an.user_id 
+                    WHERE $notesWhereClause
+                    ORDER BY an.date DESC 
+                    LIMIT :limit OFFSET :offset";
+                
+                $notesStmt = $pdo->prepare($notesSql);
+                foreach ($notesParams as $key => $value) {
+                    $notesStmt->bindValue($key, $value);
+                }
+                $notesStmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+                $notesStmt->bindValue(':offset', $offset, PDO::PARAM_INT);
+                $notesStmt->execute();
+                $notesData = $notesStmt->fetchAll();
             }
             
-            // Sort by date descending
-            usort($attendanceData, function($a, $b) {
-                return strtotime($b['jam_masuk_iso']) - strtotime($a['jam_masuk_iso']);
-            });
+            // Convert notes data to attendance format (only if notes exist)
+            if (!empty($notesData)) {
+                foreach ($notesData as $note) {
+                    $attendanceData[] = [
+                        'id' => 'note_' . $note['id'],
+                        'user_id' => $note['user_id'],
+                        'nim' => $note['nim'],
+                        'nama' => $note['nama'],
+                        'startup' => $note['startup'],
+                        'jam_masuk' => '08:00',
+                        'jam_masuk_iso' => $note['date'] . ' 08:00:00',
+                        'ekspresi_masuk' => null,
+                        'screenshot_masuk' => null,
+                        'lokasi_masuk' => null,
+                        'lat_masuk' => null,
+                        'lng_masuk' => null,
+                        'jam_pulang' => '17:00',
+                        'jam_pulang_iso' => $note['date'] . ' 17:00:00',
+                        'ekspresi_pulang' => null,
+                        'screenshot_pulang' => null,
+                        'lokasi_pulang' => null,
+                        'lat_pulang' => null,
+                        'lng_pulang' => null,
+                        'status' => 'ontime',
+                        'ket' => $note['type'],
+                        'alasan_wfa' => null,
+                        'alasan_izin_sakit' => $note['keterangan'],
+                        'bukti_izin_sakit' => $note['bukti'],
+                        'daily_report_id' => null,
+                        'created_at' => $note['created_at'],
+                        'daily_report_status' => $note['daily_report_status'],
+                        'is_note' => true
+                    ];
+                }
+                
+                // Sort combined data by date descending (only if we have notes)
+                usort($attendanceData, function($a, $b) {
+                    return strtotime($b['jam_masuk_iso']) - strtotime($a['jam_masuk_iso']);
+                });
+            }
+            
+            jsonResponse(['ok' => true, 'data' => $attendanceData, 'limit' => $limit, 'offset' => $offset]);
+            
+        } catch (PDOException $e) {
+            error_log("Database error in get_attendance: " . $e->getMessage());
+            jsonResponse(['error' => 'Gagal memuat data presensi. Silakan refresh halaman.'], 500);
+        } catch (Exception $e) {
+            error_log("Error in get_attendance: " . $e->getMessage());
+            jsonResponse(['error' => 'Terjadi kesalahan. Silakan coba lagi.'], 500);
         }
-        jsonResponse(['ok' => true, 'data' => $attendanceData]);
     }
     
     if ($action === 'get_kpi_data') {
@@ -3449,8 +3553,8 @@ if (isset($_GET['ajax'])) {
                 $ins = $pdo->prepare("INSERT INTO attendance (user_id, jam_masuk, jam_masuk_iso, ekspresi_masuk, screenshot_masuk, lokasi_masuk, lat_masuk, lng_masuk, status, ket, alasan_wfa, alasan_overtime, lokasi_overtime) VALUES (:uid, :jam, :iso, :exp, :screenshot, :lokasi, :lat, :lng, :status, :ket, :alasan, :alasan_ot, :lokasi_ot)");
                 $ins->execute([':uid' => $u['id'], ':jam' => $jamSekarang, ':iso' => $iso, ':exp' => $ekspresi, ':screenshot' => $screenshot, ':lokasi' => $lokasi, ':lat' => $lat, ':lng' => $lng, ':status' => $status, ':ket' => $ketVal, ':alasan' => $alasanWfa, ':alasan_ot' => null, ':lokasi_ot' => null]);
                 
-                // Trigger backup setelah presensi masuk
-                triggerDatabaseBackup();
+                // OPTIMIZED: Backup trigger removed - happens on schedule
+                // triggerDatabaseBackup();
                 
                 // ULTRA-FAST: Ultra-minimal response for maximum speed
                 $jamMasukFormat = substr($jamSekarang, 0, 5);
@@ -5794,6 +5898,64 @@ if ($page === 'logout') {
         window.FACEAPI_MODEL_URL = 'assets/js/face-api-models';
     </script>
     <script src="assets/js/performance-optimizer.js"></script>
+    
+    <!-- Auto cache clear - force browser to reload fresh content -->
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    
+    <script>
+    // Auto cache clear on page load
+    (function() {
+        'use strict';
+        
+        // Clear service worker cache if exists
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.getRegistrations().then(function(registrations) {
+                for(let registration of registrations) {
+                    registration.unregister();
+                }
+            });
+        }
+        
+        // Clear all browser caches
+        if ('caches' in window) {
+            caches.keys().then(function(names) {
+                for (let name of names) {
+                    caches.delete(name);
+                }
+            });
+        }
+        
+        // Force reload assets with version parameter
+        window.addEventListener('load', function() {
+            const version = Date.now();
+            const links = document.querySelectorAll('link[rel="stylesheet"], script[src]');
+            let needsReload = false;
+            
+            links.forEach(function(link) {
+                try {
+                    const url = new URL(link.href || link.src, window.location.href);
+                    if (!url.searchParams.has('v')) {
+                        url.searchParams.set('v', version);
+                        if (link.tagName === 'LINK') {
+                            link.href = url.toString();
+                        } else if (link.tagName === 'SCRIPT') {
+                            link.src = url.toString();
+                        }
+                        needsReload = true;
+                    }
+                } catch (e) {
+                    // Ignore external URLs that cause CORS errors
+                }
+            });
+            
+            // Log cache clear action
+            console.log('Browser cache cleared and assets reloaded with version:', version);
+        });
+    })();
+    </script>
+    
     <script src="assets/js/chart.min.js"></script>
     <link rel="stylesheet" href="assets/css/inter.css">
     <link rel='stylesheet' href='assets/css/uicons-solid-rounded.css'>

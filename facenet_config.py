@@ -11,14 +11,14 @@ import os
 FACENET_MODEL_PATH = os.path.join('facenet-master', 'models', '20180402-114759')
 MTCNN_MODEL_PATH = os.path.join('facenet-master', 'models', 'mtcnn_weights')
 
-# Face detection settings - Optimized for maximum speed
+# Face detection settings - Optimized for MAXIMUM ACCURACY
 FACE_CROP_SIZE = 160
 FACE_CROP_MARGIN = 32
-MIN_FACE_SIZE = 30  # Smaller minimum face size for faster detection
-FACE_THRESHOLDS = [0.6, 0.7, 0.7]  # Balanced MTCNN thresholds for speed and accuracy
+MIN_FACE_SIZE = 40  # Increased from 30 to 40 - reject small/blurry faces
+FACE_THRESHOLDS = [0.7, 0.8, 0.8]  # Stricter MTCNN thresholds for better accuracy
 
-# Recognition settings - Optimized for maximum speed
-DEFAULT_THRESHOLD = 0.4  # Balanced threshold for speed and accuracy
+# Recognition settings - Optimized for MAXIMUM ACCURACY (preventing false positives)
+DEFAULT_THRESHOLD = 0.6  # Increased from 0.4 to 0.6 - more strict to prevent false matches
 MAX_FACES_PER_IMAGE = 1  # Limit to 1 face for better performance
 
 # Image processing settings
@@ -58,12 +58,12 @@ DEBUG_IMAGE_PATH = 'debug_images'
 MODEL_BACKEND = 'tensorflow'  # 'tensorflow' or 'keras'
 MODEL_VERSION = '1.0'
 
-# Face recognition settings - Optimized for maximum speed
+# Face recognition settings - Optimized for MAXIMUM ACCURACY
 RECOGNITION_METHOD = 'euclidean'  # 'euclidean' or 'cosine'
 NORMALIZE_EMBEDDINGS = True
-GENDER_VALIDATION = False  # Disable gender validation for maximum speed
-MULTI_ATTEMPT_VALIDATION = False  # Disable multiple validation attempts for maximum speed
-STRICT_MODE = False  # Disable strict mode for maximum speed
+GENDER_VALIDATION = True  # ENABLED - Prevent cross-gender false matches
+MULTI_ATTEMPT_VALIDATION = True  # ENABLED - Multiple validation for higher confidence
+STRICT_MODE = True  # ENABLED - Reject ambiguous matches
 
 # Cache settings
 ENABLE_CACHE = True
