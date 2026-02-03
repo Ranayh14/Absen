@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Character Display</title>
+</head>
+<body>
+    <h1>Test Character API</h1>
+    
+    <div id="test-results"></div>
+    
+    <script>
+        // Test API endpoint
+        async function testAPI() {
+            const resultsDiv = document.getElementById('test-results');
+            resultsDiv.innerHTML = '<p>Testing API...</p>';
+            
+            try {
+                const response = await fetch('config.php?action=get_employee_character', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    }
+                });
+                
+                console.log('Response status:', response.status);
+                console.log('Response ok:', response.ok);
+                
+                const text = await response.text();
+                console.log('Response text:', text.substring(0, 200));
+                
+                const data = JSON.parse(text);
+                console.log('Parsed data:', data);
+                
+                let html = '<h2>API Response:</h2>';
+                html += '<p><strong>Success:</strong> ' + data.success + '</p>';
+                html += '<p><strong>Emotion:</strong> ' + (data.emotion || 'N/A') + '</p>';
+                html += '<p><strong>Missing Reports:</strong> ' + (data.missing_reports || 'N/A') + '</p>';
+                
+                if (data.character) {
+                    html += '<p><strong>Character Length:</strong> ' + data.character.length + ' bytes</p>';
+                    html += '<img src="' + data.character + '" style="max-width: 200px; border: 2px solid #ccc; padding: 10px;">';
+                } else {
+                    html += '<p><strong>Error:</strong> ' + (data.error || 'No character data') + '</p>';
+                }
+                
+                resultsDiv.innerHTML = html;
+                
+            } catch (error) {
+                console.error('Error:', error);
+                resultsDiv.innerHTML = '<p style="color: red;">Error: ' + error.message + '</p>';
+            }
+        }
+        
+        // Run test on load
+        testAPI();
+    </script>
+</body>
+</html>

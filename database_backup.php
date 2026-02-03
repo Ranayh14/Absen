@@ -15,7 +15,7 @@ $DB_NAME = 'absen_db';
  * @param PDO|null $pdo Optional PDO connection, will create if not provided
  * @return array Result array with success status and message
  */
-function createDatabaseBackupPHP(PDO $pdo = null): array {
+function createDatabaseBackupPHP(?PDO $pdo = null): array {
     global $DB_HOST, $DB_USER, $DB_PASS, $DB_NAME;
     
     try {
@@ -91,7 +91,7 @@ function createDatabaseBackupPHP(PDO $pdo = null): array {
         }
         
         return [
-            'success' => true, 
+            'ok' => true, 
             'message' => 'Backup berhasil dibuat' . ($fileSaved ? ' dan disimpan ke file' : ' (hanya dalam memori)'),
             'sql_content' => $sql,
             'size' => strlen($sql),
@@ -100,7 +100,7 @@ function createDatabaseBackupPHP(PDO $pdo = null): array {
         ];
         
     } catch (Exception $e) {
-        return ['success' => false, 'message' => 'Error: ' . $e->getMessage()];
+        return ['ok' => false, 'message' => 'Error: ' . $e->getMessage()];
     }
 }
 
@@ -126,7 +126,7 @@ function createDatabaseBackup(): array {
         $result = createDatabaseBackupPHP($pdo);
         
         // If PHP backup succeeded, return it
-        if ($result['success']) {
+        if ($result['ok']) {
             return $result;
         }
         
@@ -135,13 +135,13 @@ function createDatabaseBackup(): array {
         $backupDir = __DIR__ . '/database_backup';
         if (!is_dir($backupDir)) {
             if (!mkdir($backupDir, 0755, true)) {
-                return ['success' => false, 'message' => 'Gagal membuat direktori backup'];
+                return ['ok' => false, 'message' => 'Gagal membuat direktori backup'];
             }
         }
         
         // Check if directory is writable
         if (!is_writable($backupDir)) {
-            return ['success' => false, 'message' => 'Direktori backup tidak dapat ditulis'];
+            return ['ok' => false, 'message' => 'Direktori backup tidak dapat ditulis'];
         }
         
         // Backup file path
@@ -172,7 +172,7 @@ function createDatabaseBackup(): array {
         }
         
         if (!$mysqldump) {
-            return ['success' => false, 'message' => 'mysqldump tidak ditemukan. Pastikan MySQL/XAMPP terinstall dengan benar.'];
+            return ['ok' => false, 'message' => 'mysqldump tidak ditemukan. Pastikan MySQL/XAMPP terinstall dengan benar.'];
         }
         
         // Create mysqldump command
@@ -196,17 +196,17 @@ function createDatabaseBackup(): array {
             if (!empty($output)) {
                 $errorMsg .= '. Output: ' . implode(' ', $output);
             }
-            return ['success' => false, 'message' => $errorMsg];
+            return ['ok' => false, 'message' => $errorMsg];
         }
         
         // Verify backup file was created and has content
         if (!file_exists($backupFile)) {
-            return ['success' => false, 'message' => 'File backup tidak dibuat'];
+            return ['ok' => false, 'message' => 'File backup tidak dibuat'];
         }
         
         if (filesize($backupFile) === 0) {
             unlink($backupFile);
-            return ['success' => false, 'message' => 'File backup kosong'];
+            return ['ok' => false, 'message' => 'File backup kosong'];
         }
         
         // Add backup info header
@@ -219,14 +219,14 @@ function createDatabaseBackup(): array {
         file_put_contents($backupFile, $backupInfo . $content);
         
         return [
-            'success' => true, 
+            'ok' => true, 
             'message' => 'Backup berhasil dibuat',
             'file' => $backupFile,
             'size' => filesize($backupFile)
         ];
         
     } catch (Exception $e) {
-        return ['success' => false, 'message' => 'Error: ' . $e->getMessage()];
+        return ['ok' => false, 'message' => 'Error: ' . $e->getMessage()];
     }
 }
 
@@ -341,7 +341,7 @@ if (php_sapi_name() === 'cli') {
     echo "Creating database backup...\n";
     $result = createDatabaseBackup();
     
-    if ($result['success']) {
+    if ($result['ok']) {
         echo "✅ " . $result['message'] . "\n";
         echo "File: " . $result['file'] . "\n";
         echo "Size: " . formatBytes($result['size']) . "\n";

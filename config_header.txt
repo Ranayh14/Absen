@@ -1,0 +1,4 @@
+<?php
+// Config file - Database configuration, helper functions, and AJAX endpoints
+// This file should NOT call session_start() - that's done in index.php
+
