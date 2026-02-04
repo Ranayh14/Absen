@@ -207844,3 +207844,85 @@ Stack trace:
 [03-Feb-2026 15:32:06 Asia/Jakarta] bootstrap: index.php started
 [03-Feb-2026 15:32:06 Asia/Jakarta] bootstrap: index.php started
 [03-Feb-2026 15:32:07 Asia/Jakarta] bootstrap: index.php started
+[03-Feb-2026 15:33:07 Asia/Jakarta] bootstrap: index.php started
+[03-Feb-2026 15:34:07 Asia/Jakarta] bootstrap: index.php started
+[03-Feb-2026 15:35:07 Asia/Jakarta] bootstrap: index.php started
+[03-Feb-2026 15:36:07 Asia/Jakarta] bootstrap: index.php started
+[03-Feb-2026 15:37:07 Asia/Jakarta] bootstrap: index.php started
+[03-Feb-2026 15:38:07 Asia/Jakarta] bootstrap: index.php started
+[03-Feb-2026 15:39:07 Asia/Jakarta] bootstrap: index.php started
+[03-Feb-2026 15:40:07 Asia/Jakarta] bootstrap: index.php started
+[03-Feb-2026 15:41:07 Asia/Jakarta] bootstrap: index.php started
+[03-Feb-2026 15:42:07 Asia/Jakarta] bootstrap: index.php started
+[03-Feb-2026 15:43:07 Asia/Jakarta] bootstrap: index.php started
+[03-Feb-2026 15:44:07 Asia/Jakarta] bootstrap: index.php started
+[03-Feb-2026 15:45:07 Asia/Jakarta] bootstrap: index.php started
+[03-Feb-2026 15:46:07 Asia/Jakarta] bootstrap: index.php started
+[03-Feb-2026 15:47:07 Asia/Jakarta] bootstrap: index.php started
+[03-Feb-2026 15:48:07 Asia/Jakarta] bootstrap: index.php started
+[03-Feb-2026 15:49:07 Asia/Jakarta] bootstrap: index.php started
+[03-Feb-2026 15:50:07 Asia/Jakarta] bootstrap: index.php started
+[03-Feb-2026 15:51:07 Asia/Jakarta] bootstrap: index.php started
+[03-Feb-2026 15:52:07 Asia/Jakarta] bootstrap: index.php started
+[03-Feb-2026 15:53:07 Asia/Jakarta] bootstrap: index.php started
+[03-Feb-2026 15:54:07 Asia/Jakarta] bootstrap: index.php started
+[03-Feb-2026 15:55:07 Asia/Jakarta] bootstrap: index.php started
+[03-Feb-2026 15:56:07 Asia/Jakarta] bootstrap: index.php started
+[03-Feb-2026 15:57:07 Asia/Jakarta] bootstrap: index.php started
+[03-Feb-2026 15:58:07 Asia/Jakarta] bootstrap: index.php started
+[03-Feb-2026 15:59:07 Asia/Jakarta] bootstrap: index.php started
+[03-Feb-2026 16:00:07 Asia/Jakarta] bootstrap: index.php started
+[03-Feb-2026 16:01:07 Asia/Jakarta] bootstrap: index.php started
+[03-Feb-2026 16:02:07 Asia/Jakarta] bootstrap: index.php started
+[04-Feb-2026 07:47:59 Asia/Jakarta] bootstrap: index.php started
+[04-Feb-2026 07:47:59 Asia/Jakarta] bootstrap: index.php started
+[04-Feb-2026 07:48:09 Asia/Jakarta] bootstrap: index.php started
+[04-Feb-2026 07:48:11 Asia/Jakarta] bootstrap: index.php started
+[04-Feb-2026 07:48:11 Asia/Jakarta] bootstrap: index.php started
+[04-Feb-2026 07:48:11 Asia/Jakarta] bootstrap: index.php started
+[04-Feb-2026 07:48:11 Asia/Jakarta] bootstrap: index.php started
+[04-Feb-2026 07:48:18 Asia/Jakarta] get_today_attendance: type=masuk, today=2026-02-04, count=0
+[04-Feb-2026 07:48:18 Asia/Jakarta] bootstrap: index.php started
+[04-Feb-2026 07:48:18 Asia/Jakarta] get_today_attendance: type=masuk, today=2026-02-04, count=0
+[04-Feb-2026 07:48:18 Asia/Jakarta] bootstrap: index.php started
+[04-Feb-2026 07:48:18 Asia/Jakarta] Google Geocoding API error: This API is not activated on your API project. You may need to enable this API in the Google Cloud Console: https://console.cloud.google.com/apis/library?filter=category:maps. Learn more at https://developers.google.com/maps/gmp-get-started#enable-api-sdk.
+[04-Feb-2026 07:48:19 Asia/Jakarta] Reverse geocoding success: Telkom University, No. 1 Jl. Gang Gotong Royong, Sukapura, Dayeuhkolot, 40257 (RT: , RW: )
+[04-Feb-2026 07:48:19 Asia/Jakarta] Geocoding SUCCESS: OSM Zoom 18 - Telkom University, No. 1 Jl. Gang Gotong Royong, Sukapura, Dayeuhkolot, 40257
+[04-Feb-2026 07:51:02 Asia/Jakarta] bootstrap: index.php started
+[04-Feb-2026 07:51:32 Asia/Jakarta] Google Geocoding API request failed: HTTP 0, Error: Resolving timed out after 5701 milliseconds
+[04-Feb-2026 07:51:46 Asia/Jakarta] Reverse geocoding failed for lat=-6.97, lng=107.63
+[04-Feb-2026 07:51:47 Asia/Jakarta] Reverse geocoding success: Sukapura, Dayeuhkolot, 40257 (RT: , RW: )
+[04-Feb-2026 07:51:47 Asia/Jakarta] Geocoding SUCCESS: OSM Zoom 17 - Sukapura, Dayeuhkolot, 40257
+[04-Feb-2026 07:52:18 Asia/Jakarta] bootstrap: index.php started
+[04-Feb-2026 07:52:21 Asia/Jakarta] bootstrap: index.php started
+[04-Feb-2026 07:52:21 Asia/Jakarta] bootstrap: index.php started
+[04-Feb-2026 07:52:21 Asia/Jakarta] bootstrap: index.php started
+[04-Feb-2026 07:52:22 Asia/Jakarta] bootstrap: index.php started
+[04-Feb-2026 07:52:22 Asia/Jakarta] get_today_attendance: type=masuk, today=2026-02-04, count=0
+[04-Feb-2026 07:52:22 Asia/Jakarta] bootstrap: index.php started
+[04-Feb-2026 07:52:22 Asia/Jakarta] get_today_attendance: type=masuk, today=2026-02-04, count=0
+[04-Feb-2026 07:52:31 Asia/Jakarta] bootstrap: index.php started
+[04-Feb-2026 07:52:34 Asia/Jakarta] Google Geocoding API error: This API is not activated on your API project. You may need to enable this API in the Google Cloud Console: https://console.cloud.google.com/apis/library?filter=category:maps. Learn more at https://developers.google.com/maps/gmp-get-started#enable-api-sdk.
+[04-Feb-2026 07:52:37 Asia/Jakarta] Reverse geocoding success: Fakultas Ilmu Terapan, Jl. Jalan Sukabirus, Sukapura, Dayeuhkolot, Jawa Barat, 40257 (RT: , RW: )
+[04-Feb-2026 07:52:37 Asia/Jakarta] Geocoding SUCCESS: OSM Zoom 18 - Fakultas Ilmu Terapan, Jl. Jalan Sukabirus, Sukapura, Dayeuhkolot, Jawa Barat, 40257
+[04-Feb-2026 07:52:38 Asia/Jakarta] bootstrap: index.php started
+[04-Feb-2026 07:52:42 Asia/Jakarta] bootstrap: index.php started
+[04-Feb-2026 07:52:42 Asia/Jakarta] WARNING: Could not detect valid IP address (skipped localhost) - will rely on WiFi/GPS validation
+[04-Feb-2026 07:52:42 Asia/Jakarta] WFO IP Detection - Public IP: NOT DETECTED, Mode: api
+[04-Feb-2026 07:52:42 Asia/Jakarta] WFO Distance Check - Distance: 43m, Radius: 200m, Inside: Yes
+[04-Feb-2026 07:52:42 Asia/Jakarta] === WFO VALIDATION DEBUG ===
+[04-Feb-2026 07:52:42 Asia/Jakarta] WiFi SSID: NOT DETECTED (Raw: 'NOT IN POST')
+[04-Feb-2026 07:52:42 Asia/Jakarta] Public IP: NOT DETECTED
+[04-Feb-2026 07:52:42 Asia/Jakarta] REMOTE_ADDR: ::1
+[04-Feb-2026 07:52:42 Asia/Jakarta] POST public_ip: NOT IN POST
+[04-Feb-2026 07:52:42 Asia/Jakarta] Location: Fakultas Ilmu Terapan, Jl. Jalan Sukabirus, Sukapura, Dayeuhkolot, Jawa Barat, 40257
+[04-Feb-2026 07:52:42 Asia/Jakarta] GPS Lat: -6.9729508317568, Lng: 107.63229728688
+[04-Feb-2026 07:52:42 Asia/Jakarta] GPS Accuracy: N/A
+[04-Feb-2026 07:52:42 Asia/Jakarta] Distance: 43m, Radius: 200m
+[04-Feb-2026 07:52:42 Asia/Jakarta] Require WiFi: NO
+[04-Feb-2026 07:52:42 Asia/Jakarta] Is Valid WiFi: NO
+[04-Feb-2026 07:52:42 Asia/Jakarta] WFO IP Check - Skipped (IP: EMPTY)
+[04-Feb-2026 07:52:42 Asia/Jakarta] WiFi tidak wajib - skip WiFi validation
+[04-Feb-2026 07:52:42 Asia/Jakarta] ✓ GPS inside radius - set WFO berdasarkan GPS (fallback terakhir, distance: 43m, radius: 200m)
+[04-Feb-2026 07:52:42 Asia/Jakarta] bootstrap: index.php started
+[04-Feb-2026 07:52:43 Asia/Jakarta] get_today_attendance: type=masuk, today=2026-02-04, count=1

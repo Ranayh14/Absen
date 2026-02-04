@@ -456,9 +456,10 @@ function reverseGeocodeGoogle(float $lat, float $lng): ?string {
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, $url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 5);
-    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 3);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 5);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false); // Fix for hosting
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
     
     $resp = curl_exec($ch);
     $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -607,19 +608,22 @@ function reverseGeocodeNominatim(float $lat, float $lng, int $zoom): ?string {
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, $url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 5); // INCREASED from 1 to 5 seconds for better accuracy
-    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 3); // Connection timeout 3 seconds
+    curl_setopt($ch, CURLOPT_TIMEOUT, 15); // INCREASED to 15 seconds for hosting
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10); 
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false); // Fix for hosting SSL issues
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
     curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        'User-Agent: AbsenApp/1.0 (XAMPP PHP)'
+        'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     ]);
     
     $resp = curl_exec($ch);
     $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlError = curl_error($ch);
     curl_close($ch);
     
     if ($code !== 200 || !$resp) {
         // Fallback to coordinates if geocoding fails
-        error_log("Reverse geocoding failed for lat=$lat, lng=$lng");
+        error_log("Reverse geocoding failed for lat=$lat, lng=$lng. Error: $curlError");
         return "Koordinat: " . round($lat, 6) . ", " . round($lng, 6);
     }
     
