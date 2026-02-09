@@ -970,6 +970,21 @@
                                 <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider px-1">Tanggal</label>
                                 <input type="date" id="late-date" class="w-full mt-1 p-3 bg-gray-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-blue-500" value="<?php echo date('Y-m-d'); ?>">
                             </div>
+                            
+                            <!-- New Fields: Attendance Type & Reason -->
+                            <div>
+                                <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider px-1">Tipe Presensi</label>
+                                <select id="late-attendance-type" class="w-full mt-1 p-3 bg-gray-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-blue-500" onchange="toggleLateReason()">
+                                    <option value="wfo">Work From Office (WFO)</option>
+                                    <option value="wfa">Work From Anywhere (WFA)</option>
+                                    <option value="overtime">Lembur (Overtime)</option>
+                                </select>
+                            </div>
+                            <div id="late-reason-container" class="hidden">
+                                <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider px-1 text-red-500">Alasan (Wajib untuk WFA/Overtime)</label>
+                                <textarea id="late-reason" rows="2" class="w-full mt-1 p-3 bg-gray-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-blue-500" placeholder="Jelaskan alasan WFA atau detail Overtime..."></textarea>
+                            </div>
+                            
                             <div class="grid grid-cols-2 gap-3">
                                 <div>
                                     <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider px-1">Jam Masuk</label>
@@ -1080,6 +1095,11 @@
             
             // Reset forms
             if (type === 'late_attendance') {
+                // Reset new fields
+                qs('#late-attendance-type').value = 'wfo';
+                qs('#late-reason').value = '';
+                toggleLateReason();
+
                 const pending = sessionStorage.getItem('late_req_pending');
                 if (pending) {
                     const data = JSON.parse(pending);
@@ -1121,6 +1141,16 @@
             reader.readAsDataURL(file);
         }
 
+        function toggleLateReason() {
+            const type = document.getElementById('late-attendance-type').value;
+            const container = document.getElementById('late-reason-container');
+            if (type === 'wfa' || type === 'overtime') {
+                container.classList.remove('hidden');
+            } else {
+                container.classList.add('hidden');
+            }
+        }
+
         async function submitHelpRequest(type) {
             let data = { ajax: 'submit_help_request', request_type: type };
 
@@ -1135,6 +1165,14 @@
                 data.jam_masuk = qs('#late-jam-masuk').value;
                 data.jam_pulang = qs('#late-jam-pulang').value;
                 
+                // New Fields
+                data.attendance_type = qs('#late-attendance-type').value;
+                data.attendance_reason = qs('#late-reason').value;
+
+                if ((data.attendance_type === 'wfa' || data.attendance_type === 'overtime') && !data.attendance_reason) {
+                    return showNotif('Wajib mengisi alasan untuk ' + data.attendance_type.toUpperCase(), false);
+                }
+
                 // Priority for Bukti: Session-based face verification first
                 const faceVerified = sessionStorage.getItem('late_req_face_verified');
                 if (faceVerified) {

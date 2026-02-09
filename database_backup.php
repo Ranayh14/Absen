@@ -92,6 +92,7 @@ function createDatabaseBackupPHP(?PDO $pdo = null): array {
         
         return [
             'ok' => true, 
+            'success' => true,
             'message' => 'Backup berhasil dibuat' . ($fileSaved ? ' dan disimpan ke file' : ' (hanya dalam memori)'),
             'sql_content' => $sql,
             'size' => strlen($sql),
@@ -100,7 +101,7 @@ function createDatabaseBackupPHP(?PDO $pdo = null): array {
         ];
         
     } catch (Exception $e) {
-        return ['ok' => false, 'message' => 'Error: ' . $e->getMessage()];
+        return ['ok' => false, 'success' => false, 'message' => 'Error: ' . $e->getMessage()];
     }
 }
 
@@ -126,7 +127,7 @@ function createDatabaseBackup(): array {
         $result = createDatabaseBackupPHP($pdo);
         
         // If PHP backup succeeded, return it
-        if ($result['ok']) {
+        if ($result['ok'] || ($result['success'] ?? false)) {
             return $result;
         }
         
@@ -135,13 +136,13 @@ function createDatabaseBackup(): array {
         $backupDir = __DIR__ . '/database_backup';
         if (!is_dir($backupDir)) {
             if (!mkdir($backupDir, 0755, true)) {
-                return ['ok' => false, 'message' => 'Gagal membuat direktori backup'];
+                return ['ok' => false, 'success' => false, 'message' => 'Gagal membuat direktori backup'];
             }
         }
         
         // Check if directory is writable
         if (!is_writable($backupDir)) {
-            return ['ok' => false, 'message' => 'Direktori backup tidak dapat ditulis'];
+            return ['ok' => false, 'success' => false, 'message' => 'Direktori backup tidak dapat ditulis'];
         }
         
         // Backup file path
@@ -172,7 +173,7 @@ function createDatabaseBackup(): array {
         }
         
         if (!$mysqldump) {
-            return ['ok' => false, 'message' => 'mysqldump tidak ditemukan. Pastikan MySQL/XAMPP terinstall dengan benar.'];
+            return ['ok' => false, 'success' => false, 'message' => 'mysqldump tidak ditemukan. Pastikan MySQL/XAMPP terinstall dengan benar.'];
         }
         
         // Create mysqldump command
@@ -196,17 +197,17 @@ function createDatabaseBackup(): array {
             if (!empty($output)) {
                 $errorMsg .= '. Output: ' . implode(' ', $output);
             }
-            return ['ok' => false, 'message' => $errorMsg];
+            return ['ok' => false, 'success' => false, 'message' => $errorMsg];
         }
         
         // Verify backup file was created and has content
         if (!file_exists($backupFile)) {
-            return ['ok' => false, 'message' => 'File backup tidak dibuat'];
+            return ['ok' => false, 'success' => false, 'message' => 'File backup tidak dibuat'];
         }
         
         if (filesize($backupFile) === 0) {
             unlink($backupFile);
-            return ['ok' => false, 'message' => 'File backup kosong'];
+            return ['ok' => false, 'success' => false, 'message' => 'File backup kosong'];
         }
         
         // Add backup info header
@@ -220,13 +221,14 @@ function createDatabaseBackup(): array {
         
         return [
             'ok' => true, 
+            'success' => true,
             'message' => 'Backup berhasil dibuat',
             'file' => $backupFile,
             'size' => filesize($backupFile)
         ];
         
     } catch (Exception $e) {
-        return ['ok' => false, 'message' => 'Error: ' . $e->getMessage()];
+        return ['ok' => false, 'success' => false, 'message' => 'Error: ' . $e->getMessage()];
     }
 }
 
@@ -240,7 +242,7 @@ function restoreDatabaseFromBackup(string $backupFile): array {
     
     try {
         if (!file_exists($backupFile)) {
-            return ['success' => false, 'message' => 'File backup tidak ditemukan'];
+            return ['ok' => false, 'success' => false, 'message' => 'File backup tidak ditemukan'];
         }
         
         // Find mysql executable
@@ -261,7 +263,7 @@ function restoreDatabaseFromBackup(string $backupFile): array {
         }
         
         if (!$mysql) {
-            return ['success' => false, 'message' => 'mysql tidak ditemukan. Pastikan MySQL/XAMPP terinstall dengan benar.'];
+            return ['ok' => false, 'success' => false, 'message' => 'mysql tidak ditemukan. Pastikan MySQL/XAMPP terinstall dengan benar.'];
         }
         
         // Create mysql command for restore
@@ -285,13 +287,13 @@ function restoreDatabaseFromBackup(string $backupFile): array {
             if (!empty($output)) {
                 $errorMsg .= '. Output: ' . implode(' ', $output);
             }
-            return ['success' => false, 'message' => $errorMsg];
+            return ['ok' => false, 'success' => false, 'message' => $errorMsg];
         }
         
-        return ['success' => true, 'message' => 'Database berhasil di-restore'];
+        return ['ok' => true, 'success' => true, 'message' => 'Database berhasil di-restore'];
         
     } catch (Exception $e) {
-        return ['success' => false, 'message' => 'Error: ' . $e->getMessage()];
+        return ['ok' => false, 'success' => false, 'message' => 'Error: ' . $e->getMessage()];
     }
 }
 

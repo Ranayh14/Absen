@@ -2305,13 +2305,21 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
             }
             
             $result = createDatabaseBackupPHP($pdo);
-            if (!$result['success']) {
-                http_response_code(500);
-                die('Failed to generate backup: ' . $result['message']);
+            if (!($result['ok'] ?? $result['success'] ?? false)) {
+                // Double check if message indicates success but flag is wrong
+                if (isset($result['message']) && strpos($result['message'], 'berhasil') !== false) {
+                    // It actually succeeded but flags were missing/wrong
+                } else {
+                    http_response_code(500);
+                    die('Failed to generate backup: ' . ($result['message'] ?? 'Unknown error'));
+                }
             }
             
             $sqlContent = $result['sql_content'];
             $downloadFileName = 'absen_db_backup_' . date('Y-m-d_His') . '.sql';
+            
+            // Clear output buffer to save memory
+            while (ob_get_level()) ob_end_clean();
             
             // Set headers for file download
             header('Content-Type: application/octet-stream');
@@ -2341,9 +2349,12 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
             }
             
             $result = createDatabaseBackupPHP($pdo);
-            if (!$result['success']) {
-                http_response_code(404);
-                die('File not found and failed to generate backup');
+            if (!($result['ok'] ?? $result['success'] ?? false)) {
+                if (isset($result['message']) && strpos($result['message'], 'berhasil') !== false) {
+                } else {
+                    http_response_code(404);
+                    die('File not found and failed to generate backup: ' . ($result['message'] ?? 'Unknown error'));
+                }
             }
             
             $sqlContent = $result['sql_content'];
@@ -2369,9 +2380,12 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
             }
             
             $result = createDatabaseBackupPHP($pdo);
-            if (!$result['success']) {
-                http_response_code(404);
-                die('File not found and failed to generate backup');
+            if (!($result['ok'] ?? $result['success'] ?? false)) {
+                if (isset($result['message']) && strpos($result['message'], 'berhasil') !== false) {
+                } else {
+                    http_response_code(404);
+                    die('File not found and failed to generate backup: ' . ($result['message'] ?? 'Unknown error'));
+                }
             }
             
             $sqlContent = $result['sql_content'];
@@ -2388,6 +2402,9 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
             echo $sqlContent;
             exit;
         }
+        
+        // Clear output buffer to save memory
+        while (ob_get_level()) ob_end_clean();
         
         // Set headers for file download
         header('Content-Type: application/octet-stream');
@@ -3910,13 +3927,15 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
             $params[':bukti'] = $_POST['bukti_izin'] ?? null;
             $params[':tanggal'] = $_POST['tanggal'] ?? date('Y-m-d');
         } elseif ($type === 'late_attendance') {
-            $fields = array_merge($fields, ['tanggal', 'jam_masuk', 'jam_pulang', 'bukti_presensi', 'lokasi_presensi']);
-            $values = array_merge($values, [':tanggal', ':jm', ':jp', ':bukti', ':lokasi']);
+            $fields = array_merge($fields, ['tanggal', 'jam_masuk', 'jam_pulang', 'bukti_presensi', 'lokasi_presensi', 'attendance_type', 'attendance_reason']);
+            $values = array_merge($values, [':tanggal', ':jm', ':jp', ':bukti', ':lokasi', ':att_type', ':att_reason']);
             $params[':tanggal'] = $_POST['tanggal'] ?? date('Y-m-d');
             $params[':jm'] = $_POST['jam_masuk'] ?? null;
             $params[':jp'] = $_POST['jam_pulang'] ?? null;
             $params[':bukti'] = $_POST['bukti_presensi'] ?? null;
             $params[':lokasi'] = $_POST['lokasi_presensi'] ?? '';
+            $params[':att_type'] = $_POST['attendance_type'] ?? 'wfo';
+            $params[':att_reason'] = $_POST['attendance_reason'] ?? null;
         } elseif ($type === 'bug_report') {
             $fields = array_merge($fields, ['bug_description', 'bug_proof']);
             $values = array_merge($values, [':desc', ':proof']);
@@ -3986,10 +4005,17 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
                         ':b' => $req['bukti_izin']
                     ]);
                 } elseif ($req['request_type'] === 'late_attendance') {
+                    // Determine ket and reason based on request
+                    $ket = $req['attendance_type'] ?? 'wfo';
+                    $reason = $req['attendance_reason'] ?? null;
+                    
+                    $alasanWfa = ($ket === 'wfa') ? $reason : null;
+                    $alasanOvertime = ($ket === 'overtime') ? $reason : null;
+
                     // Insert into attendance
-                    $ins = $pdo->prepare("INSERT INTO attendance (user_id, jam_masuk, jam_masuk_iso, screenshot_masuk, lokasi_masuk, jam_pulang, jam_pulang_iso, screenshot_pulang, lokasi_pulang, ket, status) 
-                        VALUES (:u, :jm, :jmi, :sm, :lm, :jp, :jpi, :sp, :lp, 'wfo', 'ontime') 
-                        ON DUPLICATE KEY UPDATE jam_masuk=:jm, jam_masuk_iso=:jmi, screenshot_masuk=:sm, lokasi_masuk=:lm, jam_pulang=:jp, jam_pulang_iso=:jpi, screenshot_pulang=:sp, lokasi_pulang=:lp");
+                    $ins = $pdo->prepare("INSERT INTO attendance (user_id, jam_masuk, jam_masuk_iso, screenshot_masuk, lokasi_masuk, jam_pulang, jam_pulang_iso, screenshot_pulang, lokasi_pulang, ket, alasan_wfa, alasan_overtime, status) 
+                        VALUES (:u, :jm, :jmi, :sm, :lm, :jp, :jpi, :sp, :lp, :ket, :awfa, :aovt, 'ontime') 
+                        ON DUPLICATE KEY UPDATE jam_masuk=:jm, jam_masuk_iso=:jmi, screenshot_masuk=:sm, lokasi_masuk=:lm, jam_pulang=:jp, jam_pulang_iso=:jpi, screenshot_pulang=:sp, lokasi_pulang=:lp, ket=:ket, alasan_wfa=:awfa, alasan_overtime=:aovt");
                     
                     $jmi = $req['tanggal'] . ' ' . $req['jam_masuk'];
                     $jpi = $req['jam_pulang'] ? ($req['tanggal'] . ' ' . $req['jam_pulang']) : null;
@@ -4002,8 +4028,11 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
                         ':lm' => $req['lokasi_presensi'],
                         ':jp' => $req['jam_pulang'] ? substr($req['jam_pulang'], 0, 5) : null,
                         ':jpi' => $jpi,
-                        ':sp' => null, // Screenshot pulang not available from this request type usually
-                        ':lp' => null
+                        ':sp' => null, 
+                        ':lp' => null,
+                        ':ket' => $ket,
+                        ':awfa' => $alasanWfa,
+                        ':aovt' => $alasanOvertime
                     ]);
                 }
             }

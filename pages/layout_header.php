@@ -970,7 +970,7 @@ function triggerDatabaseBackup(): void {
         // Create backup
         $backupResult = createDatabaseBackup();
         
-        if (!$backupResult['success']) {
+        if (!($backupResult['ok'] ?? $backupResult['success'] ?? false)) {
             error_log("Backup gagal: " . $backupResult['message']);
         } else {
             error_log("Backup berhasil: " . $backupResult['message'] . " (Size: " . formatBytes($backupResult['size']) . ")");
