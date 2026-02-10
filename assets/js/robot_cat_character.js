@@ -3,15 +3,26 @@
  * Shows different emotions with SVG animations
  */
 
-document.addEventListener('DOMContentLoaded', function() {
-    const characterContainer = document.getElementById('robot-cat-character');
-    if (characterContainer) {
-        loadRobotCatCharacter();
-        
-        // Refresh every 5 minutes
-        setInterval(loadRobotCatCharacter, 5 * 60 * 1000);
+(function() {
+    function init() {
+        console.log('[RobotCat] Initializing...');
+        const characterContainer = document.getElementById('robot-cat-character');
+        if (characterContainer) {
+            loadRobotCatCharacter();
+            
+            // Refresh every 5 minutes
+            setInterval(loadRobotCatCharacter, 5 * 60 * 1000);
+        } else {
+            console.warn('[RobotCat] Container #robot-cat-character not found');
+        }
     }
-});
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+})();
 
 /**
  * Load and display robot cat with appropriate emotion
@@ -24,13 +35,13 @@ async function loadRobotCatCharacter() {
         
         // Try to use the standard dashboard API if available
         if (typeof api === 'function') {
-            const result = await api('?ajax=get_missing_daily_reports', {}, { suppressModal: true, cache: true, ttl: 30000 });
+            const result = await api('?ajax=get_missing_daily_reports', { _t: Date.now() }, { suppressModal: true, cache: false });
             if (result && result.ok && Array.isArray(result.data)) {
                 missingReports = result.data.length;
             }
         } else {
             // Fallback fetch if global api() is not yet loaded
-            const response = await fetch('index.php?ajax=get_missing_daily_reports');
+            const response = await fetch('?ajax=get_missing_daily_reports&_t=' + Date.now());
             if (response.ok) {
                 const json = await response.json();
                 if (json && json.ok && Array.isArray(json.data)) {

@@ -1280,6 +1280,10 @@
     </style>
     <?php endif; ?>
 
-    <!-- Robot Cat Components -->
-    <link rel="stylesheet" href="assets/css/robot_cat_animations.css">
-    <script src="assets/js/robot_cat_character.js"></script>
+    <!-- Robot Cat Components (Inlined for compatibility) -->
+    <style>
+        <?php echo file_get_contents(__DIR__ . '/../assets/css/robot_cat_animations.css'); ?>
+    </style>
+    <script>
+        <?php echo file_get_contents(__DIR__ . '/../assets/js/robot_cat_character.js'); ?>
+    </script>
