@@ -6018,11 +6018,20 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         $employeeRegDate = getEmployeeRegistrationDate($pdo, $uid);
         $employeeRegDateOnly = $employeeRegDate ? date('Y-m-d', strtotime($employeeRegDate)) : null;
         
-        // Use registration date as start, current date as end (all period)
-        $startDate = $employeeRegDateOnly ? $employeeRegDateOnly : date('Y-m-01'); // Fallback to start of month
+        // Use registration date as start, or fallback to start of current year instead of month
+        // Broadened to at least 90 days ago if registration is recent/missing to ensure we catch all missing reports
+        $startDate = $employeeRegDateOnly ? $employeeRegDateOnly : date('Y-m-d', strtotime('-90 days'));
+        
+        // If registration date is today, look back at least 30 days anyway 
+        // because sometimes the registration date is set to the current date on host
+        if ($employeeRegDateOnly === date('Y-m-d')) {
+            $startDate = date('Y-m-d', strtotime('-30 days'));
+        }
+        
         $endDate = date('Y-m-d');
         
         // Get attendance records that don't have daily reports for all period
+        // Added 'overtime' to the criteria as users should also fill reports for overtime work
         $stmt = $pdo->prepare("
             SELECT DISTINCT DATE(a.jam_masuk_iso) as date
             FROM attendance a
@@ -6031,7 +6040,7 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
             WHERE a.user_id = :uid
                 AND DATE(a.jam_masuk_iso) BETWEEN :start_date AND :end_date
                 AND DATE(a.jam_masuk_iso) <= :current_date
-                AND (a.ket = 'wfo' OR a.ket = 'wfa')
+                AND (a.ket = 'wfo' OR a.ket = 'wfa' OR a.ket = 'overtime')
                 AND dr.id IS NULL
             ORDER BY DATE(a.jam_masuk_iso) DESC
         ");
