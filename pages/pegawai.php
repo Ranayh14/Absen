@@ -1281,7 +1281,5 @@
     <?php endif; ?>
 
     <!-- Robot Cat Components -->
-    <link rel="stylesheet" href="<?php echo dirname($_SERVER['PHP_SELF']); ?>/assets/css/robot_cat_animations.css">
-    <script src="<?php echo dirname($_SERVER['PHP_SELF']); ?>/assets/js/robot_cat_character.js"></script>
-</body>
-</html>
+    <link rel="stylesheet" href="assets/css/robot_cat_animations.css">
+    <script src="assets/js/robot_cat_character.js"></script>
