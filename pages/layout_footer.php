@@ -8305,47 +8305,14 @@ function initAddressSearch() {
 
 async function searchAddresses(query) {
     try {
-        // Try multiple search strategies for better results
-        const searchQueries = [
-            // Original query
-            query,
-            // Add "Jakarta" for better context
-            `${query} Jakarta`,
-            // Add "Indonesia" for broader search
-            `${query} Indonesia`,
-            // Try with "Sekolah" prefix for schools
-            query.includes('SMP') || query.includes('SMA') || query.includes('SD') ? 
-                `Sekolah ${query}` : query
-        ];
+        const res = await fetch(`?ajax=search_address&q=${encodeURIComponent(query)}`, {
+            headers: { 'X-Requested-With': 'XMLHttpRequest' }
+        });
+        const json = await res.json();
         
-        let allResults = [];
+        if (!json.ok) throw new Error(json.message || 'Search failed');
         
-        // Search with multiple queries
-        for (const searchQuery of searchQueries) {
-            try {
-                const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(searchQuery)}&limit=3&countrycodes=id&addressdetails=1&bounded=1&viewbox=106.5,-6.5,107.0,-6.0`);
-                const results = await response.json();
-                allResults = allResults.concat(results);
-            } catch (err) {
-                console.warn('Search failed for query:', searchQuery, err);
-            }
-        }
-        
-        // Remove duplicates based on place_id
-        const uniqueResults = allResults.filter((result, index, self) => 
-            index === self.findIndex(r => r.place_id === result.place_id)
-        );
-        
-        // If no results found, try a broader search without country restriction
-        if (uniqueResults.length === 0) {
-            try {
-                const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5&addressdetails=1`);
-                const results = await response.json();
-                allResults = results;
-            } catch (err) {
-                console.warn('Broad search failed:', err);
-            }
-        }
+        let allResults = json.data || [];
         
         // If still no results, create a manual entry
         if (allResults.length === 0) {
@@ -8420,20 +8387,7 @@ async function selectAddress(item) {
     let lat = item.dataset.lat;
     let lon = item.dataset.lon;
     
-    // If no coordinates, try to geocode the address
-    if (!lat || !lon) {
-        try {
-            const geocodeResponse = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}&limit=1&addressdetails=1`);
-            const geocodeResults = await geocodeResponse.json();
-            
-            if (geocodeResults.length > 0) {
-                lat = geocodeResults[0].lat;
-                lon = geocodeResults[0].lon;
-            }
-        } catch (error) {
-            console.warn('Geocoding failed:', error);
-        }
-    }
+    // Coordinates are now provided by searchAddresses or handled server-side during save
     
     // Update input field
     const addressInput = qs('#wfo-address');

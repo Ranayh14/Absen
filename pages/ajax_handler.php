@@ -9,9 +9,18 @@ if (isset($_GET['ajax'])) {
     }
 
     // Must be authenticated for all endpoints except auth-related and public landing scan
-    if (!in_array($action, ['login', 'register', 'get_members', 'save_attendance', 'get_today_attendance', 'forgot_password', 'verify_otp', 'reset_password', 'get_ga_qr', 'get_public_daily_report_stats', 'reverse_geocode', 'submit_help_request'], true)) {
+    if (!in_array($action, ['login', 'register', 'get_members', 'save_attendance', 'get_today_attendance', 'forgot_password', 'verify_otp', 'reset_password', 'get_ga_qr', 'get_public_daily_report_stats', 'reverse_geocode', 'submit_help_request', 'search_address'], true)) {
         if (!isset($_SESSION['user'])) jsonResponse(['error' => 'Unauthorized'], 401);
     }
+    // Address Search
+    if ($action === 'search_address') {
+        $q = $_REQUEST['q'] ?? '';
+        if (strlen($q) < 3) jsonResponse(['ok' => true, 'data' => []]);
+        $results = searchAddressGoogle($q);
+        jsonResponse(['ok' => true, 'data' => $results]);
+    }
+
+
     // Admin manual holidays CRUD
     if ($action === 'admin_get_manual_holidays') {
         if (!isAdmin()) jsonResponse(['error'=>'Forbidden'],403);

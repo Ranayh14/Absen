@@ -414,22 +414,132 @@ function seedDefaultSettings(PDO $pdo): void {
 }
 
 /**
+ * Robust HTTP request helper that tries cURL first and file_get_contents as fallback.
+ */
+function httpRequest(string $url, array $headers = [], int $timeout = 10): ?string {
+    // Try cURL
+    if (function_exists('curl_init')) {
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 5);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
+        if (!empty($headers)) curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+        
+        $resp = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        
+        if ($httpCode === 200 && $resp) return $resp;
+    }
+    
+    // Try file_get_contents as fallback
+    if (ini_get('allow_url_fopen')) {
+        $headerStr = "";
+        foreach ($headers as $h) {
+            $headerStr .= $h . "\r\n";
+        }
+        
+        $opts = [
+            "http" => [
+                "method" => "GET",
+                "header" => $headerStr ?: "User-Agent: AbsenApp/1.0\r\n",
+                "timeout" => $timeout
+            ],
+            "ssl" => [
+                "verify_peer" => false,
+                "verify_peer_name" => false
+            ]
+        ];
+        $context = stream_context_create($opts);
+        $resp = @file_get_contents($url, false, $context);
+        if ($resp) return $resp;
+    }
+    
+    return null;
+}
+
+/**
+ * Search for addresses using Google Geocoding API.
+ * Returns an array of results with display_name, lat, and lon.
+ */
+function searchAddressGoogle(string $query): array {
+    $apiKey = 'AIzaSyCTdOHXg5hSu_2fneyBP9mItCLyG5VQ-x0';
+    $url = "https://maps.googleapis.com/maps/api/geocode/json?address=" . urlencode($query) . "&key={$apiKey}&language=id&region=id";
+    
+    $resp = httpRequest($url);
+    
+    if (!$resp) {
+        // Fallback to Nominatim if Google fails
+        return searchAddressNominatim($query);
+    }
+    
+    $data = json_decode($resp, true);
+    if (!isset($data['status']) || ($data['status'] !== 'OK' && $data['status'] !== 'ZERO_RESULTS') || empty($data['results'])) {
+        return searchAddressNominatim($query);
+    }
+    
+    $results = [];
+    foreach ($data['results'] as $res) {
+        $results[] = [
+            'display_name' => $res['formatted_address'],
+            'lat' => $res['geometry']['location']['lat'],
+            'lon' => $res['geometry']['location']['lng'],
+            'place_id' => $res['place_id'],
+            'type' => 'google'
+        ];
+    }
+    
+    return $results;
+}
+
+/**
+ * Search for addresses using Nominatim (fallback).
+ */
+function searchAddressNominatim(string $query): array {
+    $url = 'https://nominatim.openstreetmap.org/search?format=json&limit=5&addressdetails=1&countrycodes=id&q=' . urlencode($query);
+    $headers = ['User-Agent: AbsenApp/1.0 (XAMPP PHP)'];
+    
+    $resp = httpRequest($url, $headers, 5);
+    
+    if (!$resp) return [];
+    
+    $data = json_decode($resp, true);
+    if (!is_array($data)) return [];
+    
+    $results = [];
+    foreach ($data as $res) {
+        $results[] = [
+            'display_name' => $res['display_name'],
+            'lat' => $res['lat'],
+            'lon' => $res['lon'],
+            'place_id' => $res['place_id'],
+            'type' => 'nominatim'
+        ];
+    }
+    
+    return $results;
+}
+
+/**
  * Geocode a free-form address string to [lat, lng] using OpenStreetMap Nominatim.
  * Returns ['lat' => float, 'lng' => float] or null on failure.
  */
 function geocodeAddress(string $address): ?array {
+    // Try Google first for better accuracy
+    $googleResults = searchAddressGoogle($address);
+    if (!empty($googleResults)) {
+        return ['lat' => (float)$googleResults[0]['lat'], 'lng' => (float)$googleResults[0]['lon']];
+    }
+    
     $url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&addressdetails=0&q=' . urlencode($address);
-    $ch = curl_init();
-    curl_setopt($ch, CURLOPT_URL, $url);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 4);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        'User-Agent: AbsenApp/1.0 (XAMPP PHP)'
-    ]);
-    $resp = curl_exec($ch);
-    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-    if ($code !== 200 || !$resp) return null;
+    $headers = ['User-Agent: AbsenApp/1.0 (XAMPP PHP)'];
+    
+    $resp = httpRequest($url, $headers, 4);
+    if (!$resp) return null;
+    
     $data = json_decode($resp, true);
     if (!is_array($data) || empty($data) || !isset($data[0]['lat'], $data[0]['lon'])) return null;
     return ['lat' => (float)$data[0]['lat'], 'lng' => (float)$data[0]['lon']];
