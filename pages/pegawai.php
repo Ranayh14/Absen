@@ -1281,9 +1281,23 @@
     <?php endif; ?>
 
     <!-- Robot Cat Components (Inlined for compatibility) -->
-    <style>
-        <?php echo file_get_contents(__DIR__ . '/../assets/css/robot_cat_animations.css'); ?>
+    <style id="robot-cat-styles">
+        <?php 
+        $css_path = __DIR__ . '/../assets/css/robot_cat_animations.css';
+        if (file_exists($css_path)) {
+            echo file_get_contents($css_path);
+        } else {
+            echo "/* Error: CSS file not found at $css_path */";
+        }
+        ?>
     </style>
-    <script>
-        <?php echo file_get_contents(__DIR__ . '/../assets/js/robot_cat_character.js'); ?>
+    <script id="robot-cat-script">
+        <?php 
+        $js_path = __DIR__ . '/../assets/js/robot_cat_character.js';
+        if (file_exists($js_path)) {
+            echo file_get_contents($js_path);
+        } else {
+            echo "console.error('Error: JS file not found at $js_path');";
+        }
+        ?>
     </script>

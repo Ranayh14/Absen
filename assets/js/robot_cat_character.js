@@ -32,25 +32,41 @@ async function loadRobotCatCharacter() {
     
     try {
         let missingReports = 0;
+        let apiMethod = 'none';
         
         // Try to use the standard dashboard API if available
         if (typeof api === 'function') {
+            apiMethod = 'api-standard';
+            console.log('[RobotCat] Using standard api() function');
             const result = await api('?ajax=get_missing_daily_reports', { _t: Date.now() }, { suppressModal: true, cache: false });
+            console.log('[RobotCat] API Result:', result);
+            
             if (result && result.ok && Array.isArray(result.data)) {
                 missingReports = result.data.length;
+            } else if (result && Array.isArray(result)) {
+                // Fallback for different return format
+                missingReports = result.length;
             }
         } else {
-            // Fallback fetch if global api() is not yet loaded
-            const response = await fetch('?ajax=get_missing_daily_reports&_t=' + Date.now());
+            apiMethod = 'fetch-fallback';
+            console.log('[RobotCat] Using fetch-fallback');
+            // Use current page URL as base for relative query
+            const baseUrl = window.location.origin + window.location.pathname;
+            const response = await fetch(baseUrl + '?ajax=get_missing_daily_reports&_t=' + Date.now());
+            console.log('[RobotCat] Fetch Response Status:', response.status);
+            
             if (response.ok) {
                 const json = await response.json();
+                console.log('[RobotCat] Fetch JSON:', json);
                 if (json && json.ok && Array.isArray(json.data)) {
                     missingReports = json.data.length;
+                } else if (Array.isArray(json)) {
+                    missingReports = json.length;
                 }
             }
         }
         
-        console.log('[RobotCat] Statistics:', { missingReports });
+        console.log('[RobotCat] Statistics:', { missingReports, apiMethod });
         
         // Determine emotion based on missing reports
         // 0: Happy, 1-5: Sad, 6+: Angry
@@ -61,13 +77,13 @@ async function loadRobotCatCharacter() {
             emotion = 'sad';
         }
         
-        console.log('[RobotCat] Final Emotion:', emotion);
+        console.log('[RobotCat] Final Emotion determined:', emotion);
         
         // Update SVG states
         updateRobotCatEmotion(emotion);
         
     } catch (error) {
-        console.error('[RobotCat] Error fetching data:', error);
+        console.error('[RobotCat] Critical Error in loadRobotCatCharacter:', error);
     }
 }
 
