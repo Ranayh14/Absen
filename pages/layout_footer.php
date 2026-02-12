@@ -8488,39 +8488,49 @@ qs('#auto-detect-wfo') && qs('#auto-detect-wfo').addEventListener('click', async
             asn = infoData.as || '';
         }
         
-        // Display results
-        ipDiv.innerHTML = `<strong>IP:</strong> ${currentIp}`;
-        orgDiv.innerHTML = `<strong>Organisasi:</strong> ${org || 'Tidak ditemukan'}`;
-        asnDiv.innerHTML = `<strong>ASN:</strong> ${asn || 'Tidak ditemukan'}`;
+        // Display results with guards
+        if (ipDiv) ipDiv.innerHTML = `<strong>IP:</strong> ${currentIp}`;
+        if (orgDiv) orgDiv.innerHTML = `<strong>Organisasi:</strong> ${org || 'Tidak ditemukan'}`;
+        if (asnDiv) asnDiv.innerHTML = `<strong>ASN:</strong> ${asn || 'Tidak ditemukan'}`;
         
-        resultDiv.classList.remove('hidden');
+        if (resultDiv) resultDiv.classList.remove('hidden');
         
         // Auto-fill if organization contains Telkom University
         if (org && org.toLowerCase().includes('telkom')) {
-            const currentOrgKeywords = qs('#wfo-api-org-keywords')?.value || '';
-            if (!currentOrgKeywords.includes(org)) {
-                const newKeywords = currentOrgKeywords ? `${currentOrgKeywords}, ${org}` : org;
-                qs('#wfo-api-org-keywords').value = newKeywords;
-                showNotif(`Organisasi "${org}" ditambahkan ke kata kunci WFO`, true);
+            const orgKeywordsEl = qs('#wfo-api-org-keywords');
+            if (orgKeywordsEl) {
+                const currentOrgKeywords = orgKeywordsEl.value || '';
+                if (!currentOrgKeywords.includes(org)) {
+                    const newKeywords = currentOrgKeywords ? `${currentOrgKeywords}, ${org}` : org;
+                    orgKeywordsEl.value = newKeywords;
+                    showNotif(`Organisasi "${org}" ditambahkan ke kata kunci WFO`, true);
+                }
             }
         }
         
         if (asn && asn.startsWith('AS')) {
-            const currentAsnList = qs('#wfo-api-asn-list')?.value || '';
-            if (!currentAsnList.includes(asn)) {
-                const newAsnList = currentAsnList ? `${currentAsnList}, ${asn}` : asn;
-                qs('#wfo-api-asn-list').value = newAsnList;
-                showNotif(`ASN "${asn}" ditambahkan ke daftar ASN WFO`, true);
+            const asnListEl = qs('#wfo-api-asn-list');
+            if (asnListEl) {
+                const currentAsnList = asnListEl.value || '';
+                if (!currentAsnList.includes(asn)) {
+                    const newAsnList = currentAsnList ? `${currentAsnList}, ${asn}` : asn;
+                    asnListEl.value = newAsnList;
+                    showNotif(`ASN "${asn}" ditambahkan ke daftar ASN WFO`, true);
+                }
             }
         }
         
     } catch (error) {
         console.error('Error detecting WFO:', error);
-        showNotif('Gagal mendeteksi informasi IP. Periksa koneksi internet atau token API.', false);
-        resultDiv.classList.add('hidden');
+        if (typeof showNotif === 'function') {
+            showNotif('Gagal mendeteksi informasi IP. Periksa koneksi internet atau token API.', false);
+        }
+        if (resultDiv) resultDiv.classList.add('hidden');
     } finally {
-        button.disabled = false;
-        button.textContent = 'Auto-Detect WFO dari IP Admin Saat Ini';
+        if (button) {
+            button.disabled = false;
+            button.textContent = 'Auto-Detect WFO dari IP Admin Saat Ini';
+        }
     }
 });
 

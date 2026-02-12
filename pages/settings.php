@@ -154,6 +154,11 @@
                 <button type="button" id="auto-detect-wfo" class="w-full bg-gradient-to-r from-indigo-600 to-indigo-700 hover:from-indigo-700 hover:to-indigo-800 text-white font-semibold py-2.5 rounded-xl transition-all shadow-md flex items-center justify-center gap-2 text-sm">
                     <i class="fi fi-sr-refresh"></i> Auto-Detect WFO dari IP Saat Ini
                 </button>
+                <div id="auto-detect-result" class="hidden animate-fade-in p-4 bg-indigo-50 rounded-xl border border-indigo-100 space-y-1">
+                    <p id="detect-ip" class="text-xs text-indigo-700"></p>
+                    <p id="detect-org" class="text-xs text-indigo-700"></p>
+                    <p id="detect-asn" class="text-xs text-indigo-700"></p>
+                </div>
             </div>
         </details>
 
