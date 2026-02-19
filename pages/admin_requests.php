@@ -85,14 +85,14 @@
 
 <!-- Request Detail Modal -->
 <div id="request-detail-modal" class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 hidden p-4">
-    <div class="bg-white rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden animate-zoom-in">
+    <div class="bg-white rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden animate-zoom-in max-h-[90vh] flex flex-col">
         <div class="p-6 border-b border-gray-50 flex items-center justify-between bg-indigo-600 text-white">
             <h3 class="text-xl font-bold">Detail Permintaan</h3>
             <button id="close-request-detail" class="p-2 hover:bg-white/20 rounded-xl transition-colors">
                 <i class="fi fi-sr-cross text-sm"></i>
             </button>
         </div>
-        <div id="request-detail-body" class="p-8 max-h-[70vh] overflow-y-auto">
+        <div id="request-detail-body" class="p-6 sm:p-8 flex-1 overflow-y-auto">
             <!-- Data populated by JS -->
         </div>
         <div id="request-action-footer" class="p-6 bg-gray-50 border-t border-gray-100 flex gap-4">

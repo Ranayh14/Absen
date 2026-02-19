@@ -50,7 +50,7 @@
                         <span id="notif-badge" class="absolute top-1 right-1 w-2.5 h-2.5 bg-red-500 border-2 border-white rounded-full hidden"></span>
                     </button>
                     <!-- Notifications Dropdown -->
-                    <div id="dropdown-notifications" class="absolute right-0 mt-3 w-80 sm:w-96 bg-white rounded-2xl shadow-xl border border-gray-100 hidden z-50 overflow-hidden animate-fade-in-up">
+                    <div id="dropdown-notifications" class="fixed sm:absolute left-4 right-4 sm:left-auto sm:right-0 top-16 sm:top-full mt-3 sm:w-96 bg-white rounded-2xl shadow-xl border border-gray-100 hidden z-50 overflow-hidden animate-fade-in-up">
                         <div class="p-4 border-b border-gray-50 flex items-center justify-between">
                             <h3 class="font-bold text-gray-800">Permintaan Bantuan</h3>
                             <span id="notif-count" class="text-xs bg-indigo-100 text-indigo-600 px-2 py-0.5 rounded-full font-bold">0</span>
@@ -76,7 +76,7 @@
                          <span class="text-sm font-semibold text-gray-700 group-hover:text-indigo-600 transition-colors hidden sm:inline"><?php echo htmlspecialchars($_SESSION['user']['nama'] ?? 'Admin'); ?></span>
                          <i class="fi fi-sr-angle-small-down text-gray-400"></i>
                     </button>
-                    <div id="dropdown-profile" class="absolute right-0 mt-2 w-48 bg-white rounded-2xl shadow-xl border border-gray-100 hidden z-50 overflow-hidden animate-fade-in-up">
+                    <div id="dropdown-profile" class="absolute right-4 sm:right-0 mt-2 w-48 bg-white rounded-2xl shadow-xl border border-gray-100 hidden z-50 overflow-hidden animate-fade-in-up">
                         <?php if(isset($_SESSION['user'])): ?>
                             <div class="px-4 py-3 bg-gray-50 border-b border-gray-100">
                                 <p class="text-xs text-gray-500 uppercase font-bold tracking-wider mb-1">Signed in as</p>

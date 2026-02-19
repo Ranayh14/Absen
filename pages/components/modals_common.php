@@ -5,8 +5,8 @@
 ?>
 
 <!-- Modal Edit Kehadiran -->
-<div id="edit-att-modal" class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 hidden p-2 sm:p-4">
-    <div class="bg-white rounded-2xl shadow-2xl w-full mx-2 sm:mx-0 sm:max-w-md" style="max-height: 90vh; overflow-y: auto;">
+<div id="edit-att-modal" class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 hidden p-4">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto">
         <!-- Modal Header -->
         <div class="sticky top-0 bg-gradient-to-r from-indigo-600 to-indigo-700 text-white px-4 sm:px-6 py-3 sm:py-4 rounded-t-2xl flex items-center justify-between z-10">
             <h3 class="text-base sm:text-lg font-bold flex items-center gap-2">
@@ -133,8 +133,8 @@
 </div>
 
 <!-- Modal QR Code Google Authenticator -->
-<div id="ga-qr-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden">
-    <div class="bg-white p-8 rounded-lg shadow-2xl w-full max-w-md">
+<div id="ga-qr-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden p-4">
+    <div class="bg-white p-6 sm:p-8 rounded-lg shadow-2xl w-full max-w-md">
         <h2 class="text-2xl font-bold mb-4">QR Code Google Authenticator</h2>
         <div class="mb-4">
             <p class="text-sm text-gray-600 mb-2" id="ga-qr-email"></p>
@@ -153,8 +153,8 @@
 </div>
 
 <!-- Modal Laporan Harian Admin -->
-<div id="admin-daily-report-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden">
-    <div class="bg-white p-6 rounded-lg shadow-2xl w-full max-w-2xl">
+<div id="admin-daily-report-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden p-4">
+    <div class="bg-white p-6 rounded-lg shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
         <h3 class="text-xl font-bold mb-4">Laporan Harian Pegawai</h3>
         <div class="mb-4">
             <p class="text-sm text-gray-600">Nama: <span id="admin-dr-nama" class="font-semibold"></span></p>
@@ -185,8 +185,8 @@
 </div>
 
 <!-- Confirm Modal -->
-<div id="confirm-modal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-70 hidden">
-    <div class="bg-white p-8 rounded-lg shadow-2xl w-full max-w-sm text-center">
+<div id="confirm-modal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-70 hidden p-4">
+    <div class="bg-white p-6 sm:p-8 rounded-lg shadow-2xl w-full max-w-sm text-center">
         <p id="confirm-modal-message" class="text-lg mb-6">Apakah Anda yakin?</p>
         <div class="flex justify-center space-x-4">
             <button id="btn-confirm-no" class="bg-gray-300 hover:bg-gray-400 text-gray-800 font-bold py-2 px-6 rounded-lg">Tidak</button>
@@ -196,8 +196,8 @@
 </div>
 
 <!-- Ket Detail Modal -->
-<div id="ket-detail-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden">
-    <div class="bg-white p-6 rounded-lg shadow-2xl w-full max-w-2xl">
+<div id="ket-detail-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden p-4">
+    <div class="bg-white p-6 rounded-lg shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
         <div class="flex justify-between items-center mb-4">
             <h3 id="ket-detail-title" class="text-xl font-bold"></h3>
             <button onclick="qs('#ket-detail-modal').classList.add('hidden'); qs('#ket-detail-modal').classList.remove('flex')" class="text-gray-500 hover:text-gray-700 text-2xl">✕</button>

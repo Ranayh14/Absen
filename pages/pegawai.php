@@ -59,7 +59,7 @@
                         <span id="notif-pegawai-badge" class="absolute top-1 right-1 w-2.5 h-2.5 bg-red-500 border-2 border-white rounded-full hidden"></span>
                     </button>
                     <!-- Notifications Dropdown -->
-                    <div id="dropdown-pegawai-notif" class="absolute right-0 mt-3 w-80 sm:w-96 bg-white rounded-2xl shadow-xl border border-gray-100 hidden z-50 overflow-hidden animate-fade-in-up">
+                    <div id="dropdown-pegawai-notif" class="fixed sm:absolute left-4 right-4 sm:left-auto sm:right-0 top-16 sm:top-full mt-3 sm:w-96 bg-white rounded-2xl shadow-xl border border-gray-100 hidden z-50 overflow-hidden animate-fade-in-up">
                         <div class="p-4 border-b border-gray-50 flex items-center justify-between bg-blue-600 text-white">
                             <h3 class="font-bold">Notifikasi Status Request</h3>
                             <button id="btn-mark-all-read" class="text-[10px] uppercase font-bold bg-white/20 hover:bg-white/30 px-2 py-1 rounded-lg transition-all">Baca Semua</button>
@@ -85,7 +85,7 @@
                          <i class="fi fi-sr-angle-small-down text-gray-400"></i>
                     </button>
                     <!-- Dropdown Code Preserved -->
-                    <div id="dropdown-profile" class="absolute right-0 mt-2 w-48 bg-white rounded-2xl shadow-xl border border-gray-100 hidden z-50 overflow-hidden animate-fade-in-up">
+                    <div id="dropdown-profile" class="absolute right-4 sm:right-0 mt-2 w-48 bg-white rounded-2xl shadow-xl border border-gray-100 hidden z-50 overflow-hidden animate-fade-in-up">
                         <?php if(isset($_SESSION['user'])): ?>
                             <div class="px-4 py-3 bg-gray-50 border-b border-gray-100">
                                 <p class="text-xs text-gray-500 uppercase font-bold tracking-wider mb-1">Signed in as</p>
@@ -161,6 +161,7 @@
     <?php require 'components/modals_common.php'; ?>
     <?php require 'components/modals_pegawai.php'; ?>
     <?php require 'components/modals_admin.php'; ?>
+    <?php require 'components/admin_help_center.php'; ?>
 
 
     <!-- Robot Cat Components (Inlined for compatibility) -->

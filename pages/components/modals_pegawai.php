@@ -5,7 +5,7 @@
 ?>
 
 <!-- WFA Reason Modal -->
-<div id="wfa-reason-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden">
+<div id="wfa-reason-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden p-4">
     <div class="bg-white p-6 rounded-lg shadow-2xl w-full max-w-md">
         <h3 class="text-xl font-bold mb-3">Alasan Kerja di Luar Kantor</h3>
         <p class="text-sm text-gray-600 mb-3">Anda berada di luar wilayah Telkom University. Silakan isi alasan bekerja di luar kantor untuk melanjutkan presensi (WFA).</p>
@@ -18,7 +18,7 @@
 </div>
 
 <!-- Early Leave Reason Modal -->
-<div id="early-leave-reason-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden">
+<div id="early-leave-reason-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden p-4">
     <div class="bg-white p-6 rounded-lg shadow-2xl w-full max-w-md">
         <h3 class="text-xl font-bold mb-3">Alasan Pulang Awal</h3>
         <p class="text-sm text-gray-600 mb-3">Anda pulang sebelum jam yang ditentukan. Silakan isi alasan pulang awal untuk melanjutkan presensi pulang.</p>
@@ -31,7 +31,7 @@
 </div>
 
 <!-- Izin/Sakit Input Modal -->
-<div id="izin-sakit-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden">
+<div id="izin-sakit-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden p-4">
     <div class="bg-white p-6 rounded-lg shadow-2xl w-full max-w-md">
         <h3 class="text-xl font-bold mb-4">Input Keterangan</h3>
         <form id="izin-sakit-form">
