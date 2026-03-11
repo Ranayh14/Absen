@@ -117,23 +117,30 @@ function getAdjustedFaceMatcherThreshold() { return detectionConfig.faceMatcherT
 
 async function initializeFaceRecognition() {
     try {
-        // Force CPU backend if WebGL is unstable or not supported
-        // This fixes the "WebGL is not supported" error
+        // Try WebGL for maximum performance
         try {
-            // Using CPU backend as WASM files are not present locally
-            await faceapi.tf.setBackend('cpu');
-            console.log('Force set backend to CPU for compatibility');
+            await faceapi.tf.setBackend('webgl');
+            await faceapi.tf.ready();
+            console.log('Using WebGL backend for face recognition');
         } catch (e) {
-            console.warn('Failed to set backend to CPU, falling back to default:', e);
+            console.warn('WebGL failed, using CPU:', e);
+            await faceapi.tf.setBackend('cpu');
         }
 
-        await loadFaceApiModels();
-        await loadLabeledFaceDescriptors();
-        console.log('Face recognition initialized');
+        // Initialize listeners once
+        initAttendanceListeners();
+        
+        // Don't await everything on load to keep page responsive
+        loadFaceApiModels().catch(e => console.error('Delayed model load failed:', e));
+        
+        console.log('Face recognition system initialized');
     } catch (error) {
         console.error('Failed to initialize face recognition:', error);
-        statusMessage('Gagal memuat sistem pengenalan wajah', 'bg-red-100 text-red-700');
     }
+}
+
+function initAttendanceListeners() {
+    // Listeners are now managed globally or in layout_footer.php for better reliability
 }
 
 async function loadFaceApiModels() {
@@ -147,25 +154,17 @@ async function loadFaceApiModels() {
     }
     
     window.loadingFaceApiModels = true;
-    if (loadingOverlay) loadingOverlay.classList.remove('hidden');
+    // Removed overlay toggle here to allow silent background loading on page load
+    // if (loadingOverlay) loadingOverlay.classList.remove('hidden');
     
     const MODEL_URL = window.FACEAPI_MODEL_URL || 'assets/js/face-api-models';
     
     try {
-        console.log('🚀 Initializing face recognition system...');
+        console.log('🚀 Loading face recognition models...');
         
         // Ensure backend is ready
         await faceapi.tf.ready();
         
-        // Try WebGL first for speed, fallback to CPU
-        try {
-            if (faceapi.tf.getBackend() !== 'webgl') {
-                await faceapi.tf.setBackend('webgl');
-            }
-        } catch(e) {
-            console.warn('WebGL not available, sticking with:', faceapi.tf.getBackend());
-        }
-
         await Promise.all([
             faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
             faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
@@ -178,7 +177,7 @@ async function loadFaceApiModels() {
         throw e;
     } finally {
         window.loadingFaceApiModels = false;
-        if (loadingOverlay) loadingOverlay.classList.add('hidden');
+        // if (loadingOverlay) loadingOverlay.classList.add('hidden');
     }
 }
 
@@ -232,21 +231,29 @@ async function loadLabeledFaceDescriptors() {
         for (let i = 0; i < membersToProcess.length; i += batchSize) {
             const batch = membersToProcess.slice(i, i + batchSize);
             const promises = batch.map(async m => {
-                if (!m.foto_base64) return null;
                 try {
+                    // OPTIMIZED: Use pre-computed embedding from server if available
+                    if (m.face_embedding) {
+                        const desc = new Float32Array(JSON.parse(m.face_embedding));
+                        if (desc.length === 128) {
+                            return new faceapi.LabeledFaceDescriptors(m.nim, [desc]);
+                        }
+                    }
+                    
+                    if (!m.foto_base64) return null;
                     const img = await faceapi.fetchImage(m.foto_base64);
                     const det = await faceapi.detectSingleFace(img, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptor();
                     if (det) {
                         return new faceapi.LabeledFaceDescriptors(m.nim, [det.descriptor]);
                     }
-                } catch (e) { console.warn('Failed to load face for', m.nama); }
+                } catch (e) { console.warn('Failed to load face for', m.nama, e); }
                 return null;
             });
             const results = await Promise.all(promises);
             labeledFaceDescriptors.push(...results.filter(r => r !== null));
-            if (i + batchSize < membersToProcess.length) await new Promise(r => setTimeout(r, 50));
+            if (i + batchSize < membersToProcess.length) await new Promise(r => setTimeout(r, 20));
         }
-        
+
         // Save to cache
         if (typeof idbSetDescriptors === 'function' && typeof computeMembersVersionKey === 'function') {
             const versionKey = await computeMembersVersionKey(membersToProcess);
@@ -455,7 +462,7 @@ function startVideoInterval() {
         } catch (e) {
             console.error('Detection error:', e);
         }
-    }, 1000); // Slower interval for CPU (1s)
+    }, faceapi.tf.getBackend() === 'webgl' ? 200 : 800);
 }
 
 function shouldAcceptDetection(match, faceData) {
@@ -509,6 +516,18 @@ async function handleRecognition(nim, expression) {
                 if (streetName) lokasi = streetName;
             } catch(e) {}
         }
+
+        // VALIDATION: Reject if coordinates are 0 or placeholder name
+        if (!lat || !lng || Math.abs(lat) < 0.0001) {
+            statusMessage('Gagal mendeteksi lokasi yang valid. Silakan coba lagi.', 'bg-red-100 text-red-700');
+            isDetectionPaused = false;
+            return;
+        }
+        if (lokasi.includes('Mencari lokasi')) {
+             statusMessage('Sedang mencari lokasi... Tunggu sebentar.', 'bg-blue-100 text-blue-700');
+             isDetectionPaused = false;
+             return;
+        }
         
         const member = members.find(m => m.nim === nim);
         currentRecognitionData = {
@@ -521,6 +540,19 @@ async function handleRecognition(nim, expression) {
             lng,
             lokasi
         };
+
+        // NEW: Check for different clock-out location
+        if (scanMode === 'pulang') {
+            const clockin = await api('?ajax=get_clockin_location&nim=' + nim, {}, { suppressModal: true });
+            if (clockin.ok && clockin.lat && clockin.lng) {
+                const distance = calculateDistance(lat, lng, clockin.lat, clockin.lng);
+                console.log('Distance from clock-in:', distance, 'meters');
+                if (distance > 500) { // 500 meters threshold
+                    showDiffLocationModal(currentRecognitionData);
+                    return;
+                }
+            }
+        }
         
         showConfirmationModal(currentRecognitionData);
     } catch (e) {
@@ -643,8 +675,55 @@ async function takeScreenshot() {
 function getPosition() {
     return new Promise((resolve) => {
         if (!navigator.geolocation) return resolve(null);
-        navigator.geolocation.getCurrentPosition(resolve, () => resolve(null), { timeout: 5000, enableHighAccuracy: true });
+        // Stricter options for better accuracy and to avoid 0,0
+        const options = { 
+            timeout: 10000, 
+            enableHighAccuracy: true,
+            maximumAge: 0
+        };
+        navigator.geolocation.getCurrentPosition(resolve, (err) => {
+            console.warn('Geolocation error:', err);
+            resolve(null);
+        }, options);
     });
+}
+
+function calculateDistance(lat1, lon1, lat2, lon2) {
+    const R = 6371e3; // metres
+    const φ1 = lat1 * Math.PI/180;
+    const φ2 = lat2 * Math.PI/180;
+    const Δφ = (lat2-lat1) * Math.PI/180;
+    const Δλ = (lon2-lon1) * Math.PI/180;
+
+    const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
+            Math.cos(φ1) * Math.cos(φ2) *
+            Math.sin(Δλ/2) * Math.sin(Δλ/2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+
+    return R * c; // in metres
+}
+
+function showDiffLocationModal(data) {
+    const modal = qs('#diff-location-modal');
+    if (!modal) return showConfirmationModal(data);
+    
+    modal.classList.remove('hidden');
+    
+    qs('#diff-location-submit').onclick = () => {
+        const reason = qs('#diff-location-reason-input').value.trim();
+        if (!reason) {
+            alert('Harap isi alasan lokasi berbeda');
+            return;
+        }
+        data.diff_location_reason = reason;
+        modal.classList.add('hidden');
+        showConfirmationModal(data);
+    };
+    
+    qs('#diff-location-cancel').onclick = () => {
+        modal.classList.add('hidden');
+        resumeDetection();
+    };
 }
 
 // ---- Additional Helpers (from footer) ----

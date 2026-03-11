@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 if (isset($_GET['ajax'])) {
     $action = $_GET['ajax'];
 
@@ -28,6 +28,52 @@ if (isset($_GET['ajax'])) {
         $end = $_GET['end'] ?? ($_POST['end'] ?? date('Y-12-31'));
         $rows = getManualHolidaysInRange($pdo, $start, $end);
         jsonResponse(['ok'=>true,'data'=>$rows]);
+    }
+
+    if ($action === 'get_clockin_location') {
+        $nim = $_GET['nim'] ?? '';
+        if (!$nim) jsonResponse(['ok' => false, 'message' => 'NIM required'], 400);
+        
+        $today = date('Y-m-d');
+        $stmt = $pdo->prepare("SELECT lat_masuk, lng_masuk FROM attendance a JOIN users u ON u.id = a.user_id WHERE u.nim = :nim AND DATE(a.jam_masuk_iso) = :today AND a.jam_masuk IS NOT NULL LIMIT 1");
+        $stmt->execute([':nim' => $nim, ':today' => $today]);
+        $row = $stmt->fetch();
+        
+        if ($row) {
+            jsonResponse(['ok' => true, 'lat' => (float)$row['lat_masuk'], 'lng' => (float)$row['lng_masuk']]);
+        } else {
+            jsonResponse(['ok' => false, 'message' => 'No clock-in found today']);
+        }
+    }
+
+    if ($action === 'admin_bulk_fix_empty_checkout') {
+        if (!isAdmin()) jsonResponse(['error' => 'Forbidden'], 403);
+        $date = $_POST['date'] ?? date('Y-m-d');
+        
+        // Get fallback jam_pulang from settings
+        $stmt = $pdo->prepare("SELECT setting_value FROM settings WHERE setting_key = 'default_checkout_time'");
+        $stmt->execute();
+        $fallbackTime = $stmt->fetchColumn() ?: '17:00';
+        
+        $stmt = $pdo->prepare("UPDATE attendance SET jam_pulang = :time, jam_pulang_iso = :iso 
+                              WHERE DATE(jam_masuk_iso) = :date AND jam_pulang IS NULL AND status_masuk != 'alpha'");
+        // Wait, check status columns
+        // Let's use simple query for now. Alpha is alpha.
+        // Update ALL records with missing clock-outs
+        // We use a CASE or CONCAT to ensure jam_pulang_iso matches the original date of attendance
+        $stmt = $pdo->prepare("UPDATE attendance 
+                              SET jam_pulang = :time, 
+                                  jam_pulang_iso = CONCAT(DATE(jam_masuk_iso), ' ', :time2)
+                              WHERE (jam_pulang IS NULL OR jam_pulang = '' OR jam_pulang = '-') 
+                              AND ket IN ('wfo', 'wfa', 'overtime')");
+        
+        $res = $stmt->execute([':time' => $fallbackTime, ':time2' => $fallbackTime . ':00']);
+        
+        if ($res) {
+            jsonResponse(['ok' => true, 'message' => 'Berhasil mengisi jam pulang kosong untuk tanggal ' . $date]);
+        } else {
+            jsonResponse(['ok' => false, 'message' => 'Gagal memperbarui data']);
+        }
     }
     if ($action === 'admin_add_manual_holiday' && $_SERVER['REQUEST_METHOD']==='POST') {
         if (!isAdmin()) jsonResponse(['error'=>'Forbidden'],403);
@@ -370,7 +416,7 @@ if (isset($_GET['ajax'])) {
 
     if ($action === 'get_members') {
         // Admin can see all; Pegawai only themselves (but for face recognition we need all for presensi). We'll return all but only safe fields
-        $stmt = $pdo->query("SELECT id, role, email, nim, nama, prodi, startup, foto_base64 FROM users WHERE role='pegawai'");
+        $stmt = $pdo->query("SELECT id, role, email, nim, nama, prodi, startup, foto_base64, face_embedding FROM users WHERE role='pegawai'");
         $rows = $stmt->fetchAll();
         jsonResponse(['ok' => true, 'data' => $rows]);
     }
@@ -1323,9 +1369,10 @@ if (isset($_GET['ajax'])) {
                 
                 // Get alasan pulang awal if provided
                 $alasanPulangAwal = $_POST['alasan_pulang_awal'] ?? $_POST['early_leave_reason'] ?? null;
+                $diffLocationReason = $_POST['diff_location_reason'] ?? null;
                 
-                $upd = $pdo->prepare("UPDATE attendance SET jam_pulang=:jam, jam_pulang_iso=:iso, ekspresi_pulang=:exp, screenshot_pulang=:screenshot, lokasi_pulang=:lokasi, lat_pulang=:lat, lng_pulang=:lng, alasan_pulang_awal=:alasan WHERE id=:id");
-                $upd->execute([':jam' => $jamSekarang, ':iso' => $iso, ':exp' => $ekspresi, ':screenshot' => $screenshot, ':lokasi' => $lokasi, ':lat' => $lat, ':lng' => $lng, ':alasan' => $alasanPulangAwal, ':id' => $todayRow['id']]);
+                $upd = $pdo->prepare("UPDATE attendance SET jam_pulang=:jam, jam_pulang_iso=:iso, ekspresi_pulang=:exp, screenshot_pulang=:screenshot, lokasi_pulang=:lokasi, lat_pulang=:lat, lng_pulang=:lng, alasan_pulang_awal=:alasan, alasan_lokasi_berbeda=:diff_loc WHERE id=:id");
+                $upd->execute([':jam' => $jamSekarang, ':iso' => $iso, ':exp' => $ekspresi, ':screenshot' => $screenshot, ':lokasi' => $lokasi, ':lat' => $lat, ':lng' => $lng, ':alasan' => $alasanPulangAwal, ':diff_loc' => $diffLocationReason, ':id' => $todayRow['id']]);
                 
                 // Trigger backup setelah presensi pulang
                 triggerDatabaseBackup();

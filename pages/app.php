@@ -371,6 +371,19 @@
         </div>
     </div>
 
+    <!-- Different Clock-out Location Modal -->
+    <div id="diff-location-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden">
+        <div class="bg-white p-6 rounded-lg shadow-2xl w-full max-w-md">
+            <h3 class="text-xl font-bold mb-3">Lokasi Pulang Berbeda</h3>
+            <p class="text-sm text-gray-600 mb-3">Anda melakukan presensi pulang di lokasi yang berbeda signifikan dari lokasi masuk. Harap berikan alasan Anda.</p>
+            <textarea id="diff-location-reason-input" class="w-full p-3 border rounded mb-4" rows="4" placeholder="Contoh: Pulang langsung dari lokasi meeting klien..."></textarea>
+            <div class="flex justify-end gap-2">
+                <button id="diff-location-cancel" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded">Batal</button>
+                <button id="diff-location-submit" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded">Lanjutkan</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Izin/Sakit Input Modal -->
     <div id="izin-sakit-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden">
         <div class="bg-white p-6 rounded-lg shadow-2xl w-full max-w-md">

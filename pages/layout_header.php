@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 session_start();
 date_default_timezone_set('Asia/Jakarta');
 
@@ -3645,8 +3645,8 @@ if ($action) {
                     $ins = $pdo->prepare("INSERT INTO attendance (user_id, jam_masuk, jam_masuk_iso, ekspresi_masuk, screenshot_masuk, lokasi_masuk, lat_masuk, lng_masuk, status, ket, alasan_overtime, lokasi_overtime) VALUES (:uid, :jam, :iso, :exp, :screenshot, :lokasi, :lat, :lng, :status, :ket, :alasan, :lokasi_ot)");
                     $ins->execute([':uid' => $u['id'], ':jam' => $jamSekarang, ':iso' => $iso, ':exp' => $ekspresi, ':screenshot' => $screenshot, ':lokasi' => $lokasi, ':lat' => $lat, ':lng' => $lng, ':status' => $status, ':ket' => $ketVal, ':alasan' => $alasanOvertime, ':lokasi_ot' => $lokasiOvertime]);
                     
-                    // Trigger backup setelah presensi overtime
-                    triggerDatabaseBackup();
+                    // OPTIMIZED: Backup trigger removed from frequent operations - happens on schedule
+                    // triggerDatabaseBackup();
                     
                     // Response for overtime
                     $jamMasukFormat = substr($jamSekarang, 0, 5);
@@ -3691,9 +3691,14 @@ if ($action) {
                 $gpsAccuracy = isset($_POST['gps_accuracy']) ? (float)$_POST['gps_accuracy'] : null;
                 $wifiSSID = trim($_POST['wifi_ssid'] ?? '');
                 
-                // Strict validation: GPS location is mandatory
-                if ($lat === null || $lng === null || $lat === 0 || $lng === 0) {
-                    jsonResponse(['ok' => false, 'message' => 'Lokasi GPS wajib untuk presensi. Pastikan GPS aktif dan izin lokasi diberikan.'], 400);
+                // Strict validation: GPS location is mandatory and must not be 0,0
+                if ($lat === null || $lng === null || abs($lat) < 0.0001 || abs($lng) < 0.0001) {
+                    jsonResponse(['ok' => false, 'message' => 'Lokasi GPS tidak valid atau belum terdeteksi. Silakan coba lagi dan pastikan GPS aktif.'], 400);
+                }
+                
+                // Reject placeholder location names
+                if (!empty($lokasi) && stripos($lokasi, 'Mencari lokasi') !== false) {
+                    jsonResponse(['ok' => false, 'message' => 'Masih mencari lokasi... Mohon tunggu sebentar sampai lokasi terdeteksi.'], 400);
                 }
                 
                 // Accept GPS even with lower accuracy (indoors/gymnasium buildings are common)
@@ -3860,7 +3865,12 @@ if ($action) {
                         if ($isInsideTeluByApi) {
                             $ketVal = 'wfo';
                             $isInsideTelu = true;
-                            error_log('✓ IP Address valid (Telkom University) - LANGSUNG SET WFO tanpa cek WiFi/GPS');
+                            error_log('✓ IP Address valid (Telkom University) - WFO confirmed by IP');
+                        } else {
+                            // IMPROVED: If we have a valid public IP and it's NOT Telkom University,
+                            // we should be very skeptic of WFO even if GPS/WiFi suggests it.
+                            error_log('✗ Public IP is NOT Telkom University - forcing WFA check even if GPS is near');
+                            $ketVal = 'wfa';
                         }
                     } catch (Exception $e) {
                         error_log("WFO IP Check Error: " . $e->getMessage());
@@ -3930,7 +3940,17 @@ if ($action) {
                         $ketVal = 'wfa';
                         error_log('✗ GPS outside radius - require WFA (distance: ' . round($distance) . 'm, radius: ' . $wfoRadius . 'm)');
                     }
-                } else if ($ketVal !== 'wfo') {
+                }
+                
+                // FINAL PRIORITY: If we are not on Telkom University IP, force WFA status
+                // regardless of GPS proximity, as per user requirement #2
+                // (Unless IP detection was skipped because of localhost/::1)
+                if (!$isLocalhost && !empty($publicIp) && !$isInsideTeluByApi) {
+                    $ketVal = 'wfa';
+                    error_log('!! WFO Refinement: Not on Office IP, forcing WFA status !!');
+                }
+
+                else if ($ketVal !== 'wfo') {
                     // Tidak ada GPS data dan IP/WiFi tidak valid
                     $ketVal = 'wfa';
                     error_log('✗ Semua validasi gagal - require WFA (IP: ' . ($publicIp ?: 'EMPTY') . ', WiFi: ' . ($wifiSSID ?: 'EMPTY') . ', GPS: ' . (($lat && $lng) ? 'OK' : 'MISSING') . ')');
@@ -3999,6 +4019,14 @@ if ($action) {
                 $lat = isset($_POST['lat']) ? (float)$_POST['lat'] : null;
                 $lng = isset($_POST['lng']) ? (float)$_POST['lng'] : null;
                 $lokasi = $_POST['lokasi'] ?? null;
+
+                // Location validation for checkout
+                if ($lat === null || $lng === null || abs($lat) < 0.0001 || abs($lng) < 0.0001) {
+                    jsonResponse(['ok' => false, 'message' => 'Lokasi GPS tidak valid atau belum terdeteksi. Silakan coba lagi dan pastikan GPS aktif.'], 400);
+                }
+                if (!empty($lokasi) && stripos($lokasi, 'Mencari lokasi') !== false) {
+                    jsonResponse(['ok' => false, 'message' => 'Masih mencari lokasi... Mohon tunggu sebentar.'], 400);
+                }
                 
                 // OPTIMIZED: Quick reverse geocoding - ensure lokasi is never empty
                 if (empty($lokasi) || strpos($lokasi, 'Lokasi:') === 0) {
@@ -4032,8 +4060,8 @@ if ($action) {
                 $upd = $pdo->prepare("UPDATE attendance SET jam_pulang=:jam, jam_pulang_iso=:iso, ekspresi_pulang=:exp, screenshot_pulang=:screenshot, lokasi_pulang=:lokasi, lat_pulang=:lat, lng_pulang=:lng, alasan_pulang_awal=:alasan WHERE id=:id");
                 $upd->execute([':jam' => $jamSekarang, ':iso' => $iso, ':exp' => $ekspresi, ':screenshot' => $screenshot, ':lokasi' => $lokasi, ':lat' => $lat, ':lng' => $lng, ':alasan' => $alasanPulangAwal, ':id' => $todayRow['id']]);
                 
-                // Trigger backup setelah presensi pulang
-                triggerDatabaseBackup();
+                // OPTIMIZED: Backup trigger removed from frequent operations - happens on schedule
+                // triggerDatabaseBackup();
                 $jamPulangFormat = substr($jamSekarang, 0, 5); // Ambil hanya jam:menit
                 $firstName = getFirstName($u['nama']);
                 $statusText = "Selamat jalan, {$firstName}! Anda terlihat {$ekspresi}. Jam pulang tercatat pukul {$jamPulangFormat}.";

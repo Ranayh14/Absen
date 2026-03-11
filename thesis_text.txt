@@ -1,0 +1,825 @@
+ 
+ PENGEMBANGAN SISTEM PRESENSI WAJAH 
+BERBASIS WEB PADA RESEARCH ALLIANCE 
+KO+LAB 
+ 
+DEVELOPMENT OF WEB-BASED FACE 
+RECOGNITION ATTENDANCE SYSTEM AT 
+RESEARCH ALLIANCE KO+LAB  
+ 
+Dokumen ini ditujukan untuk memenuhi persyaratan  
+Mata Kuliah Tugas Akhir 
+Jalur Magang Dua Semester 
+ 
+Disusun oleh, 
+607012300035 - Rana Yoda Hanifah 
+ 
+PROGRAM STUDI D3 SISTEM INFORMASI 
+FAKULTAS ILMU TERAPAN  
+UNIVERSITAS TELKOM 
+BANDUNG 
+2026
+
+
+ 
+ 
+ 
+ 
+LEMBAR PERSEMBAHAN 
+ 
+Laporan Tugas Akhir ini saya persembahkan dengan tulus kepada: 
+● Ayah dan Bunda tercinta, dukungan terbesar saya. Terima kasih atas doa-doa 
+yang selalu dipanjatkan di setiap sujud, serta dukungan materi dan moral 
+yang tak terhingga hingga saya mampu melangkah sejauh ini. Karya ini adalah 
+bukti kecil dari perjuangan kalian. 
+● Dosen Pembimbing, Bapak Muhamad Yusuf Ramadhan, S.A.B., M.A.B. yang 
+telah meluangkan waktu, memberikan arahan, serta bimbingan yang sangat 
+berharga dalam penyusunan tugas akhir ini. Kesabaran dan ilmu yang Bapak 
+berikan akan selalu saya ingat. 
+● Rekan-rekan Research Alliance Ko+Lab, Terima kasih telah memberikan 
+kesempatan bagi saya untuk belajar di lingkungan yang sangat inovatif dan 
+dinamis. Pengalaman membangun pengalaman kerja nyata di lab adalah 
+pelajaran yang tidak akan saya dapatkan di bangku kuliah. 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+
+ 
+1 
+ 
+ 
+LEMBAR PENGESAHAN 
+ 
+PENGEMBANGAN SISTEM PRESENSI WAJAH BERBASIS 
+WEB PADA RESEARCH ALLIANCE KO+LAB 
+DEVELOPMENT OF WEB-BASED FACE RECOGNITION 
+ATTENDANCE SYSTEM AT RESEARCH ALLIANCE 
+KO+LAB 
+Penulis 
+Rana Yoda Hanifah 
+NIM 6607012300035 
+ 
+ 
+Dosen Pembimbing 1 
+Dr. Heru Nugroho, S.Si., M.T 
+NIP 11810053 
+ 
+ 
+ 
+ 
+Dosen Pembimbing 2 
+Nama Dosen Pembimbing 2 
+NIP 098….. 
+ 
+ 
+Tanggal Pengesahan: 15 Januari 2026 (tanggal pengumpulan revisi)
+
+ 
+1 
+ 
+ 
+PERNYATAAN 
+ 
+Dengan ini saya menyatakan bahwa: 
+1. Karya tulis ini adalah asli dan belum pernah diajukan untuk mendapatkan gelar 
+akademik (Ahli Madya, Sarjana, Magister dan Doktor), baik di Fakultas Ilmu 
+Terapan Universitas Telkom maupun di perguruan tinggi lainnya; 
+2. karya tulis ini murni gagasan, rumusan, dan penelitian saya sendiri, tanpa 
+bantuan pihak lain, kecuali arahan tim pembimbing atau tim promotor atau 
+penguji; 
+3. dalam karya tulis ini tidak terdapat cuplikan karya atau pendapat yang telah 
+ditulis atau dipublikasikan orang lain, kecuali secara tertulis dengan jelas 
+dicantumkan sebagai acuan dalam naskah dengan menyebutkan nama 
+pengarang dan dicantumkan dalam daftar pustaka;  
+4. saya mengijinkan karya tulis ini dipublikasikan oleh Fakultas Ilmu Terapan 
+Universitas Telkom, dengan tetap mencantumkan saya sebagai penulis; dan 
+Pernyataan ini saya buat dengan sesungguhnya dan apabila pada kemudian hari 
+terdapat penyimpangan dan ketidakbenaran dalam pernyataan ini maka saya 
+bersedia menerima sanksi akademik berupa pencabutan gelar yang telah 
+diperoleh karena karya tulis ini, serta  sanksi lainnya sesuai norma yang berlaku 
+di Fakultas Ilmu Terapan Universitas Telkom. 
+  
+Bandung, 15 Januari 2026 (tanggal pengumpulan revisi) 
+Pembuat pernyataan, 
+ 
+ 
+Rana Yoda Hanifah 
+ 
+
+ 
+2 
+ 
+ 
+KATA PENGANTAR 
+ 
+Puji syukur penulis panjatkan ke hadirat Allah SWT atas segala rahmat, hidayah, dan 
+karunia-Nya, sehingga penulis dapat menyelesaikan Buku Tugas Akhir yang berjudul 
+"Pengembangan Sistem Presensi Wajah Berbasis Web pada Research Alliance 
+Ko+Lab" ini dengan baik. 
+Buku Tugas Akhir ini disusun untuk memenuhi syarat kelulusan jenjang Diploma 3 
+(D3) pada Program Studi Sistem Informasi, Fakultas Ilmu Terapan, Universitas 
+Telkom. Dalam proses penyusunannya, penulis menyadari bahwa keberhasilan ini 
+tidak terlepas dari dukungan berbagai pihak. Dengan segala kerendahan hati, penulis 
+menyampaikan terima kasih kepada: 
+● Prof. Dr. Dedy Rahman Wijaya, S.T, M.T., selaku Dekan Fakultas Ilmu Terapan 
+Universitas Telkom. 
+● Ibu Dr. RA Paramita Mayadewi, S.Kom., M.T., selaku Ketua Program Studi D3 
+Sistem Informasi. 
+● Dr. Heru Nugroho, S.Si., M.T, selaku Dosen Pembimbing yang telah 
+memberikan bimbingan, kritik, dan saran yang sangat membangun bagi 
+kesempurnaan karya ini. 
+● Bapak Robbi Hendriyanto, S.T., M.T., selaku Ketua Research Alliance Ko+Lab, 
+atas kesempatan magang yang diberikan. 
+Penulis menyadari sepenuhnya bahwa Buku Tugas Akhir ini masih memiliki 
+kekurangan. Oleh karena itu, penulis sangat mengharapkan kritik dan saran yang 
+membangun demi perbaikan di masa mendatang. 
+ 
+ 
+ 
+Bandung, 15 Januari 2026 
+ 
+ 
+ 
+Rana Yoda Hanifah 
+
+ 
+3 
+ 
+ 
+ 
+ 
+ABSTRAK 
+ 
+Abstrak adalah representasi dari isi dokumen yang singkat dan tepat. Tujuan abstrak 
+adalah memudahkan pembaca mendapatkan informasi mengenai Tugas Akhir yang 
+dibuat penulis tanpa harus membaca seluruh isi dokumen serta menghemat waktu 
+pembaca. Abstrak ditulis dalam 1 paragraf saja, dengan panjang tidak lebih dari 250 
+(dua ratus lima puluh) kata dengan spacing 1. Abstrak tidak mencantumkan 
+landasan teori. Abstrak harus dibuat dengan ringkas dan mampu menggambarkan 
+alasan atau pentingnya Tugas Akhir ini, tuju an yang hendak dicapai (atau fitur -fitur 
+utama yang ada dalam produk Tugas Akhir), langkah-langkah metode pengerjaannya, 
+tools yang digunakan, dan kesimpulan.  
+ 
+Kata Kunci: (keywords abstrak 5-6 kata/prasa) 
+ 
+ 
+ 
+ 
+
+ 
+4 
+ 
+ 
+ 
+ABSTRACT 
+ 
+Write your abstract in English. Using spacing 1 and italic.  
+DO NOT USE ENGLISH TRANSLATOR SOFTWARE WITHOUT FURTHER EDITING 
+ 
+Keywords: (abstract keywords 5-6 words/phrases) 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+
+ 
+5 
+ 
+ 
+DAFTAR ISI 
+ 
+ 
+LEMBAR PERSEMBAHAN i 
+LEMBAR PENGESAHAN i 
+PERNYATAAN i 
+KATA PENGANTAR ii 
+ABSTRAK iii 
+ABSTRACT iv 
+DAFTAR ISI v 
+DAFTAR GAMBAR i 
+DAFTAR TABEL i 
+DAFTAR LAMPIRAN i 
+BAB I PENDAHULUAN 1 
+1.1 1 
+1.2 2 
+1.3 3 
+1.4 5 
+BAB II PROFIL ORGANISASI 4 
+2.1 7 
+2.2 7 
+2.3 8 
+BAB III ANALISIS PEKERJAAN 5 
+3.1 12 
+3.2.1 Gambar Sistem Saat Ini ..................................................................................... 5 
+3.2.2 Pengembangan Sistem ...................................................................................... 5 
+3.2 15 
+3.3 16 
+3.3.1 Pengembangan Sistem ...................................................................................... 6 
+3.3.2 Implementasi Sistem ........................................................................................ 6 
+
+ 
+6 
+ 
+ 
+3.4 Sub Bab Tambahan (Bila Diperlukan) 6 
+BAB IV HASIL DAN PEMBAHASAN 7 
+4.1 17 
+4.2 19 
+4.3 Sub Bab Lain yang Relevan dengan Kompetensi Lulusan Program Studi 9 
+BAB V PENUTUP 10 
+5.1 20 
+5.2 20 
+DAFTAR PUSTAKA 11 
+LAMPIRAN 12 
+HALAMAN TAMBAHAN 13 
+ 
+
+ 
+1 
+ 
+ 
+DAFTAR GAMBAR 
+Gambar 1. 1 Logo Telkom University 3 
+ 
+ 
+
+ 
+1 
+ 
+ 
+DAFTAR TABEL 
+Tabel 1. 1 Contoh Tabel Pelaksanaan Kerja 2 
+Tabel 1. 2 Data Pengujian 3 
+ 
+
+ 
+1 
+ 
+ 
+DAFTAR LAMPIRAN 
+Lampiran  1 11 
+Lampiran  2 11 
+ 
+
+ 
+1 
+ 
+ 
+BAB I PENDAHULUAN  
+ 
+1.1 Latar Belakang 
+Pemberdayaan sumber daya manusia (SDM) merupakan elemen utama dalam 
+kemajuan suatu organisasi atau lembaga penelitian. Peningkatan kapasitas SDM 
+IPTEK melalui pengembangan kompetensi yang terstruktur dan berbasis riset sangat 
+penting untuk mendorong kinerja organisasi serta menghasilkan inovasi yang bisa 
+diterapkan [1]. Pengelolaan SDM yang efektif tidak hanya berfokus pada 
+pengembangan kompetensi, tetapi juga mencakup sistem pengawasan dan 
+kedisiplinan yang mampu memotivasi setiap individu untuk memberikan kontribusi 
+terbaiknya. Dalam lingkungan kerja saat ini , keterbukaan dan tanggung jawab 
+terhadap kehadiran merupakan dasar penting untuk membangun kepercayaan dan 
+menilai kinerja secara adil. 
+Kehadiran karyawan merupakan indikator penting dalam mengevaluasi kinerja kerja. 
+Namun, sistem presensi tradisional yang menggunakan tanda tangan atau kartu 
+sering kali tidak mampu memastikan keakuratan data karena mudah diubah melalui 
+cara seperti "titip absen" [2], [3]. Selain masalah integritas, proses pengolahan data 
+kehadiran secara manual memerlukan waktu yang cukup banyak bagi staf 
+administrasi untuk mengumpulkan dan menyusun ulang data bulanan, sehingga 
+meningkatkan kemungkinan terjadinya kesalahan akibat faktor manusia [4], [5].  
+Selain adanya celah dalam manipulasi identitas, penggunaan media kertas secara 
+besar-besaran juga menghasilkan tumpukan dokumen fisik yang tidak teratur dan 
+kurang efisien [6]. Situasi dokumentasi kehadiran yang berantakan dan sulit untuk 
+dikelola dapat dilihat pada gambar 1.1. 
+
+ 
+2 
+ 
+ 
+ 
+Gambar 1.1 Inefisiensi Dokumentasi Presensi Berbasis Kertas 
+Tantangan lain yang muncul dalam sistem digital berbasis lokasi adalah 
+kemungkinan adanya manipulasi posisi melalui aplikasi pihak ketiga seperti Fake 
+GPS, sehingga memerlukan penyelesaian khusus dari sisi algoritma pengenali lokasi 
+[7]. Research Alliance Ko+Lab membutuhkan sistem yang bisa menyesuaikan 
+dengan pola kerja fleksibel (WFO/WFA) namun tetap diawasi secara ketat melalui 
+metode verifikasi dua tahap, yaitu dengan memeriksa wajah dan lokasi [8].  
+Sebagai upaya mengatasi permasalahan tersebut, penelitian ini menawarkan solusi 
+berupa pengembangan Sistem Presensi Wajah Berbasis Web (SPBW) yang terhubung 
+dengan teknologi biometrik dan pemetaan lokasi. Solusi ini dirancang untuk 
+mengurangi ketergantungan pada alat fisik dan mencegah manipulasi data dengan 
+cara memeriksa identitas unik wajah pengguna secara langsung melalui kamera di 
+browser dan memastikan lokasi secara tepat menggunakan Geolocation API. 
+Dengan adanya sistem ini, Research Alliance Ko+Lab diharapkan bisa memiliki 
+pengelolaan sumber daya manusia yang lebih modern, jelas, dan terotomasi. 
+1.2 Rumusan Masalah dan Solusi 
+Fokus permasalahan pada penelitian ini adalah sebagai berikut: 
+1) Bagaimana cara mengurangi risiko adanya manipulasi data kehadiran serta 
+pengeditan lokasi (Fake GPS)? 
+2) Bagaimana mempermudah manajemen SDM untuk memantau dan 
+merangkum informasi kehadiran karyawan dengan cara yang efisien? 
+3) Bagaimana cara mengotomasi proses perhitungan KPI secara langsung dan 
+dalam waktu nyata? 
+
+
+ 
+3 
+ 
+ 
+4) Bagaimana mempercepat proses penyediaan dokumen laporan kehadiran 
+agar dapat digunakan untuk kebutuhan administratif tanpa harus melakukan 
+rekapitulasi ulang secara manual? 
+Sebagai solusinya, perlu dikembangkan sebuah "Sistem Presensi Wajah Berbasis 
+Web" yang memadukan teknologi pengenalan wajah untuk tujuan pengenalan 
+biometrik, menggunakan API lokasi untuk memastikan tempat pengguna berada, 
+juga menyediakan fitur penghitungan KPI otomatis yang mengelola informasi tentang 
+disiplin dan kepatuhan laporan dalam satu sistem terpadu, serta menyediakan Fitur 
+Tombol Export pada setiap halaman laporan untuk konversi data instan. 
+ 
+1.3 Tujuan 
+Tujuan dari pelaksanaan pekerjaan ini adalah untuk memperbarui sistem 
+pengelolaan kehadiran di Research Alliance Ko+Lab dengan harapan meningkatkan 
+keakuratan data dan kelancaran operasional perusahaan. Beberapa sasaran yang 
+ingin dicapai antara lain: 
+1) Adanya aplikasi sistem presensi berbasis web yang dapat mengurangi 
+kemungkinan manipulasi data kehadiran dan lokasi, guna memastikan 
+validitas informasi biometrik. 
+2) Terbentuknya sistem yang mempermudah pengelolaan sumber daya 
+manusia dalam memantau serta mengumpulkan data kehadiran dan laporan 
+harian karyawan dengan cara yang efisien melalui media digital. 
+3) Terealisasinya mekanisme otomatis dalam perhitungan nilai KPI yang 
+berfungsi secara langsung dan real -time untuk memberikan evaluasi kinerja 
+yang adil dan transparan. 
+4) Menyediakan tombol ekspor pada setiap halaman laporan (Laporan 
+Penilaian KPI, Laporan Harian, dan Laporan Bulanan) untuk menghasilkan 
+dokumen dalam format Excel atau PDF secara otomatis dan tepat guna. 
+ 
+ 
+
+ 
+4 
+ 
+ 
+ 
+
+ 
+5 
+ 
+ 
+1.4 Penjadwalan Kerja 
+Pengembangan sistem ini menggunakan metodologi Agile dengan siklus hidup 
+pengembangan sistem (Software Development Life Cycle - SDLC) yang terdiri dari 6 
+tahap iteratif. Pendekatan ini dipilih agar sistem dapat dikembangkan secara 
+fleksibel, menerima umpan balik berkelanjutan, dan memastikan setiap fitur (seperti 
+biometrik wajah dan help center) matang sebelum diluncurkan sepenuhnya. 
+Adapun 6 tahapan yang dijalankan pada setiap iterasi adalah sebagai berikut: 
+1) Requirement Gathering: Mengumpulkan kebutuhan fungsional dari pihak 
+manajemen Ko+Lab dan unit startup. 
+2) Design the Requirements: Merancang arsitektur sistem, skema database, 
+dan antarmuka (UI/UX). 
+3) Coding: Tahap implementasi kode program menggunakan teknologi web dan 
+library pengenalan wajah. 
+4) Testing: Menguji fungsionalitas sistem, akurasi deteksi wajah, dan validasi 
+koordinat lokasi. 
+5) Deployment: Meluncurkan modul yang telah siap ke lingkungan server agar 
+dapat diakses oleh pengguna. 
+6) Feedback: Menerima masukan dari pengguna untuk dilakukan perbaikan 
+pada iterasi berikutnya. 
+Rincian jadwal pelaksanaan pengerjaan sistem yang terbagi dalam dua tabel periode 
+Agustus 2025 hingga Februari 2026 disajikan pada tabel 1.1 dan tabel 1.2. 
+Tabel 1.1 Jadwal Pelaksanaan Kerja Periode I (Agustus – Oktober 2025) 
+No Deskripsi Kerja 
+Agustus September Oktober 
+1 2 3 4 1 2 3 4 1 2 3 4 
+1 Requirement Gathering             
+2 Design             
+3 Coding             
+4 Testing             
+5 Deployment             
+6 Feedback             
+ 
+ 
+
+ 
+6 
+ 
+ 
+Tabel 1.2 Jadwal Pelaksanaan Kerja Periode II (November 2025 – Februari 2026) 
+No Deskripsi Kerja 
+November Desember Januari Februari 
+1 2 3 4 1 2 3 4 1 2 3 4 1 2 3 4 
+1 
+Requirement 
+Gathering 
+(refinement) 
+                
+2 Design                 
+3 Coding (Fitur Lanjut)                 
+4 Testing                 
+5 Deployment                 
+6 Feedback & 
+Maintenance 
+                
+ 
+ 
+
+ 
+7 
+ 
+ 
+BAB II PROFIL ORGANISASI  
+2.1 Deskripsi Organisasi 
+Research Alliance Ko+Lab adalah sebuah aliansi riset strategis yang memfasilitasi 
+kolaborasi antara dosen, startup mahasiswa, UMKM, masyarakat, dan industri. 
+Ko+Lab berfokus pada penciptaan produk hasil riset yang implementatif serta 
+memiliki nilai bisnis dan dampak sosial (social impact) yang signifikan. Sebagai 
+bagian dari lingkungan inovasi, Ko+Lab bertujuan untuk membentuk talenta 
+wirausaha digital melalui pengalaman langsung dalam membangun dan 
+menjalankan startup. 
+2.2 Struktur Organisasi dan Tata Kelola 
+Struktur organisasi Research Alliance Ko+Lab dipimpin oleh  Bapak Robbi 
+Hendriyanto, S.T., M.T. sebagai  Ketua Research Alliance Ko+Lab yang membawahi 
+tiga bidang utama dalam pelaksanaan  pelaksana, yaitu Bidang Operasional 
+Laboratorium, Bidang Pelaksana Tri Dharma, serta Bidang Pelaksana Industri dan 
+Startup. Penulis ditempatkan pada unit Tim IT yang secara fungsional berada di 
+bawah koordinasi bidang Industri dan Startup, bekerja sama dengan Project Manager 
+serta bagian Business Strategic , yang mencakup SDM, Finance, hingga Marketing , 
+untuk mendukung kebutuhan digital di seluruh unit startup. 
+Penjelasan mendalam mengenai tata kelola dan divisi tempat magang penulis 
+adalah sebagai berikut: 
+1) Deskripsi Divisi Tempat Kerja: Unit IT berperan sebagai pendukung teknologi 
+informasi yang melayani seluruh bagian bisnis di Ko+Lab. Divisi ini bertugas 
+memastikan infrastruktur digital siap digunakan untuk kegiatan penelitian 
+maupun operasional bisnis startup seperti idSpora, Ngolab,  dan 
+Sorgumology. 
+2) Daftar Pekerjaan Umum Divisi: Mengembangkan sistem manajemen internal 
+seperti Sistem Presensi Berbasis Wajah  untuk memantau kehadiran dan 
+produktivitas harian pegawai magang. 
+3) Keterkaitan dengan Divisi Lain: Tim IT  ini berkomunikasi secara aktif dengan 
+Bidang Pelaksana Industri dan Startup untuk menerjemahkan kebutuhan 
+bisnis startup menjadi fitur-fitur aplikasi yang fungsional. 
+4) Peran Kerja Divisi terhadap Proses Bisnis: Dengan menyediakan sistem 
+seperti Sistem Presensi Berbasis Wajah, Tim IT memungkinkan proses bisnis 
+manajemen SDM berjalan secara transparan dan dapat 
+dipertanggungjawabkan, di mana data kinerja dari setiap unit startup dapat 
+dilaporkan secara langsung kepada pimpinan melalui laporan digital. 
+
+ 
+8 
+ 
+ 
+Struktur organisasi secara utuh dapat dilihat pada Gambar 2.1. 
+ 
+Gambar 2.1 Flowchart Struktur Organisasi  
+ 
+2.3 Deskripsi Pekerjaan 
+Pekerjaan pengembangan Sistem Presensi Wajah Berbasis Web (SPBW) dilakukan 
+karena alas an penting  untuk menciptakan standarisasi dalam pengawasan kinerja 
+pada ekosistem industri di Ko+Lab. Karena unit bisnis di bawah bidang Industri dan 
+Startup memiliki berbagai jenis kegiatan  operasional, dibutuhkan satu sistem yang 
+mampu memvalidasi kehadiran dan laporan harian secara akurat untuk menjamin 
+integritas data penilaian KPI. 
+Sebagai peserta magang di bagian  Tim IT, penulis memiliki tanggung jawab utama 
+dalam merancang dan membangun infrastruktur Sistem Presensi Berbasis Wajah  
+yang mencakup lingkup kerja sebagai berikut: 
+1) Jenis Pekerjaan dan Tanggung Jawab: 
+a. Menganalisis kebutuhan variabel kehadiran dan pelaporan dari tiga 
+startup utama (idSpora, Ngolab, Sorgumology). 
+b. Membuat model pengenalan wajah berbasis biometrik di sisi klien 
+(browser). 
+c. Mengintegrasikan validasi lokasi fisik berbasis Geolocation API. 
+
+
+ 
+9 
+ 
+ 
+d. Mengotomasi rekapitulasi data menjadi nilai KPI yang bisa langsung 
+digunakan oleh manajemen pusat. 
+ 
+2) Ruang Lingkup Pekerjaan:  Pekerjaan ini difokuskan pada pengembangan 
+aplikasi berbasis web yang dapat diakses melalui berbagai perangkat di 
+laboratorium. Ruang lingkup entitas yang ditangani oleh penulis dalam sub -
+unit Startup Development & Incubation mencakup kategori Startup dan Non-
+Startup sebagaimana digambarkan pada Gambar 2.2. 
+ 
+ 
+Gambar 2. 2 Ruang Lingkup Kerja Peserta Magang 
+Berdasarkan Gambar 2.2, penulis bertanggung jawab menyediakan sistem informasi 
+kepada startup yang bersifat profit -oriented seperti Ngolab, Sorgumology, dan 
+idSpora, serta unit pendukung fungsional yaitu Tim IT sebagai entitas yang tidak 
+termasuk dalam startup. Integrasi ini bertujuan agar manajemen pusat Ko+Lab 
+memiliki informasi yang lengkap  tentang seluruh anggota yang berada di bawah 
+bidang industri. 
+ 
+Selanjutnya, alur kerja yang dilakukan oleh penulis dimulai dari tahap persiapan 
+hingga pekerjaan dianggap selesai dan diserahkan kepada pihak manajemen 
+dijelaskan melalui Gambar 2.3. 
+ 
+
+
+ 
+10 
+ 
+ 
+ 
+Gambar 2. 2 Flowchart Alur Kerja Peserta Magang 
+Penulisan alur pada Gambar 2.2 dimulai dengan tahap persiapan melalui studi 
+terhadap 7 jurnal referensi. Tahap ini penting untuk menentukan algoritma yang 
+paling efektif. Langkah s elanjutnya adalah tahap menganalisis proses bisnis As-Is 
+serta pengumpulan kebutuhan dari ketiga startup. Tahap perancangan mencakup 
+pembuatan desain antarmuka (UI/UX) dan normalisasi skema database. Tahap 
+implementasi dilakukan dengan penulisan kode program menggunakan metode 
+Agile untuk memastikan fleksibilitas pengembangan. Set elah sistem memiliki fitur 
+
+
+ 
+11 
+ 
+ 
+inti, dilakukan tahap testing di lingkungan laboratorium untuk memvalidasi akurasi 
+koordinat GPS dan deteksi wajah. Pekerjaan dinyatakan selesai setelah tahap serah 
+terima (handover) kepada unit IT Ko+Lab untuk digunakan sebagai standar 
+operasional kehadiran harian.
+
+ 
+12 
+ 
+ 
+BAB III ANALISIS PEKERJAAN 
+3.1 Analisis Sistem 
+Analisis sistem dilakukan untuk meninjau kembali proses bisnis terkait pengelolaan 
+kehadiran dan pelaporan kerja di Research Alliance Ko+Lab sebelum dan setelah 
+diterapkan teknologi. Analisis ini melibatkan tiga entitas startup, yaitu idSpora, 
+Ngolab, dan Sorgumology, yang memerlukan standar pengawasan terhadap SDM 
+yang sama di bawah koordinasi Ko+Lab. 
+3.1.1 Gambar Sistem Saat Ini 
+Analisis terhadap sistem presensi yang berjalan saat ini (As -Is) di Research 
+Alliance Ko+Lab menunjukkan dominasi prosedur manual berbasis dokumen 
+fisik. Kondisi ini menyebabkan adanya ketergantungan yang tinggi pada 
+integritas personal peserta magang serta beban administratif yang signifikan 
+pada tahap rekapitulasi data. Sebagaimana diilustrasikan dalam Gambar 
+3.1, alur kerja konvensional ini melibatkan interaksi fisik yang bersifat luring 
+(offline) antara peserta magang, atasan, dan staf manajemen. 
+ 
+
+ 
+13 
+ 
+ 
+ 
+Gambar 3.1 Diagram BPMN Sistem Berjalan (As-Is) 
+Berdasarkan diagram tersebut, proses presensi diawali dengan pencetakan 
+formulir secara mandiri oleh peserta magang di setiap awal periode. 
+Pencatatan jam kehadiran dilakukan secara manual pada media kertas, 
+sementara pelaporan ketidakhadiran akibat sakit atau izin dilakukan melalui 
+kanal komunikasi informal tanpa adanya integrasi dokumentasi. Validasi 
+kehadiran dilakukan secara pasif oleh atasan melalui pengamatan langsung 
+di lapangan. Inefisiensi utama terjadi pada akhir periode, di mana staf 
+manajemen harus melakukan input data secara manual dari formulir fisik ke 
+dalam lembar sebar (spreadsheet) untuk keperluan penghitungan nilai KPI, 
+yang berisiko menimbulkan kesalahan manusia (human error). 
+ 
+
+
+ 
+14 
+ 
+ 
+3.2.2 Pengembangan Sistem 
+Guna memitigasi kendala pada sistem manual, diusulkan sebuah model 
+sistem baru melalui Sistem Presensi Wajah Berbasis Web (SPBW). Sistem ini 
+mengedepankan otomasi pada tahap verifikasi identitas dan penyentralan 
+manajemen data. Rancangan alur sistem usulan  (To-Be) yang 
+mengintegrasikan peran pegawai, sistem, dan administrator dipaparkan 
+dalam Gambar 3.2. 
+ 
+Gambar 3.2 Diagram BPMN Pengembangan Sistem (To-Be) 
+Mengacu pada alur sistem usulan pada Gambar 3.2, terdapat transformasi 
+digital yang signifikan dalam prosedur operasional kehadiran. Proses diawali 
+dengan pegawai melakukan akses ke dasbor sistem untuk menjalankan 
+protokol presensi. Validasi dilakukan seca ra otomatis oleh sistem melalui 
+pemindaian biometrik wajah dan verifikasi koordinat lokasi secara tepat. 
+
+
+ 
+15 
+ 
+ 
+Hasil verifikasi tersebut secara instan tercatat ke dalam basis data kehadiran 
+tanpa melalui entri manual. 
+Peningkatan fungsionalitas juga diterapkan pada mekanisme pelaporan dan 
+bantuan. Pegawai tidak hanya melakukan presensi, tetapi juga dapat 
+menginput laporan aktivitas harian dan bulanan secara terstruktur. Fitur 
+Admin Help Center diimplementasikan sebagai jalur formal bagi pegawai 
+untuk mengajukan perbaikan data kehadiran yang terlewat (izin/sakit) 
+maupun pelaporan masalah teknis. Di sisi administrator, sistem 
+menyediakan fasilitas verifikasi pengajuan serta fitur ekspor laporan 
+otomatis. Administrator dapat menghasilkan dokumen laporan dalam format 
+Excel atau PDF pada setiap bagian laporan (KPI, Harian, dan Bulanan), 
+sehingga mempercepat proses dokumentasi administratif dan pembukuan 
+organisasi. 
+3.2 Kualitas/Kinerja Sistem 
+Untuk menjamin reliabilitas SPBW, ditetapkan parameter kualitas yang harus 
+dipenuhi oleh sistem. Analisis kinerja difokuskan pada aspek akurasi dan kecepatan 
+sebagai berikut: 
+1) Akurasi Biometrik (Facial Recognition Accuracy): Target akurasi ditetapkan 
+sebesar ≥ 95%. Hal ini diukur dengan menggunakan parameter False 
+Acceptance Rate (FAR) dan False Rejection Rate (FRR). Implementasi model 
+Deep Learning pada pustaka face -api.js haru s mampu mengekstraksi titik -
+titik koordinat wajah (facial landmarks) secara presisi meskipun terdapat 
+variasi ekspresi wajah, pencahayaan, atau penggunaan aksesoris seperti 
+masker dan kacamata. 
+2) Presisi Geolokasi (Geofencing Precision): Sistem menerapkan algoritma 
+Haversine untuk menghitung jarak antara koordinat perangkat pengguna 
+dengan titik koordinat pusat Ko+Lab. Radius toleransi dibatasi maksimal 50 
+meter. Sistem juga melakukan validasi terhadap timestamp perangkat untuk 
+mendeteksi potensi penggunaan VPN atau aplikasi manipulasi lokasi. 
+3) Efisiensi Waktu Respons (Latency): Target waktu pemrosesan total mulai dari 
+deteksi wajah hingga penyimpanan data di server adalah < 3 detik. Optimasi 
+dilakukan dengan melakukan eksekusi model AI di sisi klien (client-side) guna 
+mengurangi beban pengiriman  data citra mentah ke server, yang sekaligus 
+berfungsi menjaga privasi data biometrik pengguna. 
+4) Integritas Data Administratif: Seluruh laporan yang dihasilkan melalui fitur 
+ekspor wajib sinkron secara real-time dengan database. Perhitungan nilai KPI 
+dilakukan melalui fungsi otomatis di sisi server untuk menjamin transparansi 
+dan keadilan evaluasi kinerja anggota. 
+
+ 
+16 
+ 
+ 
+3.3 Kebutuhan Perangkat Kerja 
+Pemilihan perangkat kerja dibagi berdasarkan fase pengembangan dan fase 
+operasional (implementasi) untuk memastikan ekosistem sistem berjalan optimal. 
+3.3.1 Pengembangan Sistem 
+perangkat keras dan perangkat lunak yang digunakan selama proses  
+ pembangunan sistem oleh penulis adalah sebagai berikut: 
+1) Perangkat Keras (Hardware): Laptop dengan spesifikasi minimal CPU 
+Multi-core dan RAM 8GB digunakan untuk pelatihan model AI dan 
+kompilasi kode. Kamera web (webcam) beresolusi 720p digunakan 
+sebagai alat penguji pengambilan sampel biometrik. 
+2) Perangkat Lunak (Software): * VS Code: Sebagai Integrated Development 
+Environment (IDE) utama. 
+a) MySQL/PostgreSQL: Sebagai sistem manajemen basis data 
+relasional untuk menyimpan tabel log presensi dan pengajuan 
+bantuan. 
+b) Face-api.js: Pustaka inti untuk implementasi pengenalan wajah. 
+c) ExcelJS & PDFMake: Pustaka pendukung untuk fungsi konversi 
+data ke format dokumen administratif. 
+d) Git & GitHub: Sebagai alat kontrol versi (version control system). 
+3.3.2 Implementasi Sistem 
+kebutuhan teknis yang harus dipenuhi di lingkungan operasional agar SPBW  
+ dapat digunakan oleh pegawai magang dan administrator secara stabil: 
+1) Perangkat Keras (Hardware): Perangkat komputasi pengguna (PC, 
+Laptop, atau Smartphone) yang dilengkapi dengan modul kamera depan 
+fungsional serta sensor GPS terintegrasi. 
+2) Perangkat Lunak (Software): Peramban Web Modern: Sistem 
+memerlukan browser seperti Google Chrome, Microsoft Edge, atau Safari 
+versi terbaru untuk mendukung API biometrik dan geolokasi. 
+a) Izin Akses Browser: Pengguna harus memberikan izin 
+(permission) kepada browser untuk mengakses modul kamera 
+dan layanan lokasi pada perangkat. 
+b) Koneksi Internet: Diperlukan jaringan internet yang stabil untuk 
+melakukan sinkronisasi data presensi ke server pusat Research 
+Alliance Ko+Lab secara real-time.
+
+ 
+17 
+ 
+ 
+BAB IV HASIL DAN PEMBAHASAN 
+Bagian ini berisi deskripsi atau narasi yang menjelaskan hasil pengembangan system 
+yang menjawab permasalahan pada organisasi lokasi magang 
+4.1 Hasil Akhir (Luaran) 
+Sub bab ini berisi penjelasan mengenai hasil akhir (luaran) dari kerja/magang yang 
+telah dilaksanaan secara umum dan proses selanjutnya setelah luaran selesai 
+secara umum. Penulisan sub bab ini pada umumnya berbentuk paragraf narasi. 
+Sub bab ini berisi mengenai detail hasil akhir dari Kerja/magang . Penulisan dan isi 
+dari bagian ini akan berbeda, sesuai dengan bidang kerja selama Kerja/magang. 
+Berikut contohnya. 
+● Pada bidang Computer Technical Support, Network Administrator, System 
+Administrator 
+Luarannya dapat berupa diagram sistem (Baik sistem maupun Jaringan) serta 
+semua file konfigurasi dari sistem yang sudah dibangun dan diatur (Contoh file 
+konfigurasi adalah file httpd.conf pada apache web server). Bisa dicantumkan 
+juga hasil pengujian siste m dan implementasi. Foto dokumentasi sistem yang 
+anda bangun dan jaringannya juga dilampirkan. 
+● Pada bidang Programmer, Web Programmer, Mobile Programmer 
+Luarannya dapat berupa perangkat lunak yang di bangun (mockup antar muka). 
+Selain itu, apabila diperlukan Source code dapat dilampirkan di laporan akhir. 
+Jika source code terlalu besar maka dapat dilampirkan dalam sebuah CD/DVD. 
+Printscreen aplikasi/web ju ga dilampirkan. Bisa dicantumkan juga hasil 
+pengujian sistem dan implementasi perangkat lunak. 
+● Pada bidang Database Programmer 
+Luarannya dapat berupa query, tabel, database, subprogram dan 
+pengimplementasiannya. File source .sql dapat dilampirkan juga beserta 
+kumpulan code query yang dibangun. Bisa dicantumkan juga hasil pengujian 
+database. 
+● Pada bidang Webmaster dan Multimedia Programmer 
+Luarannya dapat berupa file Konten/multimedia juga dapat dilampirkan berupa 
+printscreennya konten yang dibangun. File multimedia dapat dilampirkan dalam 
+sebuah CD/DVD. Bisa dicantumkan juga hasil pengujian aplikasi 
+multimedianya. 
+● Pada bidang Embedded Programmer 
+Luarannya dapat berupa source code dan hardware. File Source code dapat 
+dilampirkan di laporan ataupun CD/DVD jika dirasa terlalu besar. Hardware yang 
+
+ 
+18 
+ 
+ 
+dibangun juga dapat difoto. Bisa dicantumkan juga hasil pengujian sistem dan 
+implementasinya. 
+● Pada bidang Quality Assurance 
+Luarannya dapat berupa dokumen pengujian dan skema pengujian yang 
+dibangun. Serta langkah -langkah penggunaan tools pengujian yang digunakan 
+dalam pengujian. Beberapa Printscreen pengujian yang dilakukan juga 
+dilampirkan. Juga bisa dicantumkan rencana perbaikan dari hasil pengujian.
+
+ 
+19 
+ 
+ 
+Note: Halaman ini adalah contoh halaman yang menggunakan page landscape pada konten/Bab (jika ada)   
+4.2 Pengujian Luaran 
+Membahas pengujian dari sistem yang telah dikembangkan atau luaran lain yang sesuai dengan permasalahan yang diselesaikan. Teknik 
+pengujian dapat disesuaikan dengan karakteristik luaran yang telah dihasilkan. 
+4.3 Sub Bab Lain yang Relevan dengan Kompetensi Lulusan Program Studi 
+Mohon disesuaikan 
+ 
+
+ 
+20 
+ 
+ 
+BAB V PENUTUP 
+Bagian ini berisi kesimpulan dari solusi yang telah dikembangkan untuk organisasi 
+Lokasi magang serta saran pengembangan kedepannya 
+5.1 Kesimpulan  
+Sub bab ini berisi ringkasan pekerjaan mulai dari hal-hal yang memotivasi pekerjaan 
+atau penelitian sampai ke hasil pekerjaan. Harap diperhatikan bahwa kesimpulan 
+harus menjawab tujuan dan bersifat ilmiah. Kesimpulan adalah pembuktian bahwa 
+tujuan dari pekerjaan atau penelitian yang telah tercapai. Jangan pernah menuliskan 
+apa yang tidak pernah Anda analisis atau kerjakan sebelumnya. 
+5.2 Saran 
+Sub bab ini berisi hal -hal baru sepeti alat/ aplikasi/ hasil survey yang diperoleh 
+penulis yang dapat memperbaiki atau mengembangkan esensi dari pembahasan. 
+Sertakan alasannya. Sebagai sontoh, disarankan untuk menggunakan database 
+Oracle karena mampu menangani data dalam jumlah yang lebih besar dibandingkan 
+MySQL; dari analisis survey disarankan untuk menurunkan harga makanan sehingga 
+lebih terjangkau bagi mahasiswa. 
+ 
+ 
+ 
+
+ 
+21 
+ 
+ 
+ 
+DAFTAR PUSTAKA 
+ 
+[1]  I. Tin, ”Liputan 6 Tekno,” 21 November 2016. [Online]. Available: 
+http://tekno.liputan6.com/read/2591339/tak-disangka-pengguna-bitcoin-di-
+indonesia-capai-200-ribu. 
+ 
+
+ 
+22 
+ 
+ 
+LAMPIRAN 
+ 
+Bagian ini berisi Lampiran 
+Lampiran  1  
+Lampiran  2 
+
+ 
+23 
+ 
+ 
+HALAMAN TAMBAHAN 
+Note: ini adalah contoh untuk halaman Landscape 
+ 
+ 
+ 
+
+ 
+24 
+ 
+ 
+Note: ini adalah contoh untuk halaman Landscape 
+ 
+ 
+ 
+

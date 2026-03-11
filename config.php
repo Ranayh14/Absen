@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 // Config file - Database configuration, helper functions, and AJAX endpoints
 // NOTE: session_start() is called in index.php, not here
 
@@ -116,6 +116,7 @@ function ensureSchema(PDO $pdo): void {
             lokasi_overtime VARCHAR(255) NULL,
             alasan_izin_sakit TEXT NULL,
             bukti_izin_sakit LONGTEXT NULL,
+            alasan_lokasi_berbeda TEXT NULL,
             daily_report_id INT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             INDEX(user_id),
@@ -354,7 +355,7 @@ function seedDefaultSettings(PDO $pdo): void {
         ['wfo_address', 'Fakultas Ilmu Terapan, Jl. Telekomunikasi, Bandung', 'Nama alamat pusat WFO (akan di-geocode)'],
         ['wfo_lat', '-6.9738', 'Latitude pusat WFO'],
         ['wfo_lng', '107.6300', 'Longitude pusat WFO'],
-        ['wfo_radius_m', '1200', 'Radius wilayah WFO dalam meter'],
+        ['wfo_radius_m', '100', 'Radius wilayah WFO dalam meter'],
         // WFO detection via IP API settings
         ['wfo_mode', 'api', 'Mode deteksi WFO: api atau coordinate'],
         ['wfo_api_provider', 'ipinfo', 'Provider IP API: ipinfo | ipapi | ip-api'],
@@ -2047,6 +2048,8 @@ function calculateKPIForEmployee(PDO $pdo, $userId, $periodStart = null, $period
                 DATE(jam_masuk_iso) as attendance_date,
                 jam_masuk_iso,
                 jam_masuk,
+                jam_pulang,
+                jam_pulang_iso,
                 status,
                 ket,
                 CASE 
@@ -2227,6 +2230,13 @@ function calculateKPIForEmployee(PDO $pdo, $userId, $periodStart = null, $period
                         error_log("KPI Debug - User $userId: Missing daily report on $dateStr");
                     }
                     
+                    // NEW: Penalty for missing clock-out (-30 points)
+                    if (empty($attendanceRecord['jam_pulang_iso']) && empty($attendanceRecord['jam_pulang']) && $attendanceRecord['ket'] !== 'overtime') {
+                        // Subtracting from cumulative score so it affects the average for that day
+                        $kpiScore -= 30;
+                        error_log("KPI Debug - User $userId: Missing clock-out penalty on $dateStr (-30 points)");
+                    }
+
                     // Check attendance status (only WFO, WFA, Overtime)
                     if ($attendanceRecord['status'] === 'ontime') {
                         $ontimeCount++;
@@ -2741,7 +2751,7 @@ if (isset($_GET['ajax'])) {
     }
 
     // Must be authenticated for all endpoints except auth-related and public landing scan
-    if (!in_array($action, ['login', 'register', 'get_members', 'save_attendance', 'get_today_attendance', 'forgot_password', 'verify_otp', 'reset_password', 'get_ga_qr', 'get_public_daily_report_stats'], true)) {
+    if (!in_array($action, ['login', 'register', 'get_members', 'save_attendance', 'get_clockin_location', 'get_today_attendance', 'forgot_password', 'verify_otp', 'reset_password', 'get_ga_qr', 'get_public_daily_report_stats', 'reverse_geocode', 'submit_help_request', 'search_address'], true)) {
         if (!isset($_SESSION['user'])) jsonResponse(['error' => 'Unauthorized'], 401);
     }
     // Admin manual holidays CRUD
@@ -3066,7 +3076,7 @@ if (isset($_GET['ajax'])) {
 
     if ($action === 'get_members') {
         // Admin can see all; Pegawai only themselves (but for face recognition we need all for presensi). We'll return all but only safe fields
-        $stmt = $pdo->query("SELECT id, role, email, nim, nama, prodi, startup, foto_base64 FROM users WHERE role='pegawai'");
+        $stmt = $pdo->query("SELECT id, role, email, nim, nama, prodi, startup, foto_base64, face_embedding FROM users WHERE role='pegawai'");
         $rows = $stmt->fetchAll();
         jsonResponse(['ok' => true, 'data' => $rows]);
     }

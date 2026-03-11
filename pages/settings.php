@@ -61,6 +61,11 @@
                         <p class="text-xs text-gray-500 mt-1">Pegawai tidak bisa pulang sebelum jam ini</p>
                     </div>
                 </div>
+                <div class="mt-4">
+                    <label class="block text-xs text-gray-600 mb-1 font-medium">Jam Pulang Default (Bulk Fix)</label>
+                    <input type="time" id="default-checkout-time" class="w-full px-3 py-2.5 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 text-sm" value="17:00">
+                    <p class="text-xs text-gray-500 mt-1">Jam pulang yang digunakan saat admin melakukan Bulk Fix data kosong</p>
+                </div>
             </div>
         </details>
 
@@ -428,6 +433,7 @@ async function handleSaveSettings(btn) {
         data.append('kpi_izin_sakit', getValue('kpi-izin-sakit'));
         data.append('kpi_alpha', getValue('kpi-alpha'));
         data.append('kpi_overtime_bonus', getValue('kpi-overtime-bonus'));
+        data.append('default_checkout_time', getValue('default-checkout-time'));
         data.append('max_daily_report_days_back', getValue('max-daily-report-days-back'));
         data.append('max_monthly_report_months_back', getValue('max-monthly-report-months-back'));
         data.append('monthly_report_end_year', getValue('monthly-report-end-year'));

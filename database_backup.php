@@ -18,6 +18,14 @@ $DB_NAME = 'absen_db';
 function createDatabaseBackupPHP(?PDO $pdo = null): array {
     global $DB_HOST, $DB_USER, $DB_PASS, $DB_NAME;
     
+    // Increase limits for large database backups
+    @set_time_limit(0);
+    @ini_set('memory_limit', '1024M');
+    
+    $backupDir = __DIR__ . '/database_backup';
+    if (!is_dir($backupDir)) @mkdir($backupDir, 0755, true);
+    $backupFile = $backupDir . '/absen_db_backup.sql';
+    
     try {
         // Create PDO connection if not provided
         if (!$pdo) {
@@ -32,72 +40,63 @@ function createDatabaseBackupPHP(?PDO $pdo = null): array {
             );
         }
         
-        $sql = "-- Database Backup\n";
-        $sql .= "-- Generated: " . date('Y-m-d H:i:s') . "\n";
-        $sql .= "-- Database: " . $DB_NAME . "\n";
-        $sql .= "-- Host: " . $DB_HOST . "\n";
-        $sql .= "-- Backup Method: PHP/PDO\n\n";
-        $sql .= "SET FOREIGN_KEY_CHECKS=0;\n\n";
+        $fp = @fopen($backupFile, 'w');
+        if (!$fp) {
+            return ['ok' => false, 'success' => false, 'message' => 'Gagal membuka file backup untuk penulisan'];
+        }
+
+        fwrite($fp, "-- Database Backup\n");
+        fwrite($fp, "-- Generated: " . date('Y-m-d H:i:s') . "\n");
+        fwrite($fp, "-- Database: " . $DB_NAME . "\n");
+        fwrite($fp, "-- Host: " . $DB_HOST . "\n");
+        fwrite($fp, "-- Backup Method: PHP/PDO (Chunked)\n\n");
+        fwrite($fp, "SET FOREIGN_KEY_CHECKS=0;\n\n");
         
         // Get all tables
         $tables = $pdo->query("SHOW TABLES")->fetchAll(PDO::FETCH_COLUMN);
         
         foreach ($tables as $table) {
-            $sql .= "-- Table structure for `{$table}`\n";
-            $sql .= "DROP TABLE IF EXISTS `{$table}`;\n";
+            fwrite($fp, "-- Table structure for `{$table}`\n");
+            fwrite($fp, "DROP TABLE IF EXISTS `{$table}`;\n");
             
             // Get table structure
             $createTable = $pdo->query("SHOW CREATE TABLE `{$table}`")->fetch();
-            $sql .= $createTable['Create Table'] . ";\n\n";
+            fwrite($fp, $createTable['Create Table'] . ";\n\n");
             
             // Get table data
-            $rows = $pdo->query("SELECT * FROM `{$table}`")->fetchAll(PDO::FETCH_ASSOC);
+            $stmt = $pdo->query("SELECT * FROM `{$table}`");
+            $hasData = false;
             
-            if (count($rows) > 0) {
-                $sql .= "-- Data for table `{$table}`\n";
-                
-                // Get column names
-                $columns = array_keys($rows[0]);
-                $columnList = '`' . implode('`, `', $columns) . '`';
-                
-                foreach ($rows as $row) {
-                    $values = [];
-                    foreach ($row as $value) {
-                        if ($value === null) {
-                            $values[] = 'NULL';
-                        } else {
-                            $values[] = $pdo->quote($value);
-                        }
-                    }
-                    $sql .= "INSERT INTO `{$table}` ({$columnList}) VALUES (" . implode(', ', $values) . ");\n";
+            while ($row = $stmt->fetch()) {
+                if (!$hasData) {
+                    fwrite($fp, "-- Data for table `{$table}`\n");
+                    $columns = array_keys($row);
+                    $columnList = '`' . implode('`, `', $columns) . '`';
+                    $hasData = true;
                 }
-                $sql .= "\n";
+                
+                $values = [];
+                foreach ($row as $value) {
+                    $values[] = ($value === null) ? 'NULL' : $pdo->quote($value);
+                }
+                fwrite($fp, "INSERT INTO `{$table}` ({$columnList}) VALUES (" . implode(', ', $values) . ");\n");
             }
+            if ($hasData) fwrite($fp, "\n");
         }
         
-        $sql .= "SET FOREIGN_KEY_CHECKS=1;\n";
+        fwrite($fp, "SET FOREIGN_KEY_CHECKS=1;\n");
+        fclose($fp);
         
-        // Try to save to file if directory is writable
-        $backupDir = __DIR__ . '/database_backup';
-        $backupFile = $backupDir . '/absen_db_backup.sql';
-        $fileSaved = false;
-        
-        if (is_dir($backupDir) || @mkdir($backupDir, 0755, true)) {
-            if (is_writable($backupDir)) {
-                if (@file_put_contents($backupFile, $sql) !== false) {
-                    $fileSaved = true;
-                }
-            }
-        }
+        $fileSize = filesize($backupFile);
         
         return [
             'ok' => true, 
             'success' => true,
-            'message' => 'Backup berhasil dibuat' . ($fileSaved ? ' dan disimpan ke file' : ' (hanya dalam memori)'),
-            'sql_content' => $sql,
-            'size' => strlen($sql),
-            'file_saved' => $fileSaved,
-            'file' => $fileSaved ? $backupFile : null
+            'message' => 'Backup berhasil dibuat dan disimpan ke file (Chunked)',
+            'sql_content' => '(SQL content stripped to save memory. Use file path: ' . basename($backupFile) . ')',
+            'size' => $fileSize,
+            'file_saved' => true,
+            'file' => $backupFile
         ];
         
     } catch (Exception $e) {

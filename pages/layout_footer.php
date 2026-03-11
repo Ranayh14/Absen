@@ -5828,7 +5828,41 @@ async function renderManualHolidays(){
     });
 }
 
-document.addEventListener('click', async (e)=>{
+// Global handler for Bulk Fix Jam Pulang
+document.addEventListener('click', async (e) => {
+    // Check for Bulk Fix button
+    const bulkFixBtn = e.target.closest('#btn-bulk-fix-checkout');
+    if (bulkFixBtn) {
+        // Get date from filter or default to today
+        const dateInput = document.getElementById('filter-tanggal-mulai');
+        const date = (dateInput && dateInput.value) ? dateInput.value : new Date().toISOString().split('T')[0];
+        
+        const confirmed = await customConfirm(`Anda yakin ingin mengisi jam pulang kosong untuk SEMUA data pegawai yang belum clock-out (keseluruhan data)?`, 'Konfirmasi Bulk Fix Global');
+        if (!confirmed) return;
+        
+        bulkFixBtn.disabled = true;
+        const originalContent = bulkFixBtn.innerHTML;
+        bulkFixBtn.innerHTML = '<i class="fi fi-sr-spinner animate-spin"></i> Processing...';
+        
+        try {
+            const res = await api('?ajax=admin_bulk_fix_empty_checkout', { date: date });
+            if (res.ok) {
+                showNotif(res.message || 'Berhasil memperbarui data', true);
+                // Refresh table if on Laporan page
+                if (typeof renderLaporan === 'function') renderLaporan();
+            } else {
+                showNotif(res.message || 'Gagal memperbarui data', false);
+            }
+        } catch (error) {
+            console.error('Bulk fix error:', error);
+            showNotif('Terjadi kesalahan sistem', false);
+        } finally {
+            bulkFixBtn.disabled = false;
+            bulkFixBtn.innerHTML = originalContent;
+        }
+        return; // Handled
+    }
+
     if(e.target && e.target.id==='mh-add'){
         const date = qs('#mh-date').value; const name = qs('#mh-name').value.trim();
         if(!date || !name){ showNotif('Isi tanggal dan keterangan', false); return; }

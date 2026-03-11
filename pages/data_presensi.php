@@ -12,6 +12,9 @@
                 <button id="btn-manual-holidays" class="bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2 px-4 rounded-xl text-sm transition-all shadow-sm flex items-center gap-2">
                      <i class="fi fi-sr-calendar-clock"></i> Libur Manual
                 </button>
+                <button id="btn-bulk-fix-checkout" class="bg-amber-500 hover:bg-amber-600 text-white font-bold py-2 px-4 rounded-xl text-sm transition-all shadow-sm flex items-center gap-2">
+                     <i class="fi fi-sr-clock-check"></i> Fix Jam Pulang
+                </button>
                 <button id="btn-export-daily" onclick="openExportDailyModal()" class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-xl text-sm transition-all shadow-sm flex items-center gap-2">
                      <i class="fi fi-sr-file-excel"></i> Export Info
                 </button>
