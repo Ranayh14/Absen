@@ -675,16 +675,30 @@ async function takeScreenshot() {
 function getPosition() {
     return new Promise((resolve) => {
         if (!navigator.geolocation) return resolve(null);
-        // Stricter options for better accuracy and to avoid 0,0
+        // Stricter options to enforce real-time, high-accuracy GPS
         const options = { 
             timeout: 10000, 
             enableHighAccuracy: true,
-            maximumAge: 0
+            maximumAge: 0 // Force device to get fresh coordinates, no cache
         };
-        navigator.geolocation.getCurrentPosition(resolve, (err) => {
-            console.warn('Geolocation error:', err);
-            resolve(null);
-        }, options);
+        
+        navigator.geolocation.getCurrentPosition(
+            (pos) => {
+                // Reject extremely low accuracy (e.g., > 2000m) as it's often a sign of cell tower spoofing or lack of actual GPS lock
+                if (pos.coords.accuracy > 2000) {
+                    console.warn(`Location discarded due to terrible accuracy: ${pos.coords.accuracy}m`);
+                    alert('Akurasi lokasi sangat buruk (kemungkinan GPS palsu/tidak stabil). Mohon matikan mock location atau cari area terbuka.');
+                    resolve(null);
+                    return;
+                }
+                resolve(pos);
+            }, 
+            (err) => {
+                console.warn('Geolocation error:', err);
+                resolve(null);
+            }, 
+            options
+        );
     });
 }
 

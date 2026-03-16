@@ -9,7 +9,7 @@ if (isset($_GET['ajax'])) {
     }
 
     // Must be authenticated for all endpoints except auth-related and public landing scan
-    if (!in_array($action, ['login', 'register', 'get_members', 'save_attendance', 'get_today_attendance', 'forgot_password', 'verify_otp', 'reset_password', 'get_ga_qr', 'get_public_daily_report_stats', 'reverse_geocode', 'submit_help_request', 'search_address'], true)) {
+    if (!in_array($action, ['login', 'register', 'get_members', 'save_attendance', 'get_today_attendance', 'forgot_password', 'verify_otp', 'reset_password', 'get_ga_qr', 'get_public_daily_report_stats', 'reverse_geocode', 'submit_help_request', 'search_address', 'get_clockin_location'], true)) {
         if (!isset($_SESSION['user'])) jsonResponse(['error' => 'Unauthorized'], 401);
     }
     // Address Search
@@ -1036,6 +1036,15 @@ if (isset($_GET['ajax'])) {
                 if ($lat === null || $lng === null || $lat === 0 || $lng === 0) {
                     jsonResponse(['ok' => false, 'message' => 'Lokasi GPS wajib untuk presensi. Pastikan GPS aktif dan izin lokasi diberikan.'], 400);
                 }
+
+                // -------------------------------------------------------------------------
+                // ANTI-SPOOFING: Bounding Box Check (Indonesia Only)
+                // Roughly: Lat -11 to 6 (South to North), Lng 95 to 141 (West to East)
+                // -------------------------------------------------------------------------
+                if ($lat < -11.0 || $lat > 6.0 || $lng < 95.0 || $lng > 141.0) {
+                    error_log("Anti-Spoofing: Out of bounds coordinates detected ($lat, $lng)");
+                    jsonResponse(['ok' => false, 'message' => 'Lokasi terdeteksi di luar negara Indonesia (kemungkinan Fake GPS/VPN). Mohon matikan aplikasi pemalsu lokasi dan coba lagi.'], 400);
+                }
                 
                 // Accept GPS even with lower accuracy (indoors/gymnasium buildings are common)
                 // Log warning but don't reject - GPS accuracy can be low indoors which is normal
@@ -1113,6 +1122,62 @@ if (isset($_GET['ajax'])) {
                 
                 // Log IP detection for debugging
                 error_log("WFO IP Detection - Public IP: " . ($publicIp ?: 'NOT DETECTED') . ", Mode: $wfoMode");
+
+                // -------------------------------------------------------------------------
+                // ANTI-SPOOFING: IP Geolocation Check (Indonesia Only)
+                // -------------------------------------------------------------------------
+                $ipCountry = $_SERVER['HTTP_CF_IPCOUNTRY'] ?? null;
+                $isLocalhost = ($publicIp === '127.0.0.1' || $publicIp === '::1' || strpos($publicIp, '127.') === 0);
+                
+                if ($ipCountry !== null && strtoupper($ipCountry) !== 'ID') {
+                    error_log("Anti-Spoofing: IP Country mismatch detected. CF_IPCOUNTRY: $ipCountry");
+                    jsonResponse(['ok' => false, 'message' => 'Akses dari luar negeri dilarang. Harap matikan VPN/Proxy Anda.'], 400);
+                } else if (!$ipCountry && !empty($publicIp) && filter_var($publicIp, FILTER_VALIDATE_IP) && !$isLocalhost) {
+                    $isPrivateIp = !filter_var($publicIp, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE);
+                    if (!isTelkomUniversityPrivateIp($publicIp) && !$isPrivateIp) {
+                        try {
+                            // Quick IP check using ip-api
+                            $url = 'http://ip-api.com/json/' . urlencode($publicIp) . '?fields=status,countryCode,lat,lon';
+                            $ch = curl_init($url);
+                            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+                            curl_setopt($ch, CURLOPT_TIMEOUT, 2); // 2 second timeout so we don't block
+                            $resp = curl_exec($ch);
+                            curl_close($ch);
+                            
+                            if ($resp) {
+                                $ipData = json_decode($resp, true);
+                                if (isset($ipData['countryCode']) && strtoupper($ipData['countryCode']) !== 'ID') {
+                                    error_log("Anti-Spoofing: API reported out of country IP: " . $ipData['countryCode']);
+                                    jsonResponse(['ok' => false, 'message' => 'Alamat IP internet Anda terdeteksi dari luar negara Republik Indonesia. Harap matikan aplikasi VPN/Proxy Anda.'], 400);
+                                }
+                                
+                                // IP-GPS Distance Check
+                                if (isset($ipData['lat']) && isset($ipData['lon']) && $lat !== null && $lng !== null) {
+                                    $ipLat = (float)$ipData['lat'];
+                                    $ipLon = (float)$ipData['lon'];
+                                    
+                                    // Haversine formula
+                                    $earthRadius = 6371; // km
+                                    $dLat = deg2rad($ipLat - $lat);
+                                    $dLon = deg2rad($ipLon - $lng);
+                                    $a = sin($dLat/2) * sin($dLat/2) + cos(deg2rad($lat)) * cos(deg2rad($ipLat)) * sin($dLon/2) * sin($dLon/2);
+                                    $c = 2 * atan2(sqrt($a), sqrt(1-$a));
+                                    $distanceKm = $earthRadius * $c;
+                                    
+                                    error_log("Anti-Spoofing: IP-GPS Distance: " . round($distanceKm, 2) . " km");
+                                    
+                                    // 150km tolerance
+                                    if ($distanceKm > 150) {
+                                        error_log("Anti-Spoofing: IP-GPS mismatch ($distanceKm km). IP: $publicIp ($ipLat, $ipLon), GPS: $lat, $lng");
+                                        jsonResponse(['ok' => false, 'message' => 'Lokasi internet Anda tidak sesuai dengan lokasi GPS perangkat. Mohon matikan koneksi VPN/Proxy/Warp atau pemalsu lokasi.'], 400);
+                                    }
+                                }
+                            }
+                        } catch (Exception $e) {
+                            // Silently ignore to avoid blocking legitimate users if API fails
+                        }
+                    }
+                }
                 
                 $requireWifi = (int)getSetting($pdo, 'wfo_require_wifi', '1');
                 $isInsideTelu = false;
