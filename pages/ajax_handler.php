@@ -1132,7 +1132,10 @@ if (isset($_GET['ajax'])) {
                 if ($ipCountry !== null && strtoupper($ipCountry) !== 'ID') {
                     error_log("Anti-Spoofing: IP Country mismatch detected. CF_IPCOUNTRY: $ipCountry");
                     jsonResponse(['ok' => false, 'message' => 'Akses dari luar negeri dilarang. Harap matikan VPN/Proxy Anda.'], 400);
-                } else if (!$ipCountry && !empty($publicIp) && filter_var($publicIp, FILTER_VALIDATE_IP) && !$isLocalhost) {
+                } 
+                
+                // IP Geolocation API validation ALWAYS runs (if not localhost)
+                if (!empty($publicIp) && filter_var($publicIp, FILTER_VALIDATE_IP) && !$isLocalhost) {
                     $isPrivateIp = !filter_var($publicIp, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE);
                     if (!isTelkomUniversityPrivateIp($publicIp) && !$isPrivateIp) {
                         try {
@@ -1146,7 +1149,9 @@ if (isset($_GET['ajax'])) {
                             
                             if ($resp) {
                                 $ipData = json_decode($resp, true);
-                                if (isset($ipData['countryCode']) && strtoupper($ipData['countryCode']) !== 'ID') {
+                                
+                                // Extra fallback if CF header was missing
+                                if ($ipCountry === null && isset($ipData['countryCode']) && strtoupper($ipData['countryCode']) !== 'ID') {
                                     error_log("Anti-Spoofing: API reported out of country IP: " . $ipData['countryCode']);
                                     jsonResponse(['ok' => false, 'message' => 'Alamat IP internet Anda terdeteksi dari luar negara Republik Indonesia. Harap matikan aplikasi VPN/Proxy Anda.'], 400);
                                 }
@@ -1166,10 +1171,10 @@ if (isset($_GET['ajax'])) {
                                     
                                     error_log("Anti-Spoofing: IP-GPS Distance: " . round($distanceKm, 2) . " km");
                                     
-                                    // 150km tolerance
-                                    if ($distanceKm > 150) {
+                                    // 50km tolerance (tightened from 150km to catch nearby spoofing)
+                                    if ($distanceKm > 50) {
                                         error_log("Anti-Spoofing: IP-GPS mismatch ($distanceKm km). IP: $publicIp ($ipLat, $ipLon), GPS: $lat, $lng");
-                                        jsonResponse(['ok' => false, 'message' => 'Lokasi internet Anda tidak sesuai dengan lokasi GPS perangkat. Mohon matikan koneksi VPN/Proxy/Warp atau pemalsu lokasi.'], 400);
+                                        jsonResponse(['ok' => false, 'message' => 'Akurasi ditolak: Lokasi GPS terdeteksi terlalu jauh dari lokasi IP Internet Anda. Mohon matikan VPN / Proxy / Aplikasi Fake GPS.'], 400);
                                     }
                                 }
                             }

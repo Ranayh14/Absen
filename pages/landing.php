@@ -146,6 +146,81 @@
                  </div>
             </div>
 
+            <!-- Floating Help Button -->
+            <button onclick="document.getElementById('help-modal').classList.remove('hidden')" class="fixed bottom-8 right-8 w-14 h-14 bg-indigo-600 hover:bg-indigo-700 text-white rounded-full shadow-2xl flex items-center justify-center transition-transform hover:scale-110 z-50">
+                <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+            </button>
+
+            <!-- Help Modal -->
+            <div id="help-modal" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-[70] hidden flex items-center justify-center p-4">
+                <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto animate-fade-in-up">
+                    <div class="sticky top-0 z-10 p-6 border-b border-gray-100 flex justify-between items-center bg-gray-50/95 backdrop-blur">
+                        <h3 class="text-xl font-bold flex items-center gap-2 text-indigo-900">
+                            <span class="bg-indigo-100 text-indigo-600 p-2 rounded-lg">
+                                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                            </span>
+                            Saran Solusi Gagal Presensi
+                        </h3>
+                        <button onclick="document.getElementById('help-modal').classList.add('hidden')" class="text-gray-400 hover:text-gray-600 bg-gray-100 hover:bg-gray-200 p-2 rounded-full transition-colors">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                        </button>
+                    </div>
+                    <div class="p-6">
+                        <p class="text-gray-600 mb-6 font-medium">Jika Anda mengalami kendala saat melakukan presensi masuk/pulang, ikuti langkah demi langkah berikut:</p>
+                        
+                        <div class="space-y-6">
+                            <div class="flex gap-4">
+                                <div class="w-8 h-8 rounded-full bg-blue-100 text-blue-600 font-bold flex items-center justify-center shrink-0">1</div>
+                                <div>
+                                    <h4 class="font-bold text-gray-800">Gunakan Koneksi Aman (HTTPS)</h4>
+                                    <p class="text-sm text-gray-600">Pastikan URL web presensi diawali dengan <code>https://</code> (ada logo gembok), bukan <code>http://</code>. Kamera dan lokasi tidak akan bisa diakses jika web tidak aman.</p>
+                                </div>
+                            </div>
+                            
+                            <div class="flex gap-4">
+                                <div class="w-8 h-8 rounded-full bg-blue-100 text-blue-600 font-bold flex items-center justify-center shrink-0">2</div>
+                                <div>
+                                    <h4 class="font-bold text-gray-800">Hapus Cache Browser</h4>
+                                    <p class="text-sm text-gray-600">Buka pengaturan browser Anda, lalu lakukan <span class="font-medium text-gray-800">Clear Browsing Data / Cache</span> untuk menghapus file error yang tersimpan.</p>
+                                </div>
+                            </div>
+                            
+                            <div class="flex gap-4">
+                                <div class="w-8 h-8 rounded-full bg-blue-100 text-blue-600 font-bold flex items-center justify-center shrink-0">3</div>
+                                <div>
+                                    <h4 class="font-bold text-gray-800">Izinkan Akses Kamera & Lokasi</h4>
+                                    <p class="text-sm text-gray-600">Sistem butuh izin. Klik ikon gembok/pengaturan di kiri atas URL browser, lalu pastikan opsi Kamera (Camera) dan Lokasi (Location) dipastikan berada di pilihan <strong>Allow (Izinkan)</strong>.</p>
+                                </div>
+                            </div>
+                            
+                            <div class="flex gap-4">
+                                <div class="w-8 h-8 rounded-full bg-blue-100 text-blue-600 font-bold flex items-center justify-center shrink-0">4</div>
+                                <div>
+                                    <h4 class="font-bold text-gray-800">Matikan VPN & Aplikasi Fake GPS</h4>
+                                    <p class="text-sm text-gray-600">Matikan koneksi VPN, Proxy, Cloudflare Warp, atau aplikasi pemalsu lokasi. Sistem memiliki proteksi anti-spoofing yang ketat dan akan menolak absen otomatis jika terdeteksi.</p>
+                                </div>
+                            </div>
+                            
+                            <div class="flex gap-4">
+                                <div class="w-8 h-8 rounded-full bg-blue-100 text-blue-600 font-bold flex items-center justify-center shrink-0">5</div>
+                                <div>
+                                    <h4 class="font-bold text-gray-800">Cek Stabilitas Internet</h4>
+                                    <p class="text-sm text-gray-600">Gunakan koneksi internet yang stabil. Hindari berganti jaringan (misal dari Wi-Fi ke Kuota Seluler) tepat saat halaman memuat face recognition karena dapat menyebabkan freeze.</p>
+                                </div>
+                            </div>
+                            
+                            <div class="flex gap-4">
+                                <div class="w-8 h-8 rounded-full bg-blue-100 text-blue-600 font-bold flex items-center justify-center shrink-0">6</div>
+                                <div>
+                                    <h4 class="font-bold text-gray-800">Gunakan Browser Utama</h4>
+                                    <p class="text-sm text-gray-600">Gunakan Google Chrome atau Safari versi terbaru. <strong>Jangan gunakan in-app browser</strong> (membuka URL langsung dari dalam chat WhatsApp, LINE, atau Instagram) karena banyak fiturnya yang dibatasi.</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
         </div>
     </main>
 
