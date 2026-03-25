@@ -5503,8 +5503,24 @@ document.addEventListener('click', async (e)=>{
             if (att.ket === 'wfa' && att.alasan_wfa) {
                 mapContent += `
                     <div class="mb-4">
-                        <h4 class="font-semibold mb-2">Alasan WFA:</h4>
-                        <p class="text-sm text-gray-600 p-3 bg-gray-50 rounded">${att.alasan_wfa}</p>
+                        <h4 class="font-semibold mb-2 text-indigo-700"><i class="fi fi-rr-comment-info mr-2"></i>Alasan WFA:</h4>
+                        <p class="text-sm text-gray-700 p-4 bg-indigo-50/50 rounded-xl border border-indigo-100">${att.alasan_wfa}</p>
+                    </div>
+                `;
+            }
+            if (att.alasan_pulang_awal) {
+                mapContent += `
+                    <div class="mb-4 mt-4 pt-4 border-t border-gray-100">
+                        <h4 class="font-semibold mb-2 text-rose-600"><i class="fi fi-rr-time-past mr-2"></i>Alasan Pulang Lebih Awal:</h4>
+                        <p class="text-sm text-gray-700 p-4 bg-rose-50/50 rounded-xl border border-rose-100 italic">"${att.alasan_pulang_awal}"</p>
+                    </div>
+                `;
+            }
+            if (att.alasan_lokasi_berbeda) {
+                mapContent += `
+                    <div class="mb-4">
+                        <h4 class="font-semibold mb-2 text-orange-600"><i class="fi fi-rr-map-marker-slash mr-2"></i>Alasan Lokasi Pulang Berbeda:</h4>
+                        <p class="text-sm text-gray-700 p-4 bg-orange-50/50 rounded-xl border border-orange-100 italic">"${att.alasan_lokasi_berbeda}"</p>
                     </div>
                 `;
             }
@@ -5531,8 +5547,24 @@ document.addEventListener('click', async (e)=>{
             if (att.alasan_overtime) {
                 overtimeContent += `
                     <div class="mb-4">
-                        <h4 class="font-semibold mb-2">Alasan Overtime:</h4>
-                        <p class="text-sm text-gray-600 p-3 bg-purple-50 rounded">${att.alasan_overtime}</p>
+                        <h4 class="font-semibold mb-2 text-purple-700"><i class="fi fi-rr-comment-info mr-2"></i>Alasan Overtime:</h4>
+                        <p class="text-sm text-gray-700 p-4 bg-purple-50/50 rounded-xl border border-purple-100">${att.alasan_overtime}</p>
+                    </div>
+                `;
+            }
+            if (att.alasan_pulang_awal) {
+                overtimeContent += `
+                    <div class="mb-4 mt-4 pt-4 border-t border-gray-100">
+                        <h4 class="font-semibold mb-2 text-rose-600"><i class="fi fi-rr-time-past mr-2"></i>Alasan Pulang Lebih Awal:</h4>
+                        <p class="text-sm text-gray-700 p-4 bg-rose-50/50 rounded-xl border border-rose-100 italic">"${att.alasan_pulang_awal}"</p>
+                    </div>
+                `;
+            }
+            if (att.alasan_lokasi_berbeda) {
+                overtimeContent += `
+                    <div class="mb-4">
+                        <h4 class="font-semibold mb-2 text-orange-600"><i class="fi fi-rr-map-marker-slash mr-2"></i>Alasan Lokasi Pulang Berbeda:</h4>
+                        <p class="text-sm text-gray-700 p-4 bg-orange-50/50 rounded-xl border border-orange-100 italic">"${att.alasan_lokasi_berbeda}"</p>
                     </div>
                 `;
             }
@@ -5543,7 +5575,7 @@ document.addEventListener('click', async (e)=>{
             if (att.bukti_izin_sakit) {
                 proofContent = `
                     <div class="mb-4">
-                        <h4 class="font-semibold mb-2">Bukti ${att.ket}:</h4>
+                        <h4 class="font-semibold mb-2">Bukti ${att.ket.toUpperCase()}:</h4>
                         <div class="flex justify-center">
                             <img src="${att.bukti_izin_sakit}" alt="Bukti ${att.ket}" class="max-w-full max-h-96 object-contain rounded border shadow-lg" style="max-width: 100%; height: auto;">
                         </div>
@@ -5553,12 +5585,20 @@ document.addEventListener('click', async (e)=>{
             if (att.alasan_izin_sakit) {
                 proofContent += `
                     <div class="mb-4">
-                        <h4 class="font-semibold mb-2">Keterangan:</h4>
-                        <p class="text-sm text-gray-600 p-3 bg-gray-50 rounded">${att.alasan_izin_sakit}</p>
+                        <h4 class="font-semibold mb-2 text-gray-700"><i class="fi fi-rr-comment-info mr-2"></i>Keterangan:</h4>
+                        <p class="text-sm text-gray-600 p-4 bg-gray-50 rounded-xl border border-gray-100">${att.alasan_izin_sakit}</p>
                     </div>
                 `;
             }
-            content.innerHTML = proofContent || '<p class="text-gray-500">Tidak ada data bukti</p>';
+            if (att.alasan_pulang_awal) {
+                proofContent += `
+                    <div class="mb-4 mt-4 pt-4 border-t border-gray-100">
+                        <h4 class="font-semibold mb-2 text-rose-600"><i class="fi fi-rr-time-past mr-2"></i>Alasan Pulang Lebih Awal:</h4>
+                        <p class="text-sm text-gray-700 p-4 bg-rose-50/50 rounded-xl border border-rose-100 italic">"${att.alasan_pulang_awal}"</p>
+                    </div>
+                `;
+            }
+            content.innerHTML = proofContent || '<p class="text-gray-500">Tidak ada bukti</p>';
         }
         
         modal.classList.remove('hidden');

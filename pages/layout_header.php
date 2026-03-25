@@ -2767,7 +2767,7 @@ if ($action) {
     }
 
     // Must be authenticated for all endpoints except auth-related and public landing scan
-    if (!in_array($action, ['login', 'register', 'get_members', 'save_attendance', 'get_today_attendance', 'forgot_password', 'verify_otp', 'reset_password', 'get_ga_qr', 'get_public_daily_report_stats', 'reverse_geocode'], true)) {
+    if (!in_array($action, ['login', 'register', 'get_members', 'save_attendance', 'get_today_attendance', 'forgot_password', 'verify_otp', 'reset_password', 'get_ga_qr', 'get_public_daily_report_stats', 'reverse_geocode', 'submit_help_request', 'search_address', 'get_clockin_location'], true)) {
         if (!isset($_SESSION['user'])) jsonResponse(['error' => 'Unauthorized'], 401);
     }
     // Admin manual holidays CRUD
