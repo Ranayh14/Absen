@@ -291,6 +291,14 @@ function ensureSchema(PDO $pdo): void {
         $pdo->exec("ALTER TABLE admin_help_requests ADD COLUMN is_read_by_user BOOLEAN DEFAULT FALSE AFTER admin_note");
     } catch (PDOException $e) {}
 
+    // Migration: add attendance_type and attendance_reason columns
+    try {
+        $pdo->exec("ALTER TABLE admin_help_requests ADD COLUMN attendance_type ENUM('wfo', 'wfa', 'overtime') DEFAULT 'wfo' AFTER request_type");
+    } catch (PDOException $e) {} // Ignore if already exists
+    try {
+        $pdo->exec("ALTER TABLE admin_help_requests ADD COLUMN attendance_reason TEXT NULL AFTER attendance_type");
+    } catch (PDOException $e) {} // Ignore if already exists
+
     // Attendance notes table
     $pdo->exec(
         "CREATE TABLE IF NOT EXISTS attendance_notes (
@@ -3942,25 +3950,18 @@ if ($action) {
                     }
                 }
                 
-                // FINAL PRIORITY: If we are not on Telkom University IP, force WFA status
-                // regardless of GPS proximity, as per user requirement #2
-                // (Unless IP detection was skipped because of localhost/::1)
-                if (!$isLocalhost && !empty($publicIp) && !$isInsideTeluByApi) {
-                    $ketVal = 'wfa';
-                    error_log('!! WFO Refinement: Not on Office IP, forcing WFA status !!');
-                }
-
-                else if ($ketVal !== 'wfo') {
-                    // Tidak ada GPS data dan IP/WiFi tidak valid
-                    $ketVal = 'wfa';
-                    error_log('✗ Semua validasi gagal - require WFA (IP: ' . ($publicIp ?: 'EMPTY') . ', WiFi: ' . ($wifiSSID ?: 'EMPTY') . ', GPS: ' . (($lat && $lng) ? 'OK' : 'MISSING') . ')');
-                }
-                
                 // Final check - jika bukan WFO, require alasan WFA
                 if ($ketVal === 'wfa') {
                     $alasanWfa = $_POST['wfa_reason'] ?? $_POST['alasan_wfa'] ?? null;
                     if (!$alasanWfa) {
-                        jsonResponse(['ok' => false, 'need_reason' => true, 'message' => 'Di luar wilayah kantor atau tidak terhubung ke WiFi/IP Telkom University. Harap isi alasan kerja di luar (WFA).'], 400);
+                        // Build helpful message with distance info for debugging
+                        $debugInfo = '';
+                        if (isset($distance)) {
+                            $debugInfo = ' (Jarak GPS: ' . round($distance) . 'm, Radius WFO: ' . $wfoRadius . 'm)';
+                        }
+                        $wfaMsg = 'Di luar wilayah kantor atau tidak terhubung ke WiFi/IP Telkom University. Harap isi alasan kerja di luar (WFA).' . $debugInfo;
+                        // FIX: Return HTTP 200 with need_reason flag so api() handles it correctly
+                        jsonResponse(['ok' => false, 'need_reason' => true, 'message' => $wfaMsg]);
                     }
                 }
 
@@ -5052,18 +5053,18 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
                 die('Failed to generate backup: ' . $result['message']);
             }
             
-            $sqlContent = $result['sql_content'];
+            $filePath = $result['file'];
             $downloadFileName = 'absen_db_backup_' . date('Y-m-d_His') . '.sql';
             
             // Set headers for file download
             header('Content-Type: application/octet-stream');
             header('Content-Disposition: attachment; filename="' . $downloadFileName . '"');
-            header('Content-Length: ' . strlen($sqlContent));
+            header('Content-Length: ' . filesize($filePath));
             header('Cache-Control: must-revalidate');
             header('Pragma: public');
             
-            // Output SQL content
-            echo $sqlContent;
+            // Output file
+            readfile($filePath);
             exit;
         }
         
@@ -5088,18 +5089,18 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
                 die('File not found and failed to generate backup');
             }
             
-            $sqlContent = $result['sql_content'];
+            $filePath = $result['file'];
             $downloadFileName = basename($fileName);
             
             // Set headers for file download
             header('Content-Type: application/octet-stream');
             header('Content-Disposition: attachment; filename="' . $downloadFileName . '"');
-            header('Content-Length: ' . strlen($sqlContent));
+            header('Content-Length: ' . filesize($filePath));
             header('Cache-Control: must-revalidate');
             header('Pragma: public');
             
-            // Output SQL content
-            echo $sqlContent;
+            // Output file
+            readfile($filePath);
             exit;
         }
         
@@ -5116,18 +5117,18 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
                 die('File not found and failed to generate backup');
             }
             
-            $sqlContent = $result['sql_content'];
+            $filePath = $result['file'];
             $downloadFileName = basename($fileName);
             
             // Set headers for file download
             header('Content-Type: application/octet-stream');
             header('Content-Disposition: attachment; filename="' . $downloadFileName . '"');
-            header('Content-Length: ' . strlen($sqlContent));
+            header('Content-Length: ' . filesize($filePath));
             header('Cache-Control: must-revalidate');
             header('Pragma: public');
             
-            // Output SQL content
-            echo $sqlContent;
+            // Output file
+            readfile($filePath);
             exit;
         }
         

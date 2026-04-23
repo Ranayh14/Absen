@@ -5025,18 +5025,18 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
                 die('Failed to generate backup: ' . $result['message']);
             }
             
-            $sqlContent = $result['sql_content'];
+            $filePath = $result['file'];
             $downloadFileName = 'absen_db_backup_' . date('Y-m-d_His') . '.sql';
             
             // Set headers for file download
             header('Content-Type: application/octet-stream');
             header('Content-Disposition: attachment; filename="' . $downloadFileName . '"');
-            header('Content-Length: ' . strlen($sqlContent));
+            header('Content-Length: ' . filesize($filePath));
             header('Cache-Control: must-revalidate');
             header('Pragma: public');
             
-            // Output SQL content
-            echo $sqlContent;
+            // Output file
+            readfile($filePath);
             exit;
         }
         
@@ -5061,18 +5061,18 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
                 die('File not found and failed to generate backup');
             }
             
-            $sqlContent = $result['sql_content'];
+            $filePath = $result['file'];
             $downloadFileName = basename($fileName);
             
             // Set headers for file download
             header('Content-Type: application/octet-stream');
             header('Content-Disposition: attachment; filename="' . $downloadFileName . '"');
-            header('Content-Length: ' . strlen($sqlContent));
+            header('Content-Length: ' . filesize($filePath));
             header('Cache-Control: must-revalidate');
             header('Pragma: public');
             
-            // Output SQL content
-            echo $sqlContent;
+            // Output file
+            readfile($filePath);
             exit;
         }
         
@@ -5089,18 +5089,18 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
                 die('File not found and failed to generate backup');
             }
             
-            $sqlContent = $result['sql_content'];
+            $filePath = $result['file'];
             $downloadFileName = basename($fileName);
             
             // Set headers for file download
             header('Content-Type: application/octet-stream');
             header('Content-Disposition: attachment; filename="' . $downloadFileName . '"');
-            header('Content-Length: ' . strlen($sqlContent));
+            header('Content-Length: ' . filesize($filePath));
             header('Cache-Control: must-revalidate');
             header('Pragma: public');
             
-            // Output SQL content
-            echo $sqlContent;
+            // Output file
+            readfile($filePath);
             exit;
         }
         

@@ -19,64 +19,77 @@
         <div class="absolute inset-0 bg-black/40 backdrop-blur-sm" id="help-modal-overlay"></div>
         <div class="bg-white w-full max-w-md rounded-3xl shadow-2xl overflow-hidden flex flex-col relative z-80 animate-fade-in-up max-h-[90vh]">
             <!-- Header -->
-            <div class="bg-gradient-to-r from-blue-600 to-indigo-700 p-6 text-white flex items-center justify-between">
-                <div class="flex items-center gap-3">
-                    <div class="w-10 h-10 bg-white/20 rounded-2xl flex items-center justify-center">
-                        <i class="fi fi-rs-headset text-xl"></i>
+            <div class="bg-gradient-to-r from-blue-600 to-indigo-700 p-5 text-white">
+                <div class="flex items-center justify-between mb-4">
+                    <div class="flex items-center gap-3">
+                        <div class="w-10 h-10 bg-white/20 rounded-2xl flex items-center justify-center">
+                            <i class="fi fi-rs-headset text-xl"></i>
+                        </div>
+                        <div>
+                            <h3 class="font-bold text-lg">Admin Help Center</h3>
+                            <p class="text-xs text-blue-100">Solusi bantuan cepat untuk Anda</p>
+                        </div>
                     </div>
-                    <div>
-                        <h3 class="font-bold text-lg">Admin Help Center</h3>
-                        <p class="text-xs text-blue-100">Solusi bantuan cepat untuk Anda</p>
-                    </div>
+                    <button id="close-help-modal" class="p-2 hover:bg-white/20 rounded-full transition-colors">
+                        <i class="fi fi-rr-cross-small text-xl"></i>
+                    </button>
                 </div>
-                <button id="close-help-modal" class="p-2 hover:bg-white/20 rounded-full transition-colors">
-                    <i class="fi fi-rr-cross-small text-xl"></i>
-                </button>
+                <!-- Tab Navigation -->
+                <div class="flex gap-1 bg-white/10 rounded-2xl p-1">
+                    <button id="tab-bantuan" onclick="switchHelpTab('bantuan')" class="flex-1 py-2 px-3 rounded-xl text-xs font-bold transition-all bg-white text-blue-700">
+                        <i class="fi fi-rr-headset mr-1"></i> Bantuan
+                    </button>
+                    <button id="tab-status" onclick="switchHelpTab('status')" class="flex-1 py-2 px-3 rounded-xl text-xs font-bold transition-all text-white/80 hover:bg-white/10 relative">
+                        <i class="fi fi-rr-list-check mr-1"></i> Status Request
+                        <span id="status-tab-badge" class="hidden absolute -top-1 -right-1 w-4 h-4 bg-red-500 rounded-full text-[9px] flex items-center justify-center"></span>
+                    </button>
+                </div>
             </div>
 
-            <!-- Chat Content -->
-            <div id="help-chat-content" class="flex-1 overflow-y-auto p-6 space-y-4 bg-gray-50 flex flex-col min-h-[400px]">
+            <!-- Tab: Bantuan (Chat Content) -->
+            <div id="panel-bantuan" class="flex-1 overflow-y-auto p-6 space-y-4 bg-gray-50 flex flex-col min-h-[400px]">
                 <!-- Initial Message -->
-                <div class="flex flex-col gap-2">
-                    <div class="bg-indigo-600 text-white p-4 rounded-2xl rounded-tl-none shadow-sm max-w-[85%] text-sm leading-relaxed">
-                        Halo <b><?php echo explode(' ', $_SESSION['user']['nama'])[0]; ?></b>, ada yang bisa kami bantu hari ini? Silakan pilih jenis bantuan di bawah ini.
+                <div id="help-chat-content" class="flex flex-col gap-4">
+                    <div class="flex flex-col gap-2">
+                        <div class="bg-indigo-600 text-white p-4 rounded-2xl rounded-tl-none shadow-sm max-w-[85%] text-sm leading-relaxed">
+                            Halo <b><?php echo explode(' ', $_SESSION['user']['nama'])[0]; ?></b>, ada yang bisa kami bantu hari ini? Silakan pilih jenis bantuan di bawah ini.
+                        </div>
+                        <span class="text-[10px] text-gray-400 px-1"><?php echo date('H:i'); ?></span>
                     </div>
-                    <span class="text-[10px] text-gray-400 px-1"><?php echo date('H:i'); ?></span>
-                </div>
 
-                <!-- Action Options -->
-                <div id="help-options" class="grid gap-2">
-                    <button onclick="showHelpForm('past_attendance')" class="w-full text-left p-4 bg-white border border-gray-100 rounded-2xl shadow-sm hover:border-blue-500 hover:shadow-md transition-all flex items-center gap-4 group">
-                        <div class="w-10 h-10 bg-blue-50 text-blue-600 rounded-xl flex items-center justify-center group-hover:bg-blue-600 group-hover:text-white transition-all">
-                            <i class="fi fi-rr-calendar-clock"></i>
-                        </div>
-                        <div>
-                            <p class="text-sm font-bold text-gray-800">Presensi yang Terlewat</p>
-                            <p class="text-[10px] text-gray-500">Izin/Sakit hari sebelumnya</p>
-                        </div>
-                    </button>
-                    <button onclick="showHelpForm('late_attendance')" class="w-full text-left p-4 bg-white border border-gray-100 rounded-2xl shadow-sm hover:border-blue-500 hover:shadow-md transition-all flex items-center gap-4 group">
-                        <div class="w-10 h-10 bg-purple-50 text-purple-600 rounded-xl flex items-center justify-center group-hover:bg-purple-600 group-hover:text-white transition-all">
-                            <i class="fi fi-rr-clock-three"></i>
-                        </div>
-                        <div>
-                            <p class="text-sm font-bold text-gray-800">Lupa/Kendala Presensi</p>
-                            <p class="text-[10px] text-gray-500">Belum absen atau aplikasi error</p>
-                        </div>
-                    </button>
-                    <button onclick="showHelpForm('bug_report')" class="w-full text-left p-4 bg-white border border-gray-100 rounded-2xl shadow-sm hover:border-red-500 hover:shadow-md transition-all flex items-center gap-4 group">
-                        <div class="w-10 h-10 bg-red-50 text-red-600 rounded-xl flex items-center justify-center group-hover:bg-red-600 group-hover:text-white transition-all">
-                            <i class="fi fi-rr-bug"></i>
-                        </div>
-                        <div>
-                            <p class="text-sm font-bold text-gray-800">Laporkan Masalah/Bug</p>
-                            <p class="text-[10px] text-gray-500">Aplikasi tidak berjalan semestinya</p>
-                        </div>
-                    </button>
-                </div>
+                    <!-- Action Options -->
+                    <div id="help-options" class="grid gap-2">
+                        <button onclick="showHelpForm('past_attendance')" class="w-full text-left p-4 bg-white border border-gray-100 rounded-2xl shadow-sm hover:border-blue-500 hover:shadow-md transition-all flex items-center gap-4 group">
+                            <div class="w-10 h-10 bg-blue-50 text-blue-600 rounded-xl flex items-center justify-center group-hover:bg-blue-600 group-hover:text-white transition-all">
+                                <i class="fi fi-rr-calendar-clock"></i>
+                            </div>
+                            <div>
+                                <p class="text-sm font-bold text-gray-800">Presensi yang Terlewat</p>
+                                <p class="text-[10px] text-gray-500">Izin/Sakit hari sebelumnya</p>
+                            </div>
+                        </button>
+                        <button onclick="showHelpForm('late_attendance')" class="w-full text-left p-4 bg-white border border-gray-100 rounded-2xl shadow-sm hover:border-blue-500 hover:shadow-md transition-all flex items-center gap-4 group">
+                            <div class="w-10 h-10 bg-purple-50 text-purple-600 rounded-xl flex items-center justify-center group-hover:bg-purple-600 group-hover:text-white transition-all">
+                                <i class="fi fi-rr-clock-three"></i>
+                            </div>
+                            <div>
+                                <p class="text-sm font-bold text-gray-800">Lupa/Kendala Presensi</p>
+                                <p class="text-[10px] text-gray-500">Belum absen atau aplikasi error</p>
+                            </div>
+                        </button>
+                        <button onclick="showHelpForm('bug_report')" class="w-full text-left p-4 bg-white border border-gray-100 rounded-2xl shadow-sm hover:border-red-500 hover:shadow-md transition-all flex items-center gap-4 group">
+                            <div class="w-10 h-10 bg-red-50 text-red-600 rounded-xl flex items-center justify-center group-hover:bg-red-600 group-hover:text-white transition-all">
+                                <i class="fi fi-rr-bug"></i>
+                            </div>
+                            <div>
+                                <p class="text-sm font-bold text-gray-800">Laporkan Masalah/Bug</p>
+                                <p class="text-[10px] text-gray-500">Aplikasi tidak berjalan semestinya</p>
+                            </div>
+                        </button>
+                    </div>
 
-                <!-- Dynamic Forms Container -->
-                <div id="help-form-container" class="hidden space-y-4">
+                    <!-- Dynamic Forms Container -->
+                    <div id="help-form-container" class="hidden space-y-4">
                     <!-- Past Attendance Form -->
                     <div id="form-past_attendance" class="hidden bg-white p-5 rounded-2xl shadow-sm border border-gray-100 flex flex-col gap-4">
                         <h4 class="font-bold text-sm text-gray-800 flex items-center gap-2">
@@ -115,7 +128,6 @@
                         </div>
                     </div>
 
-                    <!-- Late Attendance Form -->
                     <div id="form-late_attendance" class="hidden bg-white p-5 rounded-2xl shadow-sm border border-gray-100 flex flex-col gap-4">
                         <h4 class="font-bold text-sm text-gray-800 flex items-center gap-2">
                             <i class="fi fi-rr-clock-three text-purple-600"></i> Request Lupa Presensi
@@ -152,10 +164,20 @@
                             </div>
                             <div class="space-y-2">
                                 <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider px-1">Bukti Presensi</label>
-                                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                <!-- FIX: Show screenshot preview when face is verified -->
+                                <div id="late-verification-proof" class="hidden bg-green-50 border border-green-200 rounded-xl p-3">
+                                    <div class="flex items-center gap-2 mb-2">
+                                        <i class="fi fi-sr-check-circle text-green-600"></i>
+                                        <span class="text-xs font-bold text-green-700">Wajah Terverifikasi</span>
+                                        <span id="late-verify-time" class="text-[10px] text-green-500 ml-auto"></span>
+                                    </div>
+                                    <img id="late-verify-screenshot" src="" class="w-full h-32 object-cover rounded-lg border border-green-300 shadow-sm" alt="Bukti Verifikasi Wajah">
+                                    <p class="text-[9px] text-green-600 mt-1.5 text-center">Screenshot wajah saat verifikasi</p>
+                                </div>
+                                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2" id="late-bukti-actions">
                                     <button onclick="startLatePresensiNow()" class="bg-indigo-600 text-white p-3 rounded-xl text-xs font-semibold hover:bg-indigo-700 transition-all flex flex-col items-center justify-center gap-1 shadow-sm">
                                         <i class="fi fi-rr-face-viewfinder text-lg"></i>
-                                        <span>Presensi Sekarang</span>
+                                        <span id="late-presick-now-label">Presensi Sekarang</span>
                                     </button>
                                     <button type="button" onclick="qs('#late-bukti-input').click()" class="bg-purple-50 text-purple-600 p-3 rounded-xl border border-dashed border-purple-200 text-xs font-semibold hover:bg-purple-100 transition-all flex flex-col items-center justify-center gap-1">
                                         <i class="fi fi-rr-upload text-lg"></i>
@@ -199,10 +221,29 @@
                             <button onclick="submitHelpRequest('bug_report')" class="flex-[2] py-3 text-xs font-bold text-white bg-red-600 hover:bg-red-700 rounded-xl transition-all shadow-md">Laporkan</button>
                         </div>
                     </div>
+                </div><!-- /#help-form-container -->
+                </div><!-- /#help-chat-content -->
+            </div><!-- /#panel-bantuan -->
+
+            <!-- Tab: Status Request Panel -->
+            <div id="panel-status" class="hidden flex-1 overflow-y-auto bg-gray-50 min-h-[400px]">
+                <!-- Header strip -->
+                <div class="px-5 py-4 border-b border-gray-100 bg-white flex items-center justify-between">
+                    <span class="text-sm font-bold text-gray-700">Riwayat Request Saya</span>
+                    <button onclick="loadUserRequestStatus()" class="text-xs text-blue-600 hover:text-blue-800 flex items-center gap-1">
+                        <i class="fi fi-rr-refresh"></i> Refresh
+                    </button>
+                </div>
+                <!-- List container -->
+                <div id="status-request-list" class="p-4 space-y-3">
+                    <div class="text-center text-gray-400 text-xs py-8">
+                        <i class="fi fi-rr-spinner animate-spin text-2xl mb-2 block"></i>
+                        Memuat data...
+                    </div>
                 </div>
             </div>
 
-            <!-- Footer Status -->
+            <!-- Footer -->
             <div class="p-4 bg-white border-t border-gray-100 text-center">
                 <p class="text-[10px] text-gray-400">Request Anda akan ditinjau oleh Administrator.</p>
             </div>
@@ -216,18 +257,13 @@
         const helpClose = document.getElementById('close-help-modal');
         const helpOverlay = document.getElementById('help-modal-overlay');
 
-        if (helpBtn) {
-            helpBtn.onclick = () => {
-                helpModal.classList.remove('hidden');
-                // Re-check sessionStorage for redirects from presensi
-                checkSessionRedirect();
-            };
-        }
-
         if (helpClose) helpClose.onclick = () => helpModal.classList.add('hidden');
         if (helpOverlay) helpOverlay.onclick = () => helpModal.classList.add('hidden');
 
         function showHelpForm(type) {
+            // Ensure we're on the Bantuan tab first
+            switchHelpTab('bantuan');
+            
             const options = document.getElementById('help-options');
             const container = document.getElementById('help-form-container');
             if (options) options.classList.add('hidden');
@@ -261,11 +297,43 @@
                     qs('#late-date').value = data.tanggal;
                     qs('#late-jam-masuk').value = data.jam_masuk;
                     qs('#late-jam-pulang').value = data.jam_pulang;
+                }
+                
+                // FIX: Show screenshot evidence if face was just verified
+                const faceVerifiedData = sessionStorage.getItem('late_req_face_verified');
+                const proofSection = qs('#late-verification-proof');
+                const verifyImg = qs('#late-verify-screenshot');
+                const verifyTime = qs('#late-verify-time');
+                const lateText = qs('#late-bukti-text');
+                const lateNowLabel = qs('#late-presick-now-label');
+                
+                if (faceVerifiedData) {
+                    const verifiedData = JSON.parse(faceVerifiedData);
                     
-                    if (sessionStorage.getItem('late_req_face_verified')) {
-                        qs('#late-bukti-text').textContent = '✅ Wajah Terverifikasi';
-                        qs('#late-bukti-text').classList.add('text-green-600');
+                    // Show the verification proof section with screenshot
+                    if (proofSection) proofSection.classList.remove('hidden');
+                    if (verifyImg && verifiedData.screenshot) {
+                        verifyImg.src = verifiedData.screenshot;
                     }
+                    if (verifyTime && verifiedData.timestamp) {
+                        const ts = new Date(verifiedData.timestamp);
+                        verifyTime.textContent = ts.toLocaleTimeString('id-ID', {hour: '2-digit', minute: '2-digit'});
+                    }
+                    
+                    // Update button label to show it's been verified
+                    if (lateText) { lateText.textContent = '\u2705 Wajah Terverifikasi'; }
+                    if (lateNowLabel) { lateNowLabel.textContent = '\uD83D\uDD04 Verifikasi Ulang'; }
+                    
+                    // Auto-fill lokasi if available
+                    if (verifiedData.lokasi && qs('#late-lokasi-verified')) {
+                        qs('#late-lokasi-verified').textContent = verifiedData.lokasi;
+                    }
+                } else {
+                    // Not yet verified - hide proof section
+                    if (proofSection) proofSection.classList.add('hidden');
+                    if (verifyImg) verifyImg.src = '';
+                    if (lateText) lateText.textContent = 'Upload Foto';
+                    if (lateNowLabel) lateNowLabel.textContent = 'Presensi Sekarang';
                 }
             }
         }
@@ -350,18 +418,18 @@
             try {
                 const res = await api('?ajax=submit_help_request', data, { method: 'POST' });
                 if (res.ok) {
-                    showNotif(res.message, true);
-                    // Reset
+                    showNotif('✅ ' + res.message, true);
+                    // Reset form
                     cancelHelpForm();
-                    helpModal.classList.add('hidden');
                     
                     // Clear late req session
                     sessionStorage.removeItem('late_req_pending');
                     sessionStorage.removeItem('late_req_face_verified');
                     sessionStorage.removeItem('late_req_redirected');
                     
-                    // Add success message to chat bubble history (visual only for current session)
-                    addChatMessage("Sistem: Request " + type.replace('_', ' ') + " Anda telah terkirim.");
+                    // FIX: Instead of closing modal, switch to Status tab so user
+                    // can immediately see their request with Pending status
+                    setTimeout(() => switchHelpTab('status'), 300);
                 } else {
                     showNotif(res.message, false);
                 }
@@ -372,16 +440,135 @@
 
         function addChatMessage(msg) {
             const chat = document.getElementById('help-chat-content');
+            if (!chat) return;
             const div = document.createElement('div');
             div.className = "flex flex-col gap-1 items-end";
             div.innerHTML = `
                 <div class="bg-blue-50 text-gray-700 p-4 rounded-2xl rounded-tr-none shadow-sm max-w-[85%] text-xs italic">
                     ${msg}
                 </div>
-                <span class="text-[9px] text-gray-400 px-1">${new Date().getHours()}:${new Date().getMinutes()}</span>
+                <span class="text-[9px] text-gray-400 px-1">${new Date().getHours()}:${String(new Date().getMinutes()).padStart(2,'0')}</span>
             `;
             chat.appendChild(div);
             chat.scrollTop = chat.scrollHeight;
+        }
+
+        // =====================
+        // TAB SWITCHING
+        // =====================
+        function switchHelpTab(tab) {
+            const tabs = ['bantuan', 'status'];
+            tabs.forEach(t => {
+                const btn = document.getElementById('tab-' + t);
+                const panel = document.getElementById('panel-' + t);
+                if (t === tab) {
+                    btn?.classList.add('bg-white', 'text-blue-700');
+                    btn?.classList.remove('text-white/80');
+                    panel?.classList.remove('hidden');
+                } else {
+                    btn?.classList.remove('bg-white', 'text-blue-700');
+                    btn?.classList.add('text-white/80');
+                    panel?.classList.add('hidden');
+                }
+            });
+            // Auto-load status when switching to status tab
+            if (tab === 'status') {
+                loadUserRequestStatus();
+            }
+        }
+
+        // =====================
+        // LOAD REQUEST STATUS
+        // =====================
+        async function loadUserRequestStatus() {
+            const container = document.getElementById('status-request-list');
+            if (!container) return;
+            container.innerHTML = '<div class="text-center text-gray-400 text-xs py-8"><i class="fi fi-rr-spinner animate-spin text-2xl mb-2 block"></i>Memuat data...</div>';
+            try {
+                const res = await api('?ajax=get_user_help_requests', {}, { suppressModal: true, cache: false });
+                if (!res.ok || !res.data || res.data.length === 0) {
+                    container.innerHTML = '<div class="text-center text-gray-400 text-xs py-10"><i class="fi fi-rr-inbox text-4xl mb-3 block opacity-40"></i><p class="font-semibold">Belum ada request</p><p class="mt-1 opacity-70">Request yang Anda kirim akan muncul di sini</p></div>';
+                    return;
+                }
+                let unreviewedCount = 0;
+                container.innerHTML = res.data.map(r => {
+                    const statusBadge = renderStatusBadge(r.status);
+                    const typeLabel = {
+                        'past_attendance': '<i class="fi fi-rr-calendar-clock text-blue-500"></i> Presensi Terlewat',
+                        'late_attendance': '<i class="fi fi-rr-clock-three text-purple-500"></i> Lupa Presensi',
+                        'bug_report': '<i class="fi fi-rr-bug text-red-500"></i> Laporan Bug',
+                    }[r.request_type] || r.request_type;
+                    const dateStr = r.tanggal ? `<span class="text-gray-400">📅 ${r.tanggal}</span>` :
+                                   (r.created_at ? `<span class="text-gray-400">📅 ${r.created_at.slice(0,10)}</span>` : '');
+                    let summary = '';
+                    if (r.request_type === 'past_attendance') summary = (r.jenis_izin || '') + (r.alasan_izin ? ': ' + r.alasan_izin.slice(0,60) : '');
+                    if (r.request_type === 'late_attendance') summary = (r.jam_masuk ? 'Jam masuk: ' + r.jam_masuk.slice(0,5) : '') + (r.attendance_type ? ' (' + r.attendance_type.toUpperCase() + ')' : '');
+                    if (r.request_type === 'bug_report') summary = (r.bug_description || '').slice(0, 80);
+
+                    const adminNote = (r.admin_note && r.status !== 'pending') ?
+                        `<div class="mt-2 p-2.5 bg-gray-50 rounded-lg border-l-2 ${r.status === 'approved' || r.status === 'solved' ? 'border-green-400' : 'border-red-400'}">
+                            <p class="text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-1">Catatan Admin</p>
+                            <p class="text-xs text-gray-700">${r.admin_note}</p>
+                        </div>` : '';
+
+                    if (r.status !== 'pending') unreviewedCount++;
+
+                    return `<div class="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 space-y-2">
+                        <div class="flex items-start justify-between gap-2">
+                            <div class="text-xs font-bold text-gray-700 flex items-center gap-1.5">${typeLabel}</div>
+                            ${statusBadge}
+                        </div>
+                        <div class="flex items-center gap-3 text-[10px]">${dateStr}</div>
+                        ${summary ? `<p class="text-xs text-gray-500 leading-relaxed">${summary}</p>` : ''}
+                        ${adminNote}
+                    </div>`;
+                }).join('');
+
+                // Update notification dot
+                checkNotifDot(unreviewedCount > 0);
+            } catch(e) {
+                container.innerHTML = '<div class="text-center text-red-400 text-xs py-8">Gagal memuat data. <button onclick="loadUserRequestStatus()" class="underline">Coba lagi</button></div>';
+            }
+        }
+
+        function renderStatusBadge(status) {
+            const map = {
+                'pending':      { cls: 'bg-yellow-100 text-yellow-700 border border-yellow-200', icon: '⏳', label: 'Menunggu' },
+                'approved':     { cls: 'bg-green-100 text-green-700 border border-green-200',   icon: '✅', label: 'Disetujui' },
+                'disapproved':  { cls: 'bg-red-100 text-red-700 border border-red-200',         icon: '❌', label: 'Ditolak' },
+                'solved':       { cls: 'bg-blue-100 text-blue-700 border border-blue-200',      icon: '✔️', label: 'Selesai' },
+            };
+            const s = map[status] || { cls: 'bg-gray-100 text-gray-600', icon: '❓', label: status };
+            return `<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold ${s.cls} whitespace-nowrap">${s.icon} ${s.label}</span>`;
+        }
+
+        function checkNotifDot(hasNew) {
+            const dot = document.getElementById('help-notif-dot');
+            const badge = document.getElementById('status-tab-badge');
+            if (dot) dot.classList.toggle('hidden', !hasNew);
+            if (badge) badge.classList.toggle('hidden', !hasNew);
+        }
+
+        // Poll for status updates every 60 seconds when modal is open
+        let statusPollInterval = null;
+        if (helpBtn) {
+            helpBtn.onclick = () => {
+                helpModal.classList.remove('hidden');
+                checkSessionRedirect();
+                // Start polling
+                if (!statusPollInterval) {
+                    statusPollInterval = setInterval(() => {
+                        // Silently check for badge updates
+                        api('?ajax=get_user_help_requests', {}, { suppressModal: true, cache: false })
+                            .then(res => {
+                                if (res.ok && res.data) {
+                                    const hasReviewed = res.data.some(r => r.status !== 'pending');
+                                    checkNotifDot(hasReviewed);
+                                }
+                            }).catch(() => {});
+                    }, 60000);
+                }
+            };
         }
 
         function startLatePresensiNow() {
@@ -407,15 +594,49 @@
         }
 
         function checkSessionRedirect() {
-            // Check if we just came back from face verification
+            // FIX: Check if we just came back from face verification
+            // and keep the modal OPEN, showing the form with screenshot evidence
             if (sessionStorage.getItem('late_req_face_verified')) {
+                // Open the modal first
+                helpModal.classList.remove('hidden');
+                // Then show the late_attendance form with verification data
                 showHelpForm('late_attendance');
-                showNotif('Wajah berhasil diverifikasi!', true);
+                showNotif('✅ Wajah berhasil diverifikasi! Silakan kirim request.', true);
+                // Don't remove late_req_face_verified here - it's used in showHelpForm
             } else if (sessionStorage.getItem('late_req_redirected')) {
                 // If redirected but didn't finish, still show the form
+                helpModal.classList.remove('hidden');
                 showHelpForm('late_attendance');
                 sessionStorage.removeItem('late_req_redirected');
             }
+        }
+
+        // FIX: Auto-open modal on page load after returning from face verification.
+        // Must be called AFTER all function definitions above.
+        // Using DOMContentLoaded if DOM not yet ready, or immediate call if already ready.
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', () => {
+                checkSessionRedirect();
+                // Also silently check for reviewed requests to show notification dot
+                api('?ajax=get_user_help_requests', {}, { suppressModal: true, cache: false })
+                    .then(res => {
+                        if (res.ok && res.data) {
+                            const hasReviewed = res.data.some(r => r.status !== 'pending');
+                            checkNotifDot(hasReviewed);
+                        }
+                    }).catch(() => {});
+            });
+        } else {
+            // DOM already ready (script runs after DOM parsed)
+            checkSessionRedirect();
+            // Silently check for reviewed requests to show notification dot on load
+            api('?ajax=get_user_help_requests', {}, { suppressModal: true, cache: false })
+                .then(res => {
+                    if (res.ok && res.data) {
+                        const hasReviewed = res.data.some(r => r.status !== 'pending');
+                        checkNotifDot(hasReviewed);
+                    }
+                }).catch(() => {});
         }
     </script>
     <style>

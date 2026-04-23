@@ -131,6 +131,20 @@
                 <p class="text-gray-500">Mohon verifikasi data Anda di bawah ini</p>
             </div>
 
+            <!-- FIX: Screenshot preview section - shows captured face photo before confirmation -->
+            <div id="confirm-screenshot-section" class="mb-4 hidden">
+                <div class="flex items-center gap-2 mb-2">
+                    <i class="fi fi-sr-camera text-indigo-500 text-sm"></i>
+                    <span class="text-xs font-bold text-indigo-600 uppercase tracking-widest">Bukti Foto</span>
+                </div>
+                <div class="relative rounded-xl overflow-hidden border-2 border-indigo-100 shadow-sm">
+                    <img id="confirm-screenshot-img" src="" class="w-full h-48 object-cover" alt="Screenshot Presensi">
+                    <div class="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/60 to-transparent p-2">
+                        <p class="text-white text-[10px] text-center">Foto terambil otomatis saat wajah terdeteksi</p>
+                    </div>
+                </div>
+            </div>
+
             <div class="space-y-4 bg-gray-50 p-6 rounded-2xl border border-gray-100 mb-8">
                 <div class="flex flex-col gap-1">
                     <span class="text-xs font-bold text-indigo-600 uppercase tracking-widest">Nama Pegawai</span>

@@ -569,6 +569,16 @@ function showConfirmationModal(data) {
     qs('#confirm-nim').textContent = data.nim;
     qs('#confirm-lokasi').textContent = data.lokasi;
     
+    // FIX: Show screenshot preview in confirmation modal so user can verify before submitting
+    const screenshotSection = qs('#confirm-screenshot-section');
+    const screenshotImg = qs('#confirm-screenshot-img');
+    if (data.screenshot && screenshotSection && screenshotImg) {
+        screenshotImg.src = data.screenshot;
+        screenshotSection.classList.remove('hidden');
+    } else if (screenshotSection) {
+        screenshotSection.classList.add('hidden');
+    }
+    
     modal.classList.remove('hidden');
     
     // Bind buttons
@@ -795,16 +805,105 @@ function showEarlyLeaveModal(message) {
 }
 
 function showWFAModal(message) {
-    alert('WFA Reason: ' + message); // Stub for validation, expand like EarlyLeave
-    const reason = prompt("Masukkan alasan WFA:");
-    if (reason) submitAttendanceWithReason({ ...window.pendingAttendanceData, alasan_wfa: reason });
-    else isProcessingRecognition = false;
+    // FIX: Use the proper WFA reason modal instead of browser prompt()
+    // Browser prompt() doesn't work on many mobile browsers and is bad UX
+    const modal = qs('#wfa-reason-modal');
+    if (!modal) {
+        // Fallback if modal doesn't exist
+        const reason = prompt('Masukkan alasan WFA:\n' + message);
+        if (reason) submitAttendanceWithReason({ ...window.pendingAttendanceData, alasan_wfa: reason });
+        else isProcessingRecognition = false;
+        return;
+    }
+    
+    // Show contextual message
+    const msgEl = modal.querySelector('p');
+    if (msgEl) msgEl.textContent = message || 'Anda berada di luar area WFO. Silakan isi alasan bekerja di luar kantor.';
+    
+    // Clear input
+    const inputEl = qs('#wfa-reason-input');
+    if (inputEl) inputEl.value = '';
+    
+    modal.classList.remove('hidden');
+    
+    const submitBtn = qs('#wfa-reason-submit');
+    const cancelBtn = qs('#wfa-reason-cancel');
+    
+    // Remove old listeners to avoid stacking
+    const newSubmit = submitBtn ? submitBtn.cloneNode(true) : null;
+    const newCancel = cancelBtn ? cancelBtn.cloneNode(true) : null;
+    if (submitBtn && newSubmit) submitBtn.parentNode.replaceChild(newSubmit, submitBtn);
+    if (cancelBtn && newCancel) cancelBtn.parentNode.replaceChild(newCancel, cancelBtn);
+    
+    if (newSubmit) {
+        newSubmit.addEventListener('click', () => {
+            const reason = qs('#wfa-reason-input')?.value?.trim();
+            if (!reason) {
+                showNotif('Alasan WFA wajib diisi!', false);
+                return;
+            }
+            modal.classList.add('hidden');
+            submitAttendanceWithReason({ ...window.pendingAttendanceData, alasan_wfa: reason });
+        });
+    }
+    if (newCancel) {
+        newCancel.addEventListener('click', () => {
+            modal.classList.add('hidden');
+            isProcessingRecognition = false;
+            resumeDetection();
+        });
+    }
 }
 
 function showOvertimeModal(message) {
-    const reason = prompt("Masukkan alasan Overtime:");
-    if (reason) submitAttendanceWithReason({ ...window.pendingAttendanceData, overtime_reason: reason });
-    else isProcessingRecognition = false;
+    // FIX: Use proper modal similar to WFA modal
+    // Create a simple overtime modal dynamically if it doesn't exist
+    let modal = qs('#overtime-reason-modal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'overtime-reason-modal';
+        modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4';
+        modal.innerHTML = `
+            <div class="bg-white p-6 rounded-xl shadow-2xl w-full max-w-md">
+                <h3 class="text-xl font-bold mb-3">Alasan Lembur (Overtime)</h3>
+                <p id="overtime-modal-msg" class="text-sm text-gray-600 mb-3">${message || 'Presensi di luar jam kerja terdeteksi.'}</p>
+                <textarea id="overtime-reason-input" class="w-full p-3 border rounded-lg mb-4" rows="4" placeholder="Jelaskan alasan dan pekerjaan yang dilakukan..."></textarea>
+                <div class="flex justify-end gap-2">
+                    <button id="overtime-reason-cancel" class="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded-lg">Batal</button>
+                    <button id="overtime-reason-submit" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg">Kirim</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+    } else {
+        modal.classList.remove('hidden');
+        const msgEl = qs('#overtime-modal-msg');
+        if (msgEl) msgEl.textContent = message || 'Presensi di luar jam kerja terdeteksi.';
+        const inputEl = qs('#overtime-reason-input');
+        if (inputEl) inputEl.value = '';
+    }
+    
+    const submitBtn = qs('#overtime-reason-submit');
+    const cancelBtn = qs('#overtime-reason-cancel');
+    
+    if (submitBtn) {
+        submitBtn.onclick = () => {
+            const reason = qs('#overtime-reason-input')?.value?.trim();
+            if (!reason) {
+                showNotif('Alasan overtime wajib diisi!', false);
+                return;
+            }
+            modal.classList.add('hidden');
+            submitAttendanceWithReason({ ...window.pendingAttendanceData, overtime_reason: reason });
+        };
+    }
+    if (cancelBtn) {
+        cancelBtn.onclick = () => {
+            modal.classList.add('hidden');
+            isProcessingRecognition = false;
+            resumeDetection();
+        };
+    }
 }
 
 function submitAttendanceWithReason(data) {

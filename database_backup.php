@@ -13,9 +13,10 @@ $DB_NAME = 'absen_db';
 /**
  * Create database backup using PHP/PDO (works on hosting without mysqldump)
  * @param PDO|null $pdo Optional PDO connection, will create if not provided
+ * @param string $type Backup type: 'standard' or 'laravel'
  * @return array Result array with success status and message
  */
-function createDatabaseBackupPHP(?PDO $pdo = null): array {
+function createDatabaseBackupPHP(?PDO $pdo = null, string $type = 'standard'): array {
     global $DB_HOST, $DB_USER, $DB_PASS, $DB_NAME;
     
     // Increase limits for large database backups
@@ -24,7 +25,9 @@ function createDatabaseBackupPHP(?PDO $pdo = null): array {
     
     $backupDir = __DIR__ . '/database_backup';
     if (!is_dir($backupDir)) @mkdir($backupDir, 0755, true);
-    $backupFile = $backupDir . '/absen_db_backup.sql';
+    
+    $suffix = ($type === 'laravel') ? '_laravel' : '';
+    $backupFile = $backupDir . '/absen_db_backup' . $suffix . '.sql';
     
     try {
         // Create PDO connection if not provided
@@ -45,7 +48,7 @@ function createDatabaseBackupPHP(?PDO $pdo = null): array {
             return ['ok' => false, 'success' => false, 'message' => 'Gagal membuka file backup untuk penulisan'];
         }
 
-        fwrite($fp, "-- Database Backup\n");
+        fwrite($fp, "-- Database Backup ({$type})\n");
         fwrite($fp, "-- Generated: " . date('Y-m-d H:i:s') . "\n");
         fwrite($fp, "-- Database: " . $DB_NAME . "\n");
         fwrite($fp, "-- Host: " . $DB_HOST . "\n");
@@ -54,6 +57,56 @@ function createDatabaseBackupPHP(?PDO $pdo = null): array {
         
         // Get all tables
         $tables = $pdo->query("SHOW TABLES")->fetchAll(PDO::FETCH_COLUMN);
+        
+        // If Laravel type, ensure we have Laravel specific tables (or at least their schema if missing)
+        $laravelTables = [];
+        if ($type === 'laravel') {
+            $laravelTables = [
+                'sessions' => "CREATE TABLE IF NOT EXISTS `sessions` (
+  `id` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `user_id` bigint(20) unsigned DEFAULT NULL,
+  `ip_address` varchar(45) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `user_agent` text COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `payload` longtext COLLATE utf8mb4_unicode_ci NOT NULL,
+  `last_activity` int(11) NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `sessions_user_id_index` (`user_id`),
+  KEY `sessions_last_activity_index` (`last_activity`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",
+                'migrations' => "CREATE TABLE IF NOT EXISTS `migrations` (
+  `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
+  `migration` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `batch` int(11) NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",
+                'failed_jobs' => "CREATE TABLE IF NOT EXISTS `failed_jobs` (
+  `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  `uuid` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `connection` text COLLATE utf8mb4_unicode_ci NOT NULL,
+  `queue` text COLLATE utf8mb4_unicode_ci NOT NULL,
+  `payload` longtext COLLATE utf8mb4_unicode_ci NOT NULL,
+  `exception` longtext COLLATE utf8mb4_unicode_ci NOT NULL,
+  `failed_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `failed_jobs_uuid_unique` (`uuid`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",
+                'personal_access_tokens' => "CREATE TABLE IF NOT EXISTS `personal_access_tokens` (
+  `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  `tokenable_type` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `tokenable_id` bigint(20) unsigned NOT NULL,
+  `name` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `token` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `abilities` text COLLATE utf8mb4_unicode_ci,
+  `last_used_at` timestamp NULL DEFAULT NULL,
+  `expires_at` timestamp NULL DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT NULL,
+  `updated_at` timestamp NULL DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `personal_access_tokens_token_unique` (`token`),
+  KEY `personal_access_tokens_tokenable_type_tokenable_id_index` (`tokenable_type`,`tokenable_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;"
+            ];
+        }
         
         foreach ($tables as $table) {
             fwrite($fp, "-- Table structure for `{$table}`\n");
@@ -82,6 +135,21 @@ function createDatabaseBackupPHP(?PDO $pdo = null): array {
                 fwrite($fp, "INSERT INTO `{$table}` ({$columnList}) VALUES (" . implode(', ', $values) . ");\n");
             }
             if ($hasData) fwrite($fp, "\n");
+            
+            // Remove from laravelTables if it was already dumped
+            if ($type === 'laravel' && isset($laravelTables[$table])) {
+                unset($laravelTables[$table]);
+            }
+        }
+        
+        // Add remaining Laravel tables (schema only) if they weren't in the DB
+        if ($type === 'laravel' && !empty($laravelTables)) {
+            fwrite($fp, "-- Laravel Specific Tables (Schema Only)\n");
+            foreach ($laravelTables as $tableName => $schema) {
+                fwrite($fp, "-- Table structure for `{$tableName}`\n");
+                fwrite($fp, "DROP TABLE IF EXISTS `{$tableName}`;\n");
+                fwrite($fp, $schema . "\n\n");
+            }
         }
         
         fwrite($fp, "SET FOREIGN_KEY_CHECKS=1;\n");
@@ -92,7 +160,7 @@ function createDatabaseBackupPHP(?PDO $pdo = null): array {
         return [
             'ok' => true, 
             'success' => true,
-            'message' => 'Backup berhasil dibuat dan disimpan ke file (Chunked)',
+            'message' => 'Backup ' . ucfirst($type) . ' berhasil dibuat dan disimpan ke file (Chunked)',
             'sql_content' => '(SQL content stripped to save memory. Use file path: ' . basename($backupFile) . ')',
             'size' => $fileSize,
             'file_saved' => true,
@@ -106,9 +174,10 @@ function createDatabaseBackupPHP(?PDO $pdo = null): array {
 
 /**
  * Create database backup using mysqldump (fallback for local development)
+ * @param string $type Backup type: 'standard' or 'laravel'
  * @return array Result array with success status and message
  */
-function createDatabaseBackup(): array {
+function createDatabaseBackup(string $type = 'standard'): array {
     global $DB_HOST, $DB_USER, $DB_PASS, $DB_NAME;
     
     try {
@@ -123,12 +192,13 @@ function createDatabaseBackup(): array {
             ]
         );
         
-        $result = createDatabaseBackupPHP($pdo);
+        $result = createDatabaseBackupPHP($pdo, $type);
         
         // If PHP backup succeeded, return it
         if ($result['ok'] || ($result['success'] ?? false)) {
             return $result;
         }
+
         
         // Fallback to mysqldump for local development
         // Ensure backup directory exists
@@ -298,26 +368,30 @@ function restoreDatabaseFromBackup(string $backupFile): array {
 
 /**
  * Get backup file information
+ * @param string $type Backup type: 'standard' or 'laravel'
  * @return array Backup info array
  */
-function getBackupInfo(): array {
-    $backupFile = __DIR__ . '/database_backup/absen_db_backup.sql';
+function getBackupInfo(string $type = 'standard'): array {
+    $suffix = ($type === 'laravel') ? '_laravel' : '';
+    $backupFile = __DIR__ . '/database_backup/absen_db_backup' . $suffix . '.sql';
     
     if (!file_exists($backupFile)) {
         return [
             'exists' => false,
-            'file' => $backupFile,
+            'file' => basename($backupFile),
             'size' => 0,
-            'created' => null
+            'created' => null,
+            'type' => $type
         ];
     }
     
     return [
         'exists' => true,
-        'file' => $backupFile,
+        'file' => basename($backupFile),
         'size' => filesize($backupFile),
         'created' => date('Y-m-d H:i:s', filemtime($backupFile)),
-        'size_formatted' => formatBytes(filesize($backupFile))
+        'size_formatted' => formatBytes(filesize($backupFile)),
+        'type' => $type
     ];
 }
 
@@ -329,7 +403,8 @@ function getBackupInfo(): array {
 function formatBytes(int $bytes): string {
     $units = ['B', 'KB', 'MB', 'GB'];
     $bytes = max($bytes, 0);
-    $pow = floor(($bytes ? log($bytes) : 0) / log(1024));
+    if ($bytes === 0) return '0 B';
+    $pow = floor(log($bytes) / log(1024));
     $pow = min($pow, count($units) - 1);
     
     $bytes /= (1 << (10 * $pow));
@@ -339,8 +414,14 @@ function formatBytes(int $bytes): string {
 
 // If called directly from command line
 if (php_sapi_name() === 'cli') {
-    echo "Creating database backup...\n";
-    $result = createDatabaseBackup();
+    $type = $argv[1] ?? 'standard';
+    if (!in_array($type, ['standard', 'laravel'])) {
+        echo "Usage: php database_backup.php [standard|laravel]\n";
+        exit(1);
+    }
+    
+    echo "Creating database backup ({$type})...\n";
+    $result = createDatabaseBackup($type);
     
     if ($result['ok']) {
         echo "✅ " . $result['message'] . "\n";
@@ -351,4 +432,5 @@ if (php_sapi_name() === 'cli') {
         exit(1);
     }
 }
+
 ?>

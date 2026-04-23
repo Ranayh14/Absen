@@ -1,0 +1,6 @@
+database_backup/
+datbase/
+*.sql
+*.log
+pages/*.log
+.gemini/

@@ -585,27 +585,35 @@ async function api(url, data, opts){
     } catch (error) {
         console.error('API call failed:', error);
         
-        // Perbaikan: Handle specific error types
-        if (error.name === 'TypeError' && error.message.includes('fetch')) {
-            console.error('Network error - check if server is running');
-            throw new Error('Koneksi ke server gagal. Pastikan server berjalan.');
-        } else if (error.message.includes('ERR_CONNECTION_REFUSED')) {
-            console.error('Connection refused - server not responding');
-            throw new Error('Server tidak merespons. Silakan coba lagi.');
-        }
+        // FIX: Show user-visible notification for server errors so users don't need to check console
+        let userErrMsg = null;
         
-        // Provide more specific error messages
-        if (error.name === 'TypeError' && error.message.includes('Failed to fetch')) {
-            throw new Error('Tidak dapat terhubung ke server. Pastikan XAMPP sudah berjalan.');
+        // Perbaikan: Handle specific error types
+        if (error.name === 'TypeError' && (error.message.includes('fetch') || error.message.includes('Failed to fetch'))) {
+            userErrMsg = 'Koneksi ke server gagal. Pastikan XAMPP/server sudah berjalan.';
+        } else if (error.message.includes('ERR_CONNECTION_REFUSED')) {
+            userErrMsg = 'Server tidak merespons. Silakan coba lagi.';
         } else if (error.message.includes('HTTP error! status: 400')) {
-            // Check if it's a time validation error
             if (error.message.includes('Presensi masuk hanya tersedia') || error.message.includes('Presensi masuk tersedia')) {
-                throw new Error('Waktu presensi tidak sesuai. Silakan coba pada jam yang tepat.');
+                userErrMsg = 'Waktu presensi tidak sesuai. Silakan coba pada jam yang tepat.';
             } else {
-                throw new Error('Data yang dikirim tidak valid. Silakan coba lagi.');
+                userErrMsg = 'Data yang dikirim tidak valid. Silakan coba lagi.';
             }
         } else if (error.message.includes('HTTP error! status: 500')) {
-            throw new Error('Server error. Silakan coba lagi.');
+            userErrMsg = 'Terjadi kesalahan pada server (500). Silakan coba lagi atau hubungi administrator.';
+        } else if (error.message.includes('HTTP error! status: 503')) {
+            userErrMsg = 'Server sedang sibuk (503). Silakan coba beberapa saat lagi.';
+        } else if (error.message && !error.message.includes('HTTP error!')) {
+            // For non-HTTP errors (e.g. invalid JSON, timeout), show the message
+            userErrMsg = error.message;
+        }
+        
+        // Show notification only if opts.suppressModal is not set and we have a message
+        if (userErrMsg && !(opts && opts.suppressModal)) {
+            // Use showNotif (toast) for non-blocking user notification
+            if (typeof showNotif === 'function') {
+                showNotif('⚠️ ' + userErrMsg, false);
+            }
         }
         
         throw error;
@@ -685,15 +693,22 @@ const regFotoData = qs('#reg-foto-data');
 const regPhotoFileInput = qs('#reg-photo-file-input');
 let regStream = null;
 
+// Camera action containers
+const regPhotoActions = qs('#photo-actions');
+const regCameraActions = qs('#camera-actions');
+
 if (regStart) {
     regStart.addEventListener('click', async ()=>{
         try{
             regStream = await navigator.mediaDevices.getUserMedia({ video: { width: 480, height: 360 } });
             regVideo.srcObject = regStream;
             regVidContainer.classList.remove('hidden');
-            regTake.classList.remove('hidden');
-            regStart.classList.add('hidden');
-        }catch(err){ showNotif('Tidak bisa mengakses kamera'); console.error(err); }
+            // FIX: Show #camera-actions container (which holds 'Ambil Foto' button) and hide #photo-actions
+            if (regCameraActions) regCameraActions.classList.remove('hidden');
+            if (regPhotoActions) regPhotoActions.classList.add('hidden');
+            // Also show the take button itself (in case it's also toggled)
+            if (regTake) regTake.classList.remove('hidden');
+        }catch(err){ showNotif('Tidak bisa mengakses kamera: ' + err.message, false); console.error(err); }
     });
 }
 
@@ -702,16 +717,24 @@ if (regTake) {
         const ctx = regCanvas.getContext('2d');
         regCanvas.width = regVideo.videoWidth;
         regCanvas.height = regVideo.videoHeight;
-        ctx.drawImage(regVideo,0,0,regCanvas.width,regCanvas.height);
-        const dataUrl = regCanvas.toDataURL('image/jpeg');
-        regPreview.src = dataUrl; regPreview.classList.remove('hidden');
+        // Mirror the photo to match camera preview
+        ctx.translate(regCanvas.width, 0);
+        ctx.scale(-1, 1);
+        ctx.drawImage(regVideo, 0, 0, regCanvas.width, regCanvas.height);
+        const dataUrl = regCanvas.toDataURL('image/jpeg', 0.9);
+        regPreview.src = dataUrl;
+        regPreview.classList.remove('hidden');
         regFotoData.value = dataUrl;
+        // Stop stream
         if(regStream){ regStream.getTracks().forEach(t=>t.stop()); regStream=null; }
         regVidContainer.classList.add('hidden');
-        regTake.classList.add('hidden');
-        regStart.classList.remove('hidden');
-        regStart.textContent = 'Ambil Ulang Foto';
-        regRemove.classList.remove('hidden');
+        // Hide camera-actions, show photo-actions again with updated text
+        if (regCameraActions) regCameraActions.classList.add('hidden');
+        if (regPhotoActions) regPhotoActions.classList.remove('hidden');
+        // Show remove button, update start button text
+        const regRemoveLocal = qs('#reg-remove-photo');
+        if (regRemoveLocal) regRemoveLocal.classList.remove('hidden');
+        if (regStart) { regStart.textContent = 'Ambil Ulang Foto'; }
     });
 }
 
@@ -744,8 +767,9 @@ if (regPhotoFileInput) {
                 regPreview.src = dataUrl;
                 regPreview.classList.remove('hidden');
                 regFotoData.value = dataUrl;
-                regRemove.classList.remove('hidden');
-                regStart.textContent = 'Buka Kamera';
+                const regRemoveLocal = qs('#reg-remove-photo');
+                if (regRemoveLocal) regRemoveLocal.classList.remove('hidden');
+                if (regStart) regStart.textContent = 'Buka Kamera';
             };
             reader.readAsDataURL(file);
         }
@@ -760,7 +784,7 @@ if (regRemove) {
         regFotoData.value = '';
         regRemove.classList.add('hidden');
         regPhotoFileInput.value = '';
-        regStart.textContent = 'Buka Kamera';
+        if (regStart) regStart.textContent = 'Buka Kamera';
         
         // Stop camera if running
         if(regStream){ 
@@ -768,7 +792,9 @@ if (regRemove) {
             regStream=null; 
         }
         regVidContainer.classList.add('hidden');
-        regTake.classList.add('hidden');
+        // Show photo-actions, hide camera-actions
+        if (regPhotoActions) regPhotoActions.classList.remove('hidden');
+        if (regCameraActions) regCameraActions.classList.add('hidden');
     });
 }
 
@@ -777,10 +803,23 @@ if (registerForm) {
     registerForm.addEventListener('submit', async (e)=>{
         e.preventDefault();
         const fd = new FormData(e.target);
-        const r = await api('?ajax=register', fd);
         const msg = qs('#register-msg');
-        if(r.ok){ msg.className='text-green-600'; msg.textContent='Registrasi berhasil. Silakan login.'; setTimeout(()=>location.href='?page=login', 300); } // Faster redirect
-        else { msg.className='text-red-600'; msg.textContent=r.message||'Gagal registrasi'; }
+        // FIX: Use suppressModal=true to control modal display ourselves
+        // This prevents false error modal when registration is actually successful
+        const r = await api('?ajax=register', fd, { suppressModal: true });
+        if(r && r.ok){ 
+            msg.className='text-green-600 font-semibold';
+            msg.textContent='✅ Registrasi berhasil! Mengalihkan ke halaman login...';
+            showNotif('Registrasi berhasil!', true);
+            setTimeout(()=>location.href='?page=login', 1500);
+        } else {
+            // Show clear, user-friendly error message
+            const errMsg = (r && r.message) ? r.message : 'Gagal registrasi. Periksa data Anda dan coba lagi.';
+            msg.className='text-red-600 font-semibold';
+            msg.textContent='❌ ' + errMsg;
+            // Also show a toast notification for visibility
+            showNotif(errMsg, false);
+        }
     });
 }
 <?php elseif ($page === 'forgot-password'): ?>

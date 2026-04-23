@@ -1323,26 +1323,18 @@ if (isset($_GET['ajax'])) {
                 // CRITICAL: Location string (lokasi) is NEVER used for validation - it's only for display
                 // Only GPS coordinates (lat/lng) and distance calculation are used for validation
                 // This prevents users from manipulating location string to bypass validation
-                if ($ketVal !== 'wfo' && $lat !== null && $lng !== null) {
-                    // Only use GPS coordinates and distance - location string is ignored for validation
-                    if ($isInsideTelu) {
-                        // GPS inside radius - set WFO (fallback terakhir, but stricter)
-                        // Only accept if distance is within configured radius (no lenient 1000m check)
-                        if ($distance <= $wfoRadius) {
-                            $ketVal = 'wfo';
-                            error_log('✓ GPS inside radius - set WFO berdasarkan GPS (fallback terakhir, distance: ' . round($distance) . 'm, radius: ' . $wfoRadius . 'm)');
-                        } else {
-                            // GPS outside radius - tetap WFA (stricter validation)
-                            $ketVal = 'wfa';
-                            error_log('✗ GPS outside radius - require WFA (distance: ' . round($distance) . 'm, radius: ' . $wfoRadius . 'm)');
-                        }
+                if ($ketVal !== 'wfo' && $lat !== null && $lng !== null && isset($distance)) {
+                    // Use GPS distance check - accept if within configured radius
+                    if ($distance <= $wfoRadius) {
+                        $ketVal = 'wfo';
+                        error_log('✓ GPS inside radius - set WFO berdasarkan GPS (fallback terakhir, distance: ' . round($distance) . 'm, radius: ' . $wfoRadius . 'm)');
                     } else {
-                        // GPS outside radius - tetap WFA
+                        // GPS outside radius - require WFA
                         $ketVal = 'wfa';
                         error_log('✗ GPS outside radius - require WFA (distance: ' . round($distance) . 'm, radius: ' . $wfoRadius . 'm)');
                     }
                 } else if ($ketVal !== 'wfo') {
-                    // Tidak ada GPS data dan IP/WiFi tidak valid
+                    // IP/WiFi invalid, GPS not available
                     $ketVal = 'wfa';
                     error_log('✗ Semua validasi gagal - require WFA (IP: ' . ($publicIp ?: 'EMPTY') . ', WiFi: ' . ($wifiSSID ?: 'EMPTY') . ', GPS: ' . (($lat && $lng) ? 'OK' : 'MISSING') . ')');
                 }
@@ -1351,7 +1343,15 @@ if (isset($_GET['ajax'])) {
                 if ($ketVal === 'wfa') {
                     $alasanWfa = $_POST['wfa_reason'] ?? $_POST['alasan_wfa'] ?? null;
                     if (!$alasanWfa) {
-                        jsonResponse(['ok' => false, 'need_reason' => true, 'message' => 'Di luar wilayah kantor atau tidak terhubung ke WiFi/IP Telkom University. Harap isi alasan kerja di luar (WFA).'], 400);
+                        // Build helpful message with distance info for debugging
+                        $debugInfo = '';
+                        if (isset($distance)) {
+                            $debugInfo = ' (Jarak GPS: ' . round($distance) . 'm, Radius WFO: ' . $wfoRadius . 'm)';
+                        }
+                        $wfaMsg = 'Di luar wilayah kantor atau tidak terhubung ke WiFi/IP Telkom University. Harap isi alasan kerja di luar (WFA).' . $debugInfo;
+                        // FIX: Return HTTP 200 with need_reason flag so api() doesn't throw an exception
+                        // Previously returned 400 which caused api() catch block to intercept it
+                        jsonResponse(['ok' => false, 'need_reason' => true, 'message' => $wfaMsg]);
                     }
                 }
 
@@ -2340,7 +2340,8 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
             jsonResponse(['ok' => false, 'message' => 'Backup functions not available']);
         }
         
-        $backupInfo = getBackupInfo();
+        $type = $_GET['type'] ?? 'standard';
+        $backupInfo = getBackupInfo($type);
         jsonResponse(['ok' => true, 'data' => $backupInfo]);
     }
 
@@ -2352,7 +2353,8 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
             jsonResponse(['ok' => false, 'message' => 'Backup functions not available']);
         }
         
-        $result = createDatabaseBackup();
+        $type = $_POST['type'] ?? 'standard';
+        $result = createDatabaseBackup($type);
         jsonResponse($result);
     }
 
@@ -2441,7 +2443,7 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
                 }
             }
             
-            $sqlContent = $result['sql_content'];
+            $filePath = $result['file'];
             $downloadFileName = 'absen_db_backup_' . date('Y-m-d_His') . '.sql';
             
             // Clear output buffer to save memory
@@ -2450,12 +2452,12 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
             // Set headers for file download
             header('Content-Type: application/octet-stream');
             header('Content-Disposition: attachment; filename="' . $downloadFileName . '"');
-            header('Content-Length: ' . strlen($sqlContent));
+            header('Content-Length: ' . filesize($filePath));
             header('Cache-Control: must-revalidate');
             header('Pragma: public');
             
-            // Output SQL content
-            echo $sqlContent;
+            // Output file
+            readfile($filePath);
             exit;
         }
         
@@ -2483,18 +2485,18 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
                 }
             }
             
-            $sqlContent = $result['sql_content'];
+            $filePath = $result['file'];
             $downloadFileName = basename($fileName);
             
             // Set headers for file download
             header('Content-Type: application/octet-stream');
             header('Content-Disposition: attachment; filename="' . $downloadFileName . '"');
-            header('Content-Length: ' . strlen($sqlContent));
+            header('Content-Length: ' . filesize($filePath));
             header('Cache-Control: must-revalidate');
             header('Pragma: public');
             
-            // Output SQL content
-            echo $sqlContent;
+            // Output file
+            readfile($filePath);
             exit;
         }
         
@@ -2505,27 +2507,18 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
                 die('File not found');
             }
             
-            $result = createDatabaseBackupPHP($pdo);
-            if (!($result['ok'] ?? $result['success'] ?? false)) {
-                if (isset($result['message']) && strpos($result['message'], 'berhasil') !== false) {
-                } else {
-                    http_response_code(404);
-                    die('File not found and failed to generate backup: ' . ($result['message'] ?? 'Unknown error'));
-                }
-            }
-            
-            $sqlContent = $result['sql_content'];
+            $filePath = $result['file'];
             $downloadFileName = basename($fileName);
             
             // Set headers for file download
             header('Content-Type: application/octet-stream');
             header('Content-Disposition: attachment; filename="' . $downloadFileName . '"');
-            header('Content-Length: ' . strlen($sqlContent));
+            header('Content-Length: ' . filesize($filePath));
             header('Cache-Control: must-revalidate');
             header('Pragma: public');
             
-            // Output SQL content
-            echo $sqlContent;
+            // Output file
+            readfile($filePath);
             exit;
         }
         
@@ -4086,6 +4079,52 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
              jsonResponse(['ok' => true, 'message' => 'Request berhasil dikirim dan menunggu persetujuan admin.']);
         } else {
              jsonResponse(['ok' => false, 'message' => 'Gagal mengirim request.'], 500);
+        }
+    }
+
+    // User: Get their own help request status list
+    if ($action === 'get_user_help_requests') {
+        $uid = (int)($_SESSION['user']['id'] ?? 0);
+        if (!$uid) jsonResponse(['error' => 'Unauthorized'], 401);
+        
+        try {
+            $stmt = $pdo->prepare(
+                "SELECT id, request_type, status, admin_note, created_at,
+                        tanggal, jenis_izin, alasan_izin,
+                        jam_masuk, jam_pulang, attendance_type,
+                        bug_description
+                 FROM admin_help_requests
+                 WHERE user_id = :uid
+                 ORDER BY created_at DESC
+                 LIMIT 20"
+            );
+            $stmt->execute([':uid' => $uid]);
+            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            jsonResponse(['ok' => true, 'data' => $rows]);
+        } catch (PDOException $e) {
+            // Fallback: select only guaranteed columns if some don't exist
+            error_log('get_user_help_requests error: ' . $e->getMessage());
+            try {
+                $stmt2 = $pdo->prepare(
+                    "SELECT id, request_type, status, admin_note, created_at,
+                            tanggal, jenis_izin, alasan_izin,
+                            jam_masuk, jam_pulang, bug_description
+                     FROM admin_help_requests
+                     WHERE user_id = :uid
+                     ORDER BY created_at DESC
+                     LIMIT 20"
+                );
+                $stmt2->execute([':uid' => $uid]);
+                $rows2 = $stmt2->fetchAll(PDO::FETCH_ASSOC);
+                // Add missing attendance_type as null
+                foreach ($rows2 as &$row) {
+                    $row['attendance_type'] = $row['attendance_type'] ?? null;
+                }
+                jsonResponse(['ok' => true, 'data' => $rows2]);
+            } catch (PDOException $e2) {
+                error_log('get_user_help_requests fallback error: ' . $e2->getMessage());
+                jsonResponse(['ok' => false, 'message' => 'Gagal memuat data: ' . $e2->getMessage()], 500);
+            }
         }
     }
 

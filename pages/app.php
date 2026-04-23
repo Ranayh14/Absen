@@ -3327,7 +3327,8 @@ qs('#btn-create-backup') && qs('#btn-create-backup').addEventListener('click', a
         button.disabled = true;
         
         try {
-            const r = await api('?ajax=create_backup', {});
+            const type = qs('#backup-type')?.value || 'standard';
+            const r = await api('?ajax=create_backup', { type });
             if (r.ok) {
                 showNotif(r.message || 'Backup berhasil dibuat', true);
                 // Refresh list after successful backup
