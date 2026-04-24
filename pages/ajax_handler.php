@@ -1,6 +1,6 @@
 <?php
-if (isset($_GET['ajax'])) {
-    $action = $_GET['ajax'];
+if (isset($_REQUEST['ajax'])) {
+    $action = $_REQUEST['ajax'];
 
     // Check if database is available
     if (!isset($pdo)) {
