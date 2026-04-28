@@ -354,30 +354,35 @@
                 <i class="fi fi-sr-angle-down accordion-icon text-gray-400 transition-transform duration-300"></i>
             </summary>
             <div class="accordion-content px-4 sm:px-6 pb-4 sm:pb-6 border-t border-gray-100 pt-4">
-                <div class="grid grid-cols-1 sm:grid-cols-12 gap-3 mb-6 items-end">
-                    <div class="sm:col-span-6">
+                <div class="grid grid-cols-1 sm:grid-cols-12 gap-3 mb-4 items-end">
+                    <div class="sm:col-span-7">
                         <label class="block text-xs text-gray-600 mb-1 font-medium">Tipe Backup Database</label>
                         <select id="backup-type" class="w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-cyan-500 text-sm transition-all">
                             <option value="standard">Standard Version (App Data Only)</option>
-                            <option value="laravel">Laravel Compatible (Includes Sessions & Migrations)</option>
+                            <option value="laravel">Laravel Compatible (Includes Sessions &amp; Migrations)</option>
                         </select>
                     </div>
                     <div class="sm:col-span-4 flex gap-2">
-                        <button type="button" id="btn-create-backup" class="flex-1 bg-cyan-600 hover:bg-cyan-700 text-white font-semibold py-2.5 px-4 rounded-xl transition-all shadow-md flex items-center justify-center gap-2 text-sm whitespace-nowrap">
-                            <i class="fi fi-sr-disk"></i> Buat Backup
+                        <button type="button" id="btn-create-backup"
+                            class="flex-1 bg-cyan-600 hover:bg-cyan-700 text-white font-semibold py-2.5 px-4 rounded-xl transition-all shadow-md flex items-center justify-center gap-2 text-sm whitespace-nowrap">
+                            <i class="fi fi-sr-download"></i> Buat Backup
                         </button>
-                        <button type="button" id="btn-refresh-backup-list" class="w-12 h-10 bg-blue-50 hover:bg-blue-100 text-blue-600 rounded-xl transition-all flex items-center justify-center border border-blue-100" title="Refresh List">
+                        <button type="button" id="btn-refresh-backup-list"
+                            class="w-12 h-10 bg-blue-50 hover:bg-blue-100 text-blue-600 rounded-xl transition-all flex items-center justify-center border border-blue-100" title="Refresh List">
                             <i class="fi fi-sr-refresh"></i>
                         </button>
                     </div>
                 </div>
-                <div id="backup-files-list" class="rounded-xl border border-gray-100 min-h-[100px]">
-                    <div class="text-center text-gray-400 py-8">
-                        <i class="fi fi-sr-spinner text-2xl animate-spin mb-2"></i>
-                        <p class="text-sm">Memuat daftar backup...</p>
+                <p class="text-xs text-gray-500 mb-4">
+                    <i class="fi fi-sr-info mr-1"></i>
+                    <strong>Laravel Compatible</strong> menambahkan table <code>cache</code>, <code>sessions</code>, <code>jobs</code>, <code>failed_jobs</code>, dll.
+                </p>
+                <div id="backup-files-list" class="rounded-xl border border-gray-100 min-h-[60px]">
+                    <div class="text-center text-gray-400 py-4">
+                        <p class="text-sm">Klik 🔄 untuk lihat file backup yang tersimpan di server.</p>
                     </div>
                 </div>
-                <div class="mt-4 bg-cyan-50 border border-cyan-100 rounded-xl p-3">
+                <div class="mt-3 bg-cyan-50 border border-cyan-100 rounded-xl p-3">
                     <p class="text-xs text-cyan-700">
                         <i class="fi fi-sr-info mr-1"></i>
                         <strong>Tips:</strong> Backup database secara berkala untuk mengamankan data.

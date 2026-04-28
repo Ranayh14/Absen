@@ -52,31 +52,7 @@
             </div>
             
             <div class="flex items-center gap-4">
-                <!-- Employee Notifications -->
-                <div class="relative">
-                    <button id="btn-pegawai-notif" class="relative p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-xl transition-all group">
-                        <i class="fi fi-sr-bell text-xl"></i>
-                        <span id="notif-pegawai-badge" class="absolute top-1 right-1 w-2.5 h-2.5 bg-red-500 border-2 border-white rounded-full hidden"></span>
-                    </button>
-                    <!-- Notifications Dropdown -->
-                    <div id="dropdown-pegawai-notif" class="fixed sm:absolute left-4 right-4 sm:left-auto sm:right-0 top-16 sm:top-full mt-3 sm:w-96 bg-white rounded-2xl shadow-xl border border-gray-100 hidden z-50 overflow-hidden animate-fade-in-up">
-                        <div class="p-4 border-b border-gray-50 flex items-center justify-between bg-blue-600 text-white">
-                            <h3 class="font-bold">Notifikasi Status Request</h3>
-                            <button id="btn-mark-all-read" class="text-[10px] uppercase font-bold bg-white/20 hover:bg-white/30 px-2 py-1 rounded-lg transition-all">Baca Semua</button>
-                        </div>
-                        <!-- Filter Tabs -->
-                        <div class="flex border-b border-gray-100 bg-gray-50/50">
-                            <button id="tab-notif-unread" class="flex-1 py-3 text-xs font-bold text-blue-600 border-b-2 border-blue-600 bg-white transition-all">Belum Dibaca</button>
-                            <button id="tab-notif-read" class="flex-1 py-3 text-xs font-bold text-gray-400 hover:text-gray-600 transition-all">Sudah Dibaca</button>
-                        </div>
-                        <div id="notif-pegawai-items" class="max-h-96 overflow-y-auto p-2 space-y-1">
-                            <div class="p-8 text-center text-gray-400">
-                                <i class="fi fi-sr-inbox text-3xl mb-2 block"></i>
-                                <p class="text-xs">Tidak ada notifikasi baru</p>
-                            </div>
-                        </div>
-                    </div>
-                </div>
+
 
                 <div class="relative">
                     <button id="btn-profile" class="flex items-center gap-3 p-1 pr-4 bg-white border border-gray-200 hover:border-blue-300 rounded-full transition-all shadow-sm hover:shadow-md group">

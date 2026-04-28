@@ -408,7 +408,7 @@
                 }
                 
                 if (!data.tanggal || !data.jam_masuk || !data.bukti_presensi) return showNotif('Lengkapi tanggal, jam masuk, dan bukti wajah!', false);
-                if (!data.jam_pulang) data.jam_pulang = null; // Ensure null if empty
+                if (!data.jam_pulang) data.jam_pulang = ''; // Send empty string so backend treats as null
             } else if (type === 'bug_report') {
                 data.bug_description = qs('#bug-desc').value;
                 data.bug_proof = qs('#bug-bukti-data').value;
@@ -416,7 +416,13 @@
             }
 
             try {
-                const res = await api('?ajax=submit_help_request', data, { method: 'POST' });
+                // Use FormData for large payloads (like base64 images) to avoid
+                // URL-encoding issues that can truncate data on hosting servers
+                const formData = new FormData();
+                for (const [key, val] of Object.entries(data)) {
+                    formData.append(key, val ?? '');
+                }
+                const res = await api('?ajax=submit_help_request', formData, { method: 'POST', cache: false });
                 if (res.ok) {
                     showNotif('✅ ' + res.message, true);
                     // Reset form
@@ -431,7 +437,7 @@
                     // can immediately see their request with Pending status
                     setTimeout(() => switchHelpTab('status'), 300);
                 } else {
-                    showNotif(res.message, false);
+                    showNotif(res.message || 'Gagal mengirim request', false);
                 }
             } catch (e) {
                 showNotif('Gagal mengirim request: ' + e.message, false);
@@ -511,7 +517,7 @@
                             <p class="text-xs text-gray-700">${r.admin_note}</p>
                         </div>` : '';
 
-                    if (r.status !== 'pending') unreviewedCount++;
+                    if (r.status !== 'pending' && r.is_read_by_user == 0) unreviewedCount++;
 
                     return `<div class="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 space-y-2">
                         <div class="flex items-start justify-between gap-2">
@@ -526,6 +532,15 @@
 
                 // Update notification dot
                 checkNotifDot(unreviewedCount > 0);
+
+                // Auto-mark as read if there are unread notifications
+                if (unreviewedCount > 0) {
+                    setTimeout(() => {
+                        api('?ajax=pegawai_mark_notifications_read', {}, { method: 'POST', suppressModal: true }).then(() => {
+                            checkNotifDot(false);
+                        });
+                    }, 1000);
+                }
             } catch(e) {
                 container.innerHTML = '<div class="text-center text-red-400 text-xs py-8">Gagal memuat data. <button onclick="loadUserRequestStatus()" class="underline">Coba lagi</button></div>';
             }
@@ -562,7 +577,7 @@
                         api('?ajax=get_user_help_requests', {}, { suppressModal: true, cache: false })
                             .then(res => {
                                 if (res.ok && res.data) {
-                                    const hasReviewed = res.data.some(r => r.status !== 'pending');
+                                    const hasReviewed = res.data.some(r => r.status !== 'pending' && r.is_read_by_user == 0);
                                     checkNotifDot(hasReviewed);
                                 }
                             }).catch(() => {});
@@ -621,7 +636,7 @@
                 api('?ajax=get_user_help_requests', {}, { suppressModal: true, cache: false })
                     .then(res => {
                         if (res.ok && res.data) {
-                            const hasReviewed = res.data.some(r => r.status !== 'pending');
+                            const hasReviewed = res.data.some(r => r.status !== 'pending' && r.is_read_by_user == 0);
                             checkNotifDot(hasReviewed);
                         }
                     }).catch(() => {});
@@ -633,7 +648,7 @@
             api('?ajax=get_user_help_requests', {}, { suppressModal: true, cache: false })
                 .then(res => {
                     if (res.ok && res.data) {
-                        const hasReviewed = res.data.some(r => r.status !== 'pending');
+                        const hasReviewed = res.data.some(r => r.status !== 'pending' && r.is_read_by_user == 0);
                         checkNotifDot(hasReviewed);
                     }
                 }).catch(() => {});

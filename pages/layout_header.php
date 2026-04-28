@@ -383,7 +383,7 @@ function seedDefaultSettings(PDO $pdo): void {
         ['wfo_address', 'Fakultas Ilmu Terapan, Jl. Telekomunikasi, Bandung', 'Nama alamat pusat WFO (akan di-geocode)'],
         ['wfo_lat', '-6.9738', 'Latitude pusat WFO'],
         ['wfo_lng', '107.6300', 'Longitude pusat WFO'],
-        ['wfo_radius_m', '1200', 'Radius wilayah WFO dalam meter'],
+        ['wfo_radius_m', '50', 'Radius wilayah WFO dalam meter (GPS-primary, rekomendasi: 50m)'],
         // WFO detection via IP API settings
         ['wfo_mode', 'api', 'Mode deteksi WFO: api atau coordinate'],
         ['wfo_api_provider', 'ipinfo', 'Provider IP API: ipinfo | ipapi | ip-api'],
@@ -971,18 +971,20 @@ function isTelkomUniversityPrivateIp(string $ip): bool {
         return false;
     }
     
-    // Check if it's a private IP (10.x.x.x, 172.16-31.x.x, 192.168.x.x)
-    $isPrivate = filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false;
+    // STRICT: Only accept KNOWN Telkom University private IP subnets.
+    // Do NOT accept all 10.x.x.x — home routers commonly use 10.x.x.x too.
+    // Known TelU subnets observed on-site: 10.60.x.x (TelU-Connect), 10.30.x.x (TelU-Guest)
+    $teluSubnets = [
+        '10.60.0.0/16',  // TelU-Connect
+        '10.30.0.0/16',  // TelU-Guest
+        '10.20.0.0/16',  // Internal faculty network
+        '10.10.0.0/16',  // Alternative TelU subnet
+    ];
     
-    if (!$isPrivate) {
-        return false; // Not a private IP
-    }
-    
-    // Check if it's in Telkom University private IP range (10.x.x.x)
-    // Based on screenshots: 10.60.43.33 (TelU-Connect) and 10.30.114.48 (TelU-Guest)
-    // Telkom University uses 10.x.x.x range
-    if (strpos($ip, '10.') === 0) {
-        return true; // IP starts with 10. - likely Telkom University network
+    foreach ($teluSubnets as $cidr) {
+        if (ipInCidr($ip, $cidr)) {
+            return true;
+        }
     }
     
     return false;
@@ -3819,7 +3821,7 @@ if ($action) {
                 // Improved location validation with stricter radius for WFO (better accuracy)
                 $wfoLat = (float)getSetting($pdo, 'wfo_lat', '-6.9738');
                 $wfoLng = (float)getSetting($pdo, 'wfo_lng', '107.6300');
-                $wfoRadius = (int)getSetting($pdo, 'wfo_radius_m', '600'); // Reduced radius to 600m for stricter validation and better accuracy
+                $wfoRadius = (int)getSetting($pdo, 'wfo_radius_m', '50'); // GPS-primary: 50m radius for precise WFO detection
                 
                 if ($lat !== null && $lng !== null) {
                     $earth = 6371000; // meters
@@ -5029,120 +5031,73 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
 
     // Admin: download backup file
     if ($action === 'download_backup' && $_SERVER['REQUEST_METHOD'] === 'GET') {
-        if (!isAdmin()) {
-            http_response_code(403);
-            die('Forbidden');
+        if (!isAdmin()) { http_response_code(403); die('Forbidden'); }
+
+        @set_time_limit(0);
+        @ini_set('memory_limit', '1024M');
+
+        if (!function_exists('createDatabaseBackupPHP')) {
+            http_response_code(500);
+            die('Backup functions not available');
         }
-        
-        $fileName = $_GET['file'] ?? '';
-        if (empty($fileName)) {
-            http_response_code(400);
-            die('File name required');
+
+        // Determine type: explicit 'type' param takes priority, else infer from 'file' param
+        $type     = trim($_GET['type'] ?? '');
+        $fileName = trim($_GET['file'] ?? '');
+
+        if (empty($type)) {
+            $type = (strpos($fileName, 'laravel') !== false) ? 'laravel' : 'standard';
         }
-        
-        // Special case: download current database backup (generate on-the-fly)
-        if ($fileName === 'current_database_backup.sql' || $fileName === 'database_current.sql') {
-            if (!function_exists('createDatabaseBackupPHP')) {
-                http_response_code(500);
-                die('Backup function not available');
+        if (!in_array($type, ['standard', 'laravel'], true)) $type = 'standard';
+
+        // The backup directory (relative to database_backup.php location = project root)
+        $backupDir = dirname(__DIR__) . '/database_backup'; // __DIR__ here is 'pages/', so dirname goes to root
+
+        // If a specific stored file was requested and it actually exists, stream it directly
+        if (!empty($fileName)) {
+            $filePath      = $backupDir . '/' . basename($fileName);
+            $realBackupDir = realpath($backupDir);
+            $realFilePath  = realpath($filePath);
+            if ($realFilePath && $realBackupDir && strpos($realFilePath, $realBackupDir) === 0
+                && file_exists($filePath) && filesize($filePath) > 0) {
+                $dlName = 'absen_db_' . ($type === 'laravel' ? 'laravel_' : 'backup_') . date('Y-m-d_His') . '.sql';
+                while (ob_get_level()) ob_end_clean();
+                header('Content-Type: application/octet-stream');
+                header('Content-Disposition: attachment; filename="' . $dlName . '"');
+                header('Content-Length: ' . filesize($filePath));
+                header('Cache-Control: no-cache, must-revalidate');
+                header('Pragma: public');
+                $h = fopen($filePath, 'rb');
+                if ($h) { while (!feof($h)) { echo fread($h, 65536); flush(); } fclose($h); }
+                else { readfile($filePath); }
+                exit;
             }
-            
-            $result = createDatabaseBackupPHP($pdo);
-            if (!$result['success']) {
-                http_response_code(500);
-                die('Failed to generate backup: ' . $result['message']);
-            }
-            
-            $filePath = $result['file'];
-            $downloadFileName = 'absen_db_backup_' . date('Y-m-d_His') . '.sql';
-            
-            // Set headers for file download
-            header('Content-Type: application/octet-stream');
-            header('Content-Disposition: attachment; filename="' . $downloadFileName . '"');
-            header('Content-Length: ' . filesize($filePath));
-            header('Cache-Control: must-revalidate');
-            header('Pragma: public');
-            
-            // Output file
-            readfile($filePath);
-            exit;
         }
-        
-        // Security: only allow files in backup directory, prevent directory traversal
-        $backupDir = __DIR__ . '/database_backup';
-        $filePath = $backupDir . '/' . basename($fileName);
-        
-        // Verify file is in backup directory
-        $realBackupDir = realpath($backupDir);
-        $realFilePath = realpath($filePath);
-        
-        if (!$realFilePath || ($realBackupDir && strpos($realFilePath, $realBackupDir) !== 0)) {
-            // If file doesn't exist in backup directory, try generating from database
-            if (!function_exists('createDatabaseBackupPHP')) {
-                http_response_code(404);
-                die('File not found');
-            }
-            
-            $result = createDatabaseBackupPHP($pdo);
-            if (!$result['success']) {
-                http_response_code(404);
-                die('File not found and failed to generate backup');
-            }
-            
-            $filePath = $result['file'];
-            $downloadFileName = basename($fileName);
-            
-            // Set headers for file download
-            header('Content-Type: application/octet-stream');
-            header('Content-Disposition: attachment; filename="' . $downloadFileName . '"');
-            header('Content-Length: ' . filesize($filePath));
-            header('Cache-Control: must-revalidate');
-            header('Pragma: public');
-            
-            // Output file
-            readfile($filePath);
-            exit;
+
+        // Generate the backup on-the-fly and stream
+        $genResult = createDatabaseBackupPHP($pdo, $type);
+        $tmpFile   = $backupDir . '/absen_db_backup' . ($type === 'laravel' ? '_laravel' : '') . '.sql';
+
+        if ((!($genResult['ok'] ?? false) && !($genResult['success'] ?? false)) || !file_exists($tmpFile) || filesize($tmpFile) === 0) {
+            http_response_code(500);
+            die('Gagal membuat backup: ' . ($genResult['message'] ?? 'Unknown error'));
         }
-        
-        if (!file_exists($filePath)) {
-            // File doesn't exist, generate from database
-            if (!function_exists('createDatabaseBackupPHP')) {
-                http_response_code(404);
-                die('File not found');
-            }
-            
-            $result = createDatabaseBackupPHP($pdo);
-            if (!$result['success']) {
-                http_response_code(404);
-                die('File not found and failed to generate backup');
-            }
-            
-            $filePath = $result['file'];
-            $downloadFileName = basename($fileName);
-            
-            // Set headers for file download
-            header('Content-Type: application/octet-stream');
-            header('Content-Disposition: attachment; filename="' . $downloadFileName . '"');
-            header('Content-Length: ' . filesize($filePath));
-            header('Cache-Control: must-revalidate');
-            header('Pragma: public');
-            
-            // Output file
-            readfile($filePath);
-            exit;
-        }
-        
-        // Set headers for file download
+
+        $dlName = 'absen_db_' . ($type === 'laravel' ? 'laravel_' : 'backup_') . date('Y-m-d_His') . '.sql';
+        while (ob_get_level()) ob_end_clean();
         header('Content-Type: application/octet-stream');
-        header('Content-Disposition: attachment; filename="' . basename($fileName) . '"');
-        header('Content-Length: ' . filesize($filePath));
-        header('Cache-Control: must-revalidate');
+        header('Content-Disposition: attachment; filename="' . $dlName . '"');
+        header('Content-Length: ' . filesize($tmpFile));
+        header('Cache-Control: no-cache, must-revalidate');
         header('Pragma: public');
-        
-        // Output file
-        readfile($filePath);
+        $h = fopen($tmpFile, 'rb');
+        if ($h) { while (!feof($h)) { echo fread($h, 65536); flush(); } fclose($h); }
+        else { readfile($tmpFile); }
         exit;
     }
+
+
+
 
 
     // Employee: submit izin/sakit for today

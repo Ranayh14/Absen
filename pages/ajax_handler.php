@@ -1217,7 +1217,7 @@ if (isset($_REQUEST['ajax'])) {
                 // Improved location validation with stricter radius for WFO (better accuracy)
                 $wfoLat = (float)getSetting($pdo, 'wfo_lat', '-6.9738');
                 $wfoLng = (float)getSetting($pdo, 'wfo_lng', '107.6300');
-                $wfoRadius = (int)getSetting($pdo, 'wfo_radius_m', '600'); // Reduced radius to 600m for stricter validation and better accuracy
+                $wfoRadius = (int)getSetting($pdo, 'wfo_radius_m', '50'); // GPS-primary: 50m for precise physical presence detection
                 
                 if ($lat !== null && $lng !== null) {
                     $earth = 6371000; // meters
@@ -1235,109 +1235,67 @@ if (isset($_REQUEST['ajax'])) {
                     error_log("WFO Distance Check - Distance: " . round($distance) . "m, Radius: {$wfoRadius}m, Inside: " . ($isInsideTelu ? 'Yes' : 'No'));
                 }
                 
-                // PRIORITAS MUTLAK: IP ADDRESS adalah validasi UTAMA (bukan WiFi, bukan GPS)
-                // Urutan validasi: 1. IP Address (private 10.x.x.x atau public via API), 2. WiFi (fallback), 3. GPS Location (fallback terakhir)
-                // Radius 200m hanya digunakan sebagai fallback jika IP dan WiFi tidak valid
+                // =========================================================
+                // WFO DETECTION: GPS-Primary (50m radius) — Most Precise
+                // =========================================================
+                // STRATEGY:
+                //   1. GPS within wfo_radius_m (recommended: 50m) → WFO
+                //      (Most precise - cannot be faked without being physically present)
+                //   2. Known Telkom University private IP subnet → WFO (fallback for indoor GPS drift)
+                //   3. WiFi SSID match → WFO (fallback for devices without GPS)
+                //   4. Public IP via API (org/ASN match) → WFO (secondary fallback)
+                //   5. All else → WFA (require reason)
+                //
+                // WHY NOT IP-PRIMARY: Home networks near campus commonly use 10.x.x.x
+                // private IP ranges, making IP-based detection unreliable for WFO.
+                // GPS with tight radius (50m) is the gold standard for physical presence.
                 
-                // Log semua data untuk debugging
-                error_log("=== WFO VALIDATION DEBUG ===");
-                error_log("WiFi SSID: " . ($wifiSSID ?: 'NOT DETECTED') . " (Raw: " . var_export($_POST['wifi_ssid'] ?? 'NOT IN POST', true) . ")");
-                error_log("Public IP: " . ($publicIp ?: 'NOT DETECTED'));
-                error_log("REMOTE_ADDR: " . ($_SERVER['REMOTE_ADDR'] ?? 'NOT SET'));
-                error_log("POST public_ip: " . ($_POST['public_ip'] ?? 'NOT IN POST'));
-                error_log("Location: " . ($lokasi ?: 'NOT DETECTED'));
-                error_log("GPS Lat: " . ($lat ?? 'NULL') . ", Lng: " . ($lng ?? 'NULL'));
-                error_log("GPS Accuracy: " . ($gpsAccuracy !== null ? round($gpsAccuracy) . 'm' : 'N/A'));
-                error_log("Distance: " . (isset($distance) ? round($distance) . 'm' : 'N/A') . ", Radius: {$wfoRadius}m");
-                error_log("Require WiFi: " . ($requireWifi ? 'YES' : 'NO'));
-                error_log("Is Valid WiFi: " . ($isValidWifi ? 'YES' : 'NO'));
+                $ketVal = 'wfa'; // Default
                 
-                $isInsideTeluByApi = false;
-                $ketVal = 'wfa'; // Default to WFA, akan diubah jika validasi berhasil
-                
-                // PRIORITAS 1: IP ADDRESS - Check IP validation FIRST (private atau public)
-                // Ini adalah validasi UTAMA berdasarkan IP Telkom University, bukan WiFi
-                // SKIP jika IP adalah localhost (127.0.0.1, ::1) - gunakan WiFi/GPS validation
-                $isLocalhost = ($publicIp === '127.0.0.1' || $publicIp === '::1' || strpos($publicIp, '127.') === 0);
-                
-                if (!empty($publicIp) && filter_var($publicIp, FILTER_VALIDATE_IP) && !$isLocalhost) {
-                    try {
-                        // Check both private IP range (10.x.x.x) and public IP API
-                        $isInsideTeluByApi = isWfoByApi($pdo, $publicIp);
-                        error_log("WFO IP Check - IP: $publicIp, Result: " . ($isInsideTeluByApi ? 'VALID (Telkom University IP)' : 'INVALID'));
-                        
-                        // CRITICAL: Jika IP valid (private 10.x.x.x atau public via API), langsung WFO
-                        // TIDAK perlu cek WiFi atau GPS - IP adalah prioritas mutlak
-                        if ($isInsideTeluByApi) {
-                            $ketVal = 'wfo';
-                            $isInsideTelu = true;
-                            error_log('✓ IP Address valid (Telkom University) - LANGSUNG SET WFO tanpa cek WiFi/GPS');
-                        }
-                    } catch (Exception $e) {
-                        error_log("WFO IP Check Error: " . $e->getMessage());
-                        $isInsideTeluByApi = false;
-                    }
-                } else {
-                    if ($isLocalhost) {
-                        error_log("WFO IP Check - Skipped (IP is localhost: $publicIp - will use WiFi/GPS validation)");
-                    } else {
-                        error_log("WFO IP Check - Skipped (IP: " . ($publicIp ?: 'EMPTY') . ")");
-                    }
-                }
-                
-                // PRIORITAS 2: WiFi - Hanya jika IP tidak valid (fallback)
-                // WiFi hanya digunakan sebagai fallback, bukan prioritas utama
-                // CRITICAL: WiFi validation harus bekerja bahkan jika IP tidak terdeteksi (localhost/::1)
-                if ($ketVal !== 'wfo') {
-                    $hasValidWifi = false;
-                    
-                    // Check WiFi SSID validation (even if IP is localhost/::1)
-                    if ($requireWifi && !empty($wifiSSID)) {
-                        $hasValidWifi = $isValidWifi;
-                        if ($hasValidWifi) {
-                            $ketVal = 'wfo';
-                            $isInsideTelu = true;
-                            error_log('✓ WiFi SSID valid (' . $wifiSSID . ') - set WFO (fallback karena IP tidak valid/localhost)');
-                        } else {
-                            error_log('✗ WiFi SSID tidak valid (' . $wifiSSID . ') - Valid SSIDs: ' . getSetting($pdo, 'wfo_wifi_ssids', ''));
-                        }
-                    } else if ($requireWifi && empty($wifiSSID)) {
-                        // WiFi SSID tidak terdeteksi (browser limitation pada laptop)
-                        // Cek apakah IP private Telkom University sebagai fallback
-                        if (!empty($publicIp) && filter_var($publicIp, FILTER_VALIDATE_IP) && isTelkomUniversityPrivateIp($publicIp)) {
-                            $ketVal = 'wfo';
-                            $isInsideTelu = true;
-                            error_log('✓ WiFi SSID tidak terdeteksi tapi IP private Telkom University (' . $publicIp . ') - set WFO');
-                        } else {
-                            error_log('✗ WiFi SSID tidak terdeteksi dan IP tidak valid (IP: ' . ($publicIp ?: 'EMPTY') . ')');
-                            // If WiFi is required but not detected and IP is invalid, we need WFA reason
-                            // But let GPS check happen first as fallback
-                        }
-                    } else if (!$requireWifi) {
-                        // WiFi tidak wajib - skip WiFi validation
-                        error_log('WiFi tidak wajib - skip WiFi validation');
-                    }
-                }
-                
-                // PRIORITAS 3: GPS Location - Hanya jika IP dan WiFi tidak valid (fallback terakhir)
-                // CRITICAL: Location string (lokasi) is NEVER used for validation - it's only for display
-                // Only GPS coordinates (lat/lng) and distance calculation are used for validation
-                // This prevents users from manipulating location string to bypass validation
-                if ($ketVal !== 'wfo' && $lat !== null && $lng !== null && isset($distance)) {
-                    // Use GPS distance check - accept if within configured radius
+                // ----- PRIORITY 1: GPS Radius (most reliable) -----
+                if ($lat !== null && $lng !== null && isset($distance)) {
                     if ($distance <= $wfoRadius) {
                         $ketVal = 'wfo';
-                        error_log('✓ GPS inside radius - set WFO berdasarkan GPS (fallback terakhir, distance: ' . round($distance) . 'm, radius: ' . $wfoRadius . 'm)');
+                        error_log('✓ GPS inside radius (' . round($distance) . 'm <= ' . $wfoRadius . 'm) → WFO');
                     } else {
-                        // GPS outside radius - require WFA
-                        $ketVal = 'wfa';
-                        error_log('✗ GPS outside radius - require WFA (distance: ' . round($distance) . 'm, radius: ' . $wfoRadius . 'm)');
+                        error_log('✗ GPS outside radius (' . round($distance) . 'm > ' . $wfoRadius . 'm) → need WFA');
                     }
-                } else if ($ketVal !== 'wfo') {
-                    // IP/WiFi invalid, GPS not available
-                    $ketVal = 'wfa';
-                    error_log('✗ Semua validasi gagal - require WFA (IP: ' . ($publicIp ?: 'EMPTY') . ', WiFi: ' . ($wifiSSID ?: 'EMPTY') . ', GPS: ' . (($lat && $lng) ? 'OK' : 'MISSING') . ')');
                 }
+                
+                // ----- PRIORITY 2: Known TelU private subnet (indoor GPS drift fallback) -----
+                if ($ketVal !== 'wfo' && !empty($publicIp) && filter_var($publicIp, FILTER_VALIDATE_IP) && !$isLocalhost) {
+                    if (isTelkomUniversityPrivateIp($publicIp)) {
+                        $ketVal = 'wfo';
+                        error_log('✓ Known TelU private subnet (' . $publicIp . ') → WFO (GPS fallback)');
+                    }
+                }
+                
+                // ----- PRIORITY 3: WiFi SSID match -----
+                if ($ketVal !== 'wfo' && $requireWifi && $isValidWifi) {
+                    $ketVal = 'wfo';
+                    error_log('✓ Valid WiFi SSID (' . $wifiSSID . ') → WFO (WiFi fallback)');
+                }
+                
+                // ----- PRIORITY 4: Public IP via API (org/ASN) -----
+                if ($ketVal !== 'wfo' && !empty($publicIp) && filter_var($publicIp, FILTER_VALIDATE_IP) && !$isLocalhost) {
+                    $isPrivateIp = !filter_var($publicIp, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE);
+                    if (!$isPrivateIp) {
+                        try {
+                            $isInsideTeluByApi = isWfoByApi($pdo, $publicIp);
+                            if ($isInsideTeluByApi) {
+                                $ketVal = 'wfo';
+                                error_log('✓ Public IP API match (' . $publicIp . ') → WFO (API fallback)');
+                            } else {
+                                error_log('✗ Public IP not Telkom org (' . $publicIp . ')');
+                            }
+                        } catch (Exception $e) {
+                            error_log('WFO API check error: ' . $e->getMessage());
+                        }
+                    }
+                }
+                
+                error_log('=== WFO RESULT: ' . strtoupper($ketVal) . ' (GPS: ' . (isset($distance) ? round($distance) . 'm' : 'N/A') . ', Radius: ' . $wfoRadius . 'm, IP: ' . ($publicIp ?: 'N/A') . ')');
+                $isInsideTelu = ($ketVal === 'wfo');
                 
                 // Final check - jika bukan WFO, require alasan WFA
                 if ($ketVal === 'wfa') {
@@ -2345,16 +2303,18 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         jsonResponse(['ok' => true, 'data' => $backupInfo]);
     }
 
-    // Admin: create manual backup
+    // Admin: create manual backup (saves file to disk, updates list)
     if ($action === 'create_backup' && $_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!isAdmin()) jsonResponse(['error' => 'Forbidden'], 403);
         
-        if (!function_exists('createDatabaseBackup')) {
+        if (!function_exists('createDatabaseBackupPHP')) {
             jsonResponse(['ok' => false, 'message' => 'Backup functions not available']);
         }
         
-        $type = $_POST['type'] ?? 'standard';
-        $result = createDatabaseBackup($type);
+        $type = trim($_POST['type'] ?? $_REQUEST['type'] ?? 'standard');
+        if (!in_array($type, ['standard', 'laravel'], true)) $type = 'standard';
+        
+        $result = createDatabaseBackupPHP($pdo, $type);
         jsonResponse($result);
     }
 
@@ -2366,174 +2326,124 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         $files = [];
         $timezone = new DateTimeZone('Asia/Jakarta');
         
-        // Always add "Current Database" option (generated on-the-fly)
-        $currentTime = new DateTime('now', $timezone);
-        $files[] = [
-            'name' => 'current_database_backup.sql',
-            'size' => 0, // Will be calculated on download
-            'size_formatted' => 'Current Database',
-            'created' => $currentTime->format('Y-m-d H:i:s'),
-            'modified' => $currentTime->format('Y-m-d H:i:s'),
-            'is_current' => true,
-            'description' => 'Backup langsung dari database saat ini (selalu terbaru)'
-        ];
-        
         if (is_dir($backupDir)) {
             $items = scandir($backupDir);
             foreach ($items as $item) {
-                if ($item !== '.' && $item !== '..' && is_file($backupDir . '/' . $item)) {
+                if ($item !== '.' && $item !== '..' && is_file($backupDir . '/' . $item) && pathinfo($item, PATHINFO_EXTENSION) === 'sql') {
                     $filePath = $backupDir . '/' . $item;
                     $timestamp = filemtime($filePath);
                     
-                    // Convert timestamp to Asia/Jakarta timezone
                     $dateTime = new DateTime('@' . $timestamp);
                     $dateTime->setTimezone($timezone);
                     $formattedDate = $dateTime->format('Y-m-d H:i:s');
                     
+                    // Label the type for clarity
+                    $isLaravel = strpos($item, 'laravel') !== false;
+                    $typeLabel = $isLaravel ? '🟣 Laravel Compatible' : '🔵 Standard';
+                    
                     $files[] = [
-                        'name' => $item,
-                        'size' => filesize($filePath),
+                        'name'           => $item,
+                        'size'           => filesize($filePath),
                         'size_formatted' => function_exists('formatBytes') ? formatBytes(filesize($filePath)) : number_format(filesize($filePath) / 1024, 2) . ' KB',
-                        'created' => $formattedDate,
-                        'modified' => $formattedDate,
-                        'is_current' => false
+                        'created'        => $formattedDate,
+                        'modified'       => $formattedDate,
+                        'type_label'     => $typeLabel,
+                        'is_current'     => false
                     ];
                 }
             }
         }
         
-        // Sort by modified date (newest first), but keep current_database_backup.sql at top
+        // Sort by modified date (newest first)
         usort($files, function($a, $b) {
-            if (isset($a['is_current']) && $a['is_current']) return -1;
-            if (isset($b['is_current']) && $b['is_current']) return 1;
             return strtotime($b['modified']) - strtotime($a['modified']);
         });
         
         jsonResponse(['ok' => true, 'data' => $files]);
     }
 
-    // Admin: download backup file
+    // Admin: download backup — streams SQL directly to browser (generate on-the-fly)
     if ($action === 'download_backup' && $_SERVER['REQUEST_METHOD'] === 'GET') {
         if (!isAdmin()) {
             http_response_code(403);
             die('Forbidden');
         }
-        
+
+        @set_time_limit(0);
+        @ini_set('memory_limit', '1024M');
+
+        // Accept type via GET param OR infer from filename
+        $type = $_GET['type'] ?? '';
         $fileName = $_GET['file'] ?? '';
-        if (empty($fileName)) {
-            http_response_code(400);
-            die('File name required');
+
+        // Infer type from filename if not explicit
+        if (empty($type)) {
+            $type = (strpos($fileName, 'laravel') !== false) ? 'laravel' : 'standard';
         }
-        
-        // Special case: download current database backup (generate on-the-fly)
-        if ($fileName === 'current_database_backup.sql' || $fileName === 'database_current.sql') {
-            if (!function_exists('createDatabaseBackupPHP')) {
-                http_response_code(500);
-                die('Backup function not available');
-            }
-            
-            $result = createDatabaseBackupPHP($pdo);
-            if (!($result['ok'] ?? $result['success'] ?? false)) {
-                // Double check if message indicates success but flag is wrong
-                if (isset($result['message']) && strpos($result['message'], 'berhasil') !== false) {
-                    // It actually succeeded but flags were missing/wrong
-                } else {
-                    http_response_code(500);
-                    die('Failed to generate backup: ' . ($result['message'] ?? 'Unknown error'));
-                }
-            }
-            
-            $filePath = $result['file'];
-            $downloadFileName = 'absen_db_backup_' . date('Y-m-d_His') . '.sql';
-            
-            // Clear output buffer to save memory
-            while (ob_get_level()) ob_end_clean();
-            
-            // Set headers for file download
-            header('Content-Type: application/octet-stream');
-            header('Content-Disposition: attachment; filename="' . $downloadFileName . '"');
-            header('Content-Length: ' . filesize($filePath));
-            header('Cache-Control: must-revalidate');
-            header('Pragma: public');
-            
-            // Output file
-            readfile($filePath);
-            exit;
-        }
-        
-        // Security: only allow files in backup directory, prevent directory traversal
+        if (!in_array($type, ['standard', 'laravel'], true)) $type = 'standard';
+
         $backupDir = __DIR__ . '/database_backup';
-        $filePath = $backupDir . '/' . basename($fileName);
-        
-        // Verify file is in backup directory
-        $realBackupDir = realpath($backupDir);
-        $realFilePath = realpath($filePath);
-        
-        if (!$realFilePath || ($realBackupDir && strpos($realFilePath, $realBackupDir) !== 0)) {
-            // If file doesn't exist in backup directory, try generating from database
-            if (!function_exists('createDatabaseBackupPHP')) {
-                http_response_code(404);
-                die('File not found');
-            }
-            
-            $result = createDatabaseBackupPHP($pdo);
-            if (!($result['ok'] ?? $result['success'] ?? false)) {
-                if (isset($result['message']) && strpos($result['message'], 'berhasil') !== false) {
+
+        // If a specific stored file is requested and exists, stream it directly
+        if (!empty($fileName) && $fileName !== 'generate') {
+            $filePath = $backupDir . '/' . basename($fileName);
+            $realBackupDir = realpath($backupDir);
+            $realFilePath = realpath($filePath);
+
+            if ($realFilePath && $realBackupDir && strpos($realFilePath, $realBackupDir) === 0 && file_exists($filePath) && filesize($filePath) > 0) {
+                // Stream the stored file
+                $downloadName = 'absen_db_' . ($type === 'laravel' ? 'laravel_' : 'backup_') . date('Y-m-d_His') . '.sql';
+                while (ob_get_level()) ob_end_clean();
+                header('Content-Type: application/octet-stream');
+                header('Content-Disposition: attachment; filename="' . $downloadName . '"');
+                header('Content-Length: ' . filesize($filePath));
+                header('Cache-Control: no-cache, must-revalidate');
+                header('Pragma: public');
+                $handle = fopen($filePath, 'rb');
+                if ($handle) {
+                    while (!feof($handle)) { echo fread($handle, 65536); flush(); }
+                    fclose($handle);
                 } else {
-                    http_response_code(404);
-                    die('File not found and failed to generate backup: ' . ($result['message'] ?? 'Unknown error'));
+                    readfile($filePath);
                 }
+                exit;
             }
-            
-            $filePath = $result['file'];
-            $downloadFileName = basename($fileName);
-            
-            // Set headers for file download
-            header('Content-Type: application/octet-stream');
-            header('Content-Disposition: attachment; filename="' . $downloadFileName . '"');
-            header('Content-Length: ' . filesize($filePath));
-            header('Cache-Control: must-revalidate');
-            header('Pragma: public');
-            
-            // Output file
-            readfile($filePath);
-            exit;
         }
-        
-        if (!file_exists($filePath)) {
-            // File doesn't exist, generate from database
-            if (!function_exists('createDatabaseBackupPHP')) {
-                http_response_code(404);
-                die('File not found');
-            }
-            
-            $filePath = $result['file'];
-            $downloadFileName = basename($fileName);
-            
-            // Set headers for file download
-            header('Content-Type: application/octet-stream');
-            header('Content-Disposition: attachment; filename="' . $downloadFileName . '"');
-            header('Content-Length: ' . filesize($filePath));
-            header('Cache-Control: must-revalidate');
-            header('Pragma: public');
-            
-            // Output file
-            readfile($filePath);
-            exit;
+
+        // Fallback or direct generate: stream SQL directly without saving to disk
+        if (!function_exists('createDatabaseBackupPHP')) {
+            http_response_code(500);
+            die('Backup functions not available');
         }
-        
-        // Clear output buffer to save memory
+
+        // Generate to a temp file then stream it
+        $tmpFile = $backupDir . '/absen_db_backup' . ($type === 'laravel' ? '_laravel' : '') . '.sql';
+        $genResult = createDatabaseBackupPHP($pdo, $type);
+
+        if (!($genResult['ok'] ?? false) && !($genResult['success'] ?? false)) {
+            http_response_code(500);
+            die('Failed to generate backup: ' . ($genResult['message'] ?? 'Unknown error'));
+        }
+
+        if (!file_exists($tmpFile) || filesize($tmpFile) === 0) {
+            http_response_code(500);
+            die('Backup file empty after generation');
+        }
+
+        $downloadName = 'absen_db_' . ($type === 'laravel' ? 'laravel_' : 'backup_') . date('Y-m-d_His') . '.sql';
         while (ob_get_level()) ob_end_clean();
-        
-        // Set headers for file download
         header('Content-Type: application/octet-stream');
-        header('Content-Disposition: attachment; filename="' . basename($fileName) . '"');
-        header('Content-Length: ' . filesize($filePath));
-        header('Cache-Control: must-revalidate');
+        header('Content-Disposition: attachment; filename="' . $downloadName . '"');
+        header('Content-Length: ' . filesize($tmpFile));
+        header('Cache-Control: no-cache, must-revalidate');
         header('Pragma: public');
-        
-        // Output file
-        readfile($filePath);
+        $handle = fopen($tmpFile, 'rb');
+        if ($handle) {
+            while (!feof($handle)) { echo fread($handle, 65536); flush(); }
+            fclose($handle);
+        } else {
+            readfile($tmpFile);
+        }
         exit;
     }
 
@@ -4057,9 +3967,9 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
         } elseif ($type === 'late_attendance') {
             $fields = array_merge($fields, ['tanggal', 'jam_masuk', 'jam_pulang', 'bukti_presensi', 'lokasi_presensi', 'attendance_type', 'attendance_reason']);
             $values = array_merge($values, [':tanggal', ':jm', ':jp', ':bukti', ':lokasi', ':att_type', ':att_reason']);
-            $params[':tanggal'] = $_POST['tanggal'] ?? date('Y-m-d');
-            $params[':jm'] = $_POST['jam_masuk'] ?? null;
-            $params[':jp'] = $_POST['jam_pulang'] ?? null;
+            $params[':tanggal'] = !empty($_POST['tanggal']) ? $_POST['tanggal'] : date('Y-m-d');
+            $params[':jm'] = !empty($_POST['jam_masuk']) && $_POST['jam_masuk'] !== 'null' ? $_POST['jam_masuk'] : null;
+            $params[':jp'] = !empty($_POST['jam_pulang']) && $_POST['jam_pulang'] !== 'null' ? $_POST['jam_pulang'] : null;
             $params[':bukti'] = $_POST['bukti_presensi'] ?? null;
             $params[':lokasi'] = $_POST['lokasi_presensi'] ?? '';
             $params[':att_type'] = $_POST['attendance_type'] ?? 'wfo';
@@ -4092,7 +4002,7 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
                 "SELECT id, request_type, status, admin_note, created_at,
                         tanggal, jenis_izin, alasan_izin,
                         jam_masuk, jam_pulang, attendance_type,
-                        bug_description
+                        bug_description, is_read_by_user
                  FROM admin_help_requests
                  WHERE user_id = :uid
                  ORDER BY created_at DESC
@@ -4108,7 +4018,7 @@ if ($action === 'get_ultra_detailed_stats' && $_SERVER['REQUEST_METHOD'] === 'GE
                 $stmt2 = $pdo->prepare(
                     "SELECT id, request_type, status, admin_note, created_at,
                             tanggal, jenis_izin, alasan_izin,
-                            jam_masuk, jam_pulang, bug_description
+                            jam_masuk, jam_pulang, bug_description, is_read_by_user
                      FROM admin_help_requests
                      WHERE user_id = :uid
                      ORDER BY created_at DESC

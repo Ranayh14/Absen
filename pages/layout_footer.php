@@ -6102,8 +6102,8 @@ async function loadBackupFiles() {
                 listContainer.innerHTML = `
                     <div class="text-center text-gray-500 py-8">
                         <i class="fi fi-sr-database text-4xl mb-2"></i>
-                        <p>Tidak ada file backup tersedia</p>
-                        <p class="text-sm mt-2">Klik "Buat Backup Baru" untuk membuat backup pertama</p>
+                        <p class="font-medium">Belum ada file backup tersedia</p>
+                        <p class="text-sm mt-2">Pilih tipe backup lalu klik <strong>Buat Backup</strong> untuk generate file backup.</p>
                     </div>
                 `;
                 return;
@@ -6111,16 +6111,20 @@ async function loadBackupFiles() {
             
             let html = '<div class="space-y-2">';
             files.forEach(file => {
+                const typeLabel = file.type_label || '';
+                const typeBadge = typeLabel
+                    ? `<span class="ml-2 text-xs px-2 py-0.5 rounded-full font-medium ${typeLabel.includes('Laravel') ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'}">${typeLabel}</span>`
+                    : '';
                 html += `
                     <div class="flex items-center justify-between p-3 bg-gray-50 hover:bg-gray-100 rounded-lg border border-gray-200">
-                        <div class="flex-1">
-                            <div class="font-semibold text-gray-800">${file.name}</div>
+                        <div class="flex-1 min-w-0">
+                            <div class="font-semibold text-gray-800 truncate">${file.name}${typeBadge}</div>
                             <div class="text-sm text-gray-600 mt-1">
                                 <span class="mr-4"><i class="fi fi-sr-file"></i> ${file.size_formatted}</span>
                                 <span><i class="fi fi-sr-calendar"></i> ${file.modified}</span>
                             </div>
                         </div>
-                        <div>
+                        <div class="ml-3 flex-shrink-0">
                             <a href="?ajax=download_backup&file=${encodeURIComponent(file.name)}" 
                                class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition inline-flex items-center">
                                 <i class="fi fi-sr-download mr-2"></i> Download
@@ -6156,31 +6160,36 @@ qs('#btn-refresh-backup-list') && qs('#btn-refresh-backup-list').addEventListene
     loadBackupFiles();
 });
 
-// Create backup button handler
-qs('#btn-create-backup') && qs('#btn-create-backup').addEventListener('click', async () => {
-    showConfirmModal('Apakah Anda yakin ingin membuat backup database? Proses ini mungkin memakan waktu beberapa saat.', async () => {
-        const button = qs('#btn-create-backup');
-        const originalText = button.textContent;
-        button.textContent = 'Membuat Backup...';
-        button.disabled = true;
-        
-        try {
-            const r = await api('?ajax=create_backup', {});
-            if (r.ok) {
-                showNotif(r.message || 'Backup berhasil dibuat', true);
-                // Refresh list after successful backup
-                setTimeout(() => loadBackupFiles(), 500);
-            } else {
-                showNotif(r.message || 'Gagal membuat backup', false);
-            }
-        } catch (error) {
-            showNotif('Terjadi kesalahan saat membuat backup', false);
-            console.error('Error creating backup:', error);
-        } finally {
-            button.textContent = originalText;
-            button.disabled = false;
+// Create backup button handler — direct download with selected type
+qs('#btn-create-backup') && qs('#btn-create-backup').addEventListener('click', () => {
+    const type = qs('#backup-type')?.value || 'standard';
+    const typeLabel = type === 'laravel' ? 'Laravel Compatible' : 'Standard';
+    showConfirmModal(
+        `Buat dan download backup tipe ${typeLabel}? Proses ini membutuhkan beberapa saat.`,
+        () => {
+            const btn = qs('#btn-create-backup');
+            const orig = btn.innerHTML;
+            btn.innerHTML = '<i class="fi fi-sr-spinner animate-spin"></i> Generating...';
+            btn.disabled = true;
+
+            // Navigate to download URL — server generates and streams the file directly
+            const url = `?ajax=download_backup&type=${encodeURIComponent(type)}`;
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = '';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+
+            // Restore button after a short delay (download starts in background)
+            setTimeout(() => {
+                btn.innerHTML = orig;
+                btn.disabled = false;
+                // Refresh list so new file shows up
+                if (typeof loadBackupFiles === 'function') loadBackupFiles();
+            }, 3000);
         }
-    });
+    );
 });
 
 
@@ -8304,7 +8313,7 @@ async function renderSettings() {
             qs('#max-ontime-hour').value = formatTime(settings.max_ontime_hour?.value || '8');
             qs('#min-checkout-hour').value = formatTime(settings.min_checkout_hour?.value || '17');
             if(qs('#wfo-address')) qs('#wfo-address').value = settings.wfo_address?.value || '';
-            if(qs('#wfo-radius')) qs('#wfo-radius').value = settings.wfo_radius_m?.value || '1200';
+            if(qs('#wfo-radius')) qs('#wfo-radius').value = settings.wfo_radius_m?.value || '50';
             if(qs('#attendance-period-end')) qs('#attendance-period-end').value = settings.attendance_period_end?.value || '';
             if(qs('#kpi-late-penalty')) qs('#kpi-late-penalty').value = settings.kpi_late_penalty_per_minute?.value || '1';
             if(qs('#kpi-izin-sakit')) qs('#kpi-izin-sakit').value = settings.kpi_izin_sakit_score?.value || '85';
@@ -10324,7 +10333,8 @@ qs('#work-schedule-save') && qs('#work-schedule-save').addEventListener('click',
                             <i class="fi ${getStatusIcon(item.status)}"></i>
                             <span class="uppercase tracking-wider text-sm">${getRequestStatusLabel(item.status, item.request_type)}</span>
                         </div>
-                        <p class="text-xs opacity-75">${formatTimestamp(item.created_at)}</p>
+                        <p class="text-xs opacity-75 mb-1">Disubmit: ${formatTimestamp(item.created_at)}</p>
+                        ${item.tanggal ? `<p class="text-xs font-bold text-indigo-700 bg-white/50 inline-block px-2 py-1 rounded-md mt-1">Tanggal Request: ${formatDate(item.tanggal)}</p>` : ''}
                     </div>
                 </div>
             </div>
@@ -10441,6 +10451,10 @@ qs('#work-schedule-save') && qs('#work-schedule-save').addEventListener('click',
             `;
         } else if (item.request_type === 'late_attendance') {
             return `
+                <div class="mb-4">
+                    <p class="text-xs text-gray-400 mb-1">Tanggal Presensi</p>
+                    <p class="text-sm font-bold text-gray-800">${formatDate(item.tanggal)}</p>
+                </div>
                 <div class="grid grid-cols-2 gap-4">
                     <div>
                         <p class="text-xs text-gray-400 mb-1">Jam Masuk</p>

@@ -3264,8 +3264,8 @@ async function loadBackupFiles() {
                 listContainer.innerHTML = `
                     <div class="text-center text-gray-500 py-8">
                         <i class="fi fi-sr-database text-4xl mb-2"></i>
-                        <p>Tidak ada file backup tersedia</p>
-                        <p class="text-sm mt-2">Klik "Buat Backup Baru" untuk membuat backup pertama</p>
+                        <p class="font-medium">Belum ada file backup tersedia</p>
+                        <p class="text-sm mt-2">Pilih tipe backup lalu klik <strong>Buat Backup</strong> untuk generate file backup.</p>
                     </div>
                 `;
                 return;
@@ -3273,16 +3273,20 @@ async function loadBackupFiles() {
             
             let html = '<div class="space-y-2">';
             files.forEach(file => {
+                const typeLabel = file.type_label || '';
+                const typeBadge = typeLabel
+                    ? `<span class="ml-2 text-xs px-2 py-0.5 rounded-full font-medium ${typeLabel.includes('Laravel') ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'}">${typeLabel}</span>`
+                    : '';
                 html += `
                     <div class="flex items-center justify-between p-3 bg-gray-50 hover:bg-gray-100 rounded-lg border border-gray-200">
-                        <div class="flex-1">
-                            <div class="font-semibold text-gray-800">${file.name}</div>
+                        <div class="flex-1 min-w-0">
+                            <div class="font-semibold text-gray-800 truncate">${file.name}${typeBadge}</div>
                             <div class="text-sm text-gray-600 mt-1">
                                 <span class="mr-4"><i class="fi fi-sr-file"></i> ${file.size_formatted}</span>
                                 <span><i class="fi fi-sr-calendar"></i> ${file.modified}</span>
                             </div>
                         </div>
-                        <div>
+                        <div class="ml-3 flex-shrink-0">
                             <a href="?ajax=download_backup&file=${encodeURIComponent(file.name)}" 
                                class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition inline-flex items-center">
                                 <i class="fi fi-sr-download mr-2"></i> Download
@@ -3328,7 +3332,7 @@ qs('#btn-create-backup') && qs('#btn-create-backup').addEventListener('click', a
         
         try {
             const type = qs('#backup-type')?.value || 'standard';
-            const r = await api('?ajax=create_backup', { type });
+            const r = await api('?ajax=create_backup', { type }, { cache: false });
             if (r.ok) {
                 showNotif(r.message || 'Backup berhasil dibuat', true);
                 // Refresh list after successful backup
